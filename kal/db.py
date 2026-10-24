@@ -13,7 +13,7 @@ CREATE TABLE IF NOT EXISTS runs (id INTEGER PRIMARY KEY, ts REAL, kind TEXT, ok 
     message TEXT, duration REAL);
 CREATE TABLE IF NOT EXISTS signals (id INTEGER PRIMARY KEY, ts REAL, strategy TEXT, event TEXT,
     title TEXT, mode TEXT, guaranteed INTEGER, cost REAL, payout_min REAL, exp_profit REAL,
-    legs TEXT, status TEXT, note TEXT);
+    legs TEXT, status TEXT, note TEXT, meta TEXT);
 CREATE TABLE IF NOT EXISTS orders (id INTEGER PRIMARY KEY, ts REAL, signal_id INTEGER, strategy TEXT,
     ticker TEXT, side TEXT, count REAL, price REAL, filled REAL, status TEXT, order_id TEXT,
     client_order_id TEXT, error TEXT);

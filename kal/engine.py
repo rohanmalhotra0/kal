@@ -131,20 +131,23 @@ def _run(client, cfg, summary):
             continue
         for sig in signals:
             summary["signals"] += 1
-            if mode == "live":
-                ctx.budget_left = limits.budget_left
+            if mode == "live" and not sig.meta.get("paper_only"):
+                ctx.budget_left = live_limits.budget_left
                 sig = strat.recheck(ctx, sig)
                 if sig is None:
                     continue
+            # A strategy can keep an unproven idea (e.g. a newly discovered edge) on paper.
+            sig_mode = "paper" if sig.meta.get("paper_only") else mode
+            limits = live_limits if sig_mode == "live" else paper_limits
             reason = limits.refuse(sig)
-            sid = db.insert("signals", strategy=name, event=sig.event, title=sig.title, mode=mode,
+            sid = db.insert("signals", strategy=name, event=sig.event, title=sig.title, mode=sig_mode,
                             guaranteed=int(sig.guaranteed), cost=sig.cost, payout_min=sig.payout_min,
-                            exp_profit=sig.exp_profit, note=sig.note,
+                            exp_profit=sig.exp_profit, note=sig.note, meta=sig.meta,
                             legs=[leg.__dict__ for leg in sig.legs],
                             status=f"skipped: {reason}" if reason else "accepted")
             if reason:
                 continue
-            if mode == "paper":
+            if sig_mode == "paper":
                 paper.record(sig, sid)
                 limits.spend(sig)
                 summary["paper_trades"] += 1
@@ -159,4 +162,4 @@ def _run(client, cfg, summary):
                 db.execute("UPDATE signals SET status = ? WHERE id = ?",
                            "executed" if spent else "missed (no fill)", sid)
                 summary["live_trades"] += bool(spent)
-            held.update(leg.ticker for leg in sig.legs)
+            (held_live if sig_mode == "live" else held_paper).update(leg.ticker for leg in sig.legs)
