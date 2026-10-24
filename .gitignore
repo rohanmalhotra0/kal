@@ -1,9 +1,6 @@
 *.pem
 *.key
 .env
-trades.csv
+state/
 __pycache__/
-data/
-edges.json
-words.json
-arb_trades.csv
+*.pyc
