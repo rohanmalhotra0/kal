@@ -84,7 +84,7 @@ def daily_loss(cfg, equity):
         db.put("day_start", {"day": today, "equity": equity})
         return None
     loss = start["equity"] - equity
-    limit = cfg["daily_loss_limit"] * cfg["budget"]
+    limit = cfg["daily_loss_limit"] * max(cfg["budget"], start["equity"])
     if cfg["budget"] > 0 and loss > limit:
         return f"lost ${loss:.2f} today, over the ${limit:.2f} daily limit"
     return None

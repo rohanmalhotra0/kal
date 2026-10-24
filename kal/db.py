@@ -22,8 +22,8 @@ CREATE TABLE IF NOT EXISTS paper (id INTEGER PRIMARY KEY, ts REAL, signal_id INT
     settled INTEGER DEFAULT 0, result TEXT, pnl REAL, settled_ts REAL);
 CREATE TABLE IF NOT EXISTS equity (ts REAL, balance REAL, exposure REAL, equity REAL,
     paper_equity REAL);
-CREATE TABLE IF NOT EXISTS settlements (ticker TEXT, settled_ts REAL, result TEXT, revenue REAL,
-    cost REAL, pnl REAL, PRIMARY KEY (ticker, settled_ts));
+CREATE TABLE IF NOT EXISTS settlements (ticker TEXT PRIMARY KEY, settled_ts REAL, result TEXT,
+    revenue REAL, cost REAL, pnl REAL);
 CREATE TABLE IF NOT EXISTS backtests (id INTEGER PRIMARY KEY, ts REAL, kind TEXT, params TEXT,
     results TEXT);
 CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT);

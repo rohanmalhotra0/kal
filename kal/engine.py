@@ -10,7 +10,7 @@ import time
 import traceback
 import uuid
 
-from . import config, db, paper, risk
+from . import config, db, ledger, paper, risk
 from .client import Kalshi, fee, filled
 from .strategies import load_all
 from .strategies.base import Context
@@ -86,14 +86,18 @@ def run_once(client=None):
 
 def _run(client, cfg, summary):
     live = client.can_trade
-    positions, balance, exposure = [], 0.0, 0.0
+    positions, balance = [], 0.0
+    summary["settled"] = ledger.settle(client)
+    summary["paper_settled"] = paper.settle(client)
     if live:
         balance = client.balance()
         positions = client.positions()
-        exposure = sum(p["exposure"] for p in positions)
-        equity = balance + risk.mark_to_market(client, positions)
-        db.insert("equity", balance=balance, exposure=exposure, equity=equity, paper_equity=paper.equity(cfg))
+        equity = ledger.equity(client, cfg)
+        db.insert("equity", balance=balance, exposure=ledger.open_cost(), equity=equity,
+                  paper_equity=paper.equity(cfg))
         reason = risk.daily_loss(cfg, equity)
+        if not reason and cfg["budget"] > 0 and ledger.capital(cfg) < 1:
+            reason = f"the ${cfg['budget']:.2f} of capital is used up"
         if reason:
             config.trip(reason)
             summary["notes"].append(f"STOPPED: {reason}")
@@ -102,12 +106,13 @@ def _run(client, cfg, summary):
         db.insert("equity", balance=0, exposure=0, equity=0, paper_equity=paper.equity(cfg))
         summary["notes"].append("no API key: live strategies run as paper")
 
-    summary["paper_settled"] = paper.settle(client)
     research = research_outputs()
-    live_limits = risk.Limits(cfg, max(0.0, min(cfg["budget"] - exposure, balance - cfg["cash_floor"])))
+    # The bot's own ledger caps spending at its capital; the account balance and cash floor
+    # cap it again in case the account holds less than the ledger thinks.
+    live_limits = risk.Limits(cfg, max(0.0, min(ledger.available(cfg), balance - cfg["cash_floor"])))
     paper_limits = risk.Limits(cfg, paper.cash(cfg))
     held_live, held_paper = {p["ticker"] for p in positions}, paper.held()
-    bankroll = cfg["budget"] if cfg["budget"] > 0 else cfg["paper_bankroll"]
+    bankroll = ledger.capital(cfg) if cfg["budget"] > 0 else cfg["paper_bankroll"]
 
     for name, strat in load_all().items():
         params = cfg["strategies"].get(name, {})

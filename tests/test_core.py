@@ -23,7 +23,10 @@ def fake_with_arb(**kw):
     ev = arb_event()
     c.event_list = [ev, arb_event("EV2", exclusive=False)]
     for m in ev["markets"]:
-        c.books[m["ticker"]] = {"yes": [(float(m["yes_bid_dollars"]), 40)], "no": []}
+        b = float(m["yes_bid_dollars"])
+        c.books[m["ticker"]] = {"yes": [(b, 40)], "no": []}
+        c.market_info[m["ticker"]] = {"ticker": m["ticker"], "status": "active",
+                                      "yes_bid_dollars": f"{b:.4f}", "no_bid_dollars": f"{1 - b - 0.01:.4f}"}
     return c
 
 
@@ -165,7 +168,8 @@ class EngineTests(TempHome):
     def test_daily_loss_limit_trips(self):
         c = fake_with_arb()
         engine.run_once(c)
-        c._balance = 50  # equity fell $50 on a $60 budget
+        for m in c.market_info.values():
+            m["no_bid_dollars"] = "0.0000"  # the basket's NO legs are now worth nothing
         c.event_list = []
         engine.run_once(c)
         self.assertIn("daily limit", config.load()["disabled_reason"])
@@ -175,6 +179,55 @@ class EngineTests(TempHome):
             with self.assertRaises(risk.Locked):
                 with risk.run_lock():
                     pass
+
+
+class LedgerTests(TempHome):
+    def setUp(self):
+        super().setUp()
+        config.update({"enabled": True, "budget": 300,
+                       "strategies": {k: {"mode": "off"} for k in config.DEFAULTS["strategies"]}})
+
+    def _fill(self, ticker, side, n, p):
+        db.insert("orders", ticker=ticker, side=side, count=n, price=p, filled=n, status="executed")
+
+    def test_losses_shrink_capital_and_profits_compound(self):
+        from kal import ledger
+        c = FakeKalshi()
+        self._fill("A", "yes", 100, 0.90)
+        self.assertAlmostEqual(ledger.available(config.load()), 300 - 90 - client.fee(100, 0.9))
+        c.market_info["A"] = {"status": "settled", "result": "no"}
+        ledger.settle(c)
+        cfg = config.load()
+        self.assertAlmostEqual(ledger.capital(cfg), 300 - 90 - client.fee(100, 0.9))
+        self._fill("B", "no", 10, 0.50)
+        c.market_info["B"] = {"status": "settled", "result": "no"}
+        ledger.settle(c)
+        self.assertGreater(ledger.capital(cfg), 300 - 90 - client.fee(100, 0.9))
+        config.update({"reinvest_profits": False})
+        self.assertLess(ledger.capital(config.load()), 300)  # net loss still counts
+
+    def test_settles_once(self):
+        from kal import ledger
+        c = FakeKalshi()
+        self._fill("A", "yes", 10, 0.5)
+        c.market_info["A"] = {"status": "settled", "result": "yes"}
+        self.assertEqual(ledger.settle(c), 1)
+        self.assertEqual(ledger.settle(c), 0)
+        self.assertAlmostEqual(ledger.realized(), 10 - 5 - client.fee(10, 0.5))
+
+    def test_capital_used_up_trips(self):
+        c = FakeKalshi()
+        self._fill("A", "yes", 303, 0.99)
+        c.market_info["A"] = {"status": "settled", "result": "no"}
+        engine.run_once(c)
+        self.assertIn("used up", config.load()["disabled_reason"])
+
+    def test_bot_never_spends_past_capital_even_with_a_big_account(self):
+        config.update({"budget": 10, "strategies": {"basket_arb": {"mode": "live"}}})
+        c = fake_with_arb(balance=10_000)
+        engine.run_once(c)
+        spent = sum(r["filled"] * r["price"] for r in db.query("SELECT * FROM orders"))
+        self.assertLessEqual(spent, 10)
 
 
 class LimitsTests(unittest.TestCase):

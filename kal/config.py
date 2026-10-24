@@ -15,7 +15,8 @@ _lock = threading.Lock()
 DEFAULTS = {
     "enabled": False,            # master switch
     "env": "prod",               # "demo" trades Kalshi's fake-money exchange
-    "budget": 0.0,               # most dollars the bot may have tied up in positions
+    "budget": 0.0,               # capital given to the bot: the most it can ever lose in total
+    "reinvest_profits": True,    # let the bot trade its own winnings too
     "cash_floor": 0.0,           # never trade the balance below this
     "max_per_trade": 10.0,       # most a directional trade can lose
     "max_per_arb": 30.0,         # most a locked-in arbitrage basket can cost
