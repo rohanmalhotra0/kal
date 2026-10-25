@@ -1,4 +1,5 @@
 """Paper trading: same signals, simulated fills, real settlement results."""
+import json
 import logging
 import time
 
@@ -88,6 +89,21 @@ def open_cost():
 def peak_equity():
     rows = db.query("SELECT MAX(paper_equity) AS p FROM equity")
     return rows[0]["p"] if rows and rows[0]["p"] is not None else None
+
+
+def open_cost_by_kind():
+    """{meta paper_kind: open paper cost}, for kinds of signal that may hold only a share of
+    the paper money (see Signal meta "paper_share")."""
+    out = {}
+    for r in db.query("""SELECT p.cost, sg.meta FROM paper p JOIN signals sg ON sg.id = p.signal_id
+            WHERE p.settled = 0"""):
+        try:
+            kind = (json.loads(r["meta"] or "{}") or {}).get("paper_kind")
+        except (TypeError, ValueError, AttributeError):
+            continue
+        if kind:
+            out[kind] = out.get(kind, 0.0) + (r["cost"] or 0.0)
+    return out
 
 
 def open_directional():
