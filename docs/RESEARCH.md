@@ -104,10 +104,10 @@ status: **testing** (add the PR link), **built**, or **rejected** (say why in on
 - Risk: high. A NO at 95c loses 95c when the longshot hits.
 - Test: the backtest and 30 paper trades decide. Strict guards: spread 2c or less, real depth, within the tested hours of the scheduled close, $6 a market, 10% across one city or day.
 
-**14. Order book recorder** - untested (infrastructure)
-- What: save the order book of every market a strategy looks at, each run.
+**14. Order book recorder** - built (`kal/books.py`)
+- What: saves the top 5 levels of every order book a run reads, once per run, in its own `books.db` (not the money database, not in backups). 45 days kept, 300 MB at most.
 - Why: Kalshi has no history of depth. Without it, backtests assume we could fill. 4-8 weeks of saved books makes fill and slippage tests honest.
-- Risk: none to money. Watch disk use (cap it, prune after 60 days).
+- Next: once 4+ weeks are saved, test whether paper fills at our sizes were really there (`books.history(ticker)`).
 
 **15. What the research says not to build**
 - In-game sports momentum, economic-release tails, generic mention fading, parlays and combos (YES side), cross-venue arbitrage: about zero or negative after costs for a slow taker.

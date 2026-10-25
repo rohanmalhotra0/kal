@@ -12,7 +12,7 @@ import time
 import traceback
 import uuid
 
-from . import config, db, flow, gate, ledger, paper, risk, sizing
+from . import books, config, db, flow, gate, ledger, paper, risk, sizing
 from .client import Kalshi, KalshiError, UnknownSettlement, fee, filled, is_transient, resting
 from .strategies import load_all
 from .strategies.base import Context
@@ -33,6 +33,17 @@ class RunCache:
         self._client = client
         self._memo = {}
         self.calls = 0  # API list calls actually made (for tests and the run summary)
+        self.books_seen = {}  # ticker -> the first order book read this run (kal/books.py)
+
+    def orderbook(self, ticker):
+        book = self._client.orderbook(ticker)
+        self.books_seen.setdefault(ticker, book)
+        return book
+
+    def best_bid(self, ticker, side="yes"):
+        """Like the client's, but through orderbook() above, so the book is saved too."""
+        levels = self.orderbook(ticker)[side]
+        return levels[0] if levels else (0.0, 0.0)
 
     def __getattr__(self, name):
         attr = getattr(self._client, name)
@@ -249,7 +260,14 @@ def _still_on():
 
 
 def _run(client, cfg, summary):
-    client = RunCache(client)
+    cache = RunCache(client)
+    try:
+        return _trade(cache, cfg, summary)
+    finally:
+        summary["books_saved"] = books.save(cache.books_seen)
+
+
+def _trade(client, cfg, summary):
     status = client.exchange_status() if hasattr(client, "exchange_status") else {}
     if status and not status.get("trading_active", True):
         summary["skipped"] = "Kalshi is closed for trading right now (maintenance or off hours)"
