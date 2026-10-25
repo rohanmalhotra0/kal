@@ -2,6 +2,90 @@
 
 Newest first. Each 2-hour check-in adds one entry: what it checked, what it found, links.
 
+## 2026-10-25 16:00 UTC — where arbitrage could grow, measured on 14,640 open events
+
+- **Review of #12** (independent agent) found 2 real gaps. Both fixed with tests:
+  - a live edge with nothing busy to re-test it kept betting on its old numbers;
+  - the coverage guard couldn't see the busy filter.
+  Real data on the branch: 336 busy markets in the guard's 3 series (floor 25).
+  https://github.com/rohanmalhotra0/kal/pull/12#issuecomment-6399822048
+- **New #13:** the gate sends two $0.01 test orders, but 4 places said one. Text fixed; a test ties them together.
+  https://github.com/rohanmalhotra0/kal/pull/13
+- **Arbitrage shapes** (probe, no orders):
+  - Fees: only ~43 open events (0.3%) charge less than the bot assumes. Using each
+    series' real fee isn't worth a money-path change.
+  - "Before <date>" ladders (AGI by 2030 vs 2031, ski openings, Trump runs) exist, but
+    none was mispriced. Every apparent gap was a false pair: different cities or
+    people, or "as of" dates (a state, not a deadline).
+  - **2,257 one-winner events (40%) are skipped by basket_arb** for one standard clause:
+    "if the game is cancelled or not started within 48 hours, the market resolves to a
+    fair price". That is nearly every sports game and weather bracket. 5 had YES bids
+    adding to $1.01-1.02, too little after fees. A watch (run 40209367984) counts
+    real after-fee baskets there until ~20:10 UTC. A cancelled game settles at a price
+    Kalshi picks, so any change stays paper-only unless the owner says otherwise.
+- Running: arbitrage watch (live rules, to ~20:15), taker reruns at 1/6/24 h (~17:55),
+  LIP research (agent), #9's before/after check at 21:05.
+
+## 2026-10-25 14:50 UTC — check-in: weather test says the market knows more
+
+- Checked: CI green on main. No server yet, so no status report.
+- **Weather (idea #7), with the supervisor's fixes: rejected.** Kalshi's prices beat the
+  National Weather Service's NBM forecast in all 7 cities (Brier 0.095 vs 0.121). The
+  forecast is overconfident in the likeliest bracket. Every trading rule lost (YES about
+  -50%, NO -11% to -17%). The strike mapping checks out: every day's brackets cover
+  every degree once. https://github.com/rohanmalhotra0/kal/pull/11#issuecomment-6399095695
+- **Maker (idea #10), rerun with each series' real fee:** still no lead.
+  https://github.com/rohanmalhotra0/kal/pull/10#issuecomment-6399096100
+- Honest state: three real-data tests today (taker, maker, weather), no edge after fees.
+  The bot stays safe and mostly idle until one shows up. #9's check is at 21:05.
+
+## 2026-10-25 12:50 UTC — check-in: two real-data answers, both "no edge"
+
+- Checked: CI green on main, market-check green. No server yet, so no status report.
+- **Research with #9's fix priced 24,878 real markets** (main prices 904). No price
+  range has an edge after fees in any category. Best: NO at 95c+ with spreads of 2c or
+  less, +0.2% (worst case -2.7%). Idea #5 (NO where YES is over-bet): rejected for a
+  taker. https://github.com/rohanmalhotra0/kal/pull/9#issuecomment-6396866572
+- **Maker test: no lead, even in a maker's best case** (4,103 markets). Best: NO bids
+  at 90-95c, +2.3% (worst -20%). Not worth building resting orders now.
+  https://github.com/rohanmalhotra0/kal/pull/10#issuecomment-6397845896
+- Crypto prices 0 markets on purpose: its markets open 15-60 minutes before they
+  close, so a 6-hour test can't apply.
+- Honest state: no strategy beats fees yet. Turned on, the bot will mostly wait and
+  take only locked-in arbitrage, which is rare. The weather test (#11) is still running.
+
+## 2026-10-25 10:47 UTC — check-in: two new backtests, each attacked by a reviewer
+
+- Checked: CI and market-check green on main. No server yet, so no status report.
+- **Maker test (PR https://github.com/rohanmalhotra0/kal/pull/10):** do resting bids keep
+  the edge that buying at the ask gives away? A reviewer found ways it could fake an edge
+  (a big bid "filled" by one small trade; related series counted as separate tries).
+  Fixed: one-contract bids, a maker's best case, so a range that loses there loses at
+  any size. Real-data run in progress.
+- **Weather test (PR https://github.com/rohanmalhotra0/kal/pull/11):** do the National
+  Weather Service's NBM forecasts beat Kalshi's daily-high prices in 7 cities? A reviewer
+  found two leaks; both are fixed. A forecast run that started after the decision time
+  could be used. The usual volume filter dropped quiet markets, mostly losers, using
+  volume known only after settling. Real-data run in progress.
+- That volume filter is in the shared backtest too (main and #9). Fix after #9 merges.
+- Next: results posted on #10 and #11 by 13:00. #9's before/after check at 21:05.
+  No new PRs until #9 merges.
+
+## 2026-10-25 08:50 UTC — check-in: research fix in review (PR #9)
+
+- Checked: no server yet, so no status report. CI green on main (1ad9202). Real-market
+  check green (eccb8b3): self-test passed, 0 locked-in trades found, research 0 new edges.
+- Found: main's research is blind. Same settings on real data: 0 priced markets in all
+  12 categories (https://github.com/rohanmalhotra0/kal/actions/runs/40177134669).
+  Cause: #6's early-close rule; Kalshi marks every market as able to close early.
+- Fix: https://github.com/rohanmalhotra0/kal/pull/9. An independent review found a leak
+  in its first version (which markets got tested depended on when research ran); now
+  each market is timed from its own listed end. It also fixes a favorites cap bug that
+  is on main: one API error could add a bet past the day's 10% cap. 585 tests pass.
+- Waiting on: the coverage table (before #6 / after #6 / with #9), then a before/after
+  check of 6,851 markets recorded while open, after tonight's games. Then it merges.
+- Follow-up: markets that close after tonight get their before/after check later.
+
 ## 2026-10-25 07:55 UTC — all 8 PRs merged; research now tests almost nothing
 
 - Merged: https://github.com/rohanmalhotra0/kal/pull/6 (honest research),
