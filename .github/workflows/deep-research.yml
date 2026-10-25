@@ -1,0 +1,40 @@
+# Long backtest on real Kalshi history (public data only: no key, no orders).
+name: deep-research
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ["tools/deep_research.py", ".github/workflows/deep-research.yml"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deep-research
+  cancel-in-progress: true
+
+jobs:
+  research:
+    runs-on: ubuntu-latest
+    timeout-minutes: 200
+    env:
+      KAL_HOME: ./state
+      PYTHONUNBUFFERED: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: 6 hours before close
+        run: python tools/deep_research.py --hours 6 --series-per-category 10 --markets-per-series 150 --max-minutes 150
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: deep-research
+          path: |
+            state/research/*.json
+            state/cache/*.json
+          retention-days: 30
