@@ -46,5 +46,6 @@ def send(title, message, priority="default", tags=()):
         })
         return r.status_code < 300
     except Exception as e:
-        log.warning("alert not sent: %s", e)
+        # Only the kind of error: its text quotes the URL, and the URL holds the secret topic.
+        log.warning("alert not sent: %s", type(e).__name__)
         return False
