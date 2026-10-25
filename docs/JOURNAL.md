@@ -2,6 +2,23 @@
 
 Newest first. Each 2-hour check-in adds one entry: what it checked, what it found, links.
 
+## 2026-10-25 07:25 UTC — round 3 done: 5 PRs merged, 1 open
+
+- Merged: https://github.com/rohanmalhotra0/kal/pull/1 (fee guard),
+  https://github.com/rohanmalhotra0/kal/pull/2 (longshot fade, paper),
+  https://github.com/rohanmalhotra0/kal/pull/3 (money-path holes + chaos test),
+  https://github.com/rohanmalhotra0/kal/pull/4 (safe self-update, watchdog, SSH keys),
+  https://github.com/rohanmalhotra0/kal/pull/5 (setup and CLI traps, report health).
+  CI and market-check (real Kalshi API) green on main.
+- Open: https://github.com/rohanmalhotra0/kal/pull/6, research that can't fool itself:
+  hourly series count once per day (luck had passed the real-money test ~8x too often),
+  demo keeps its own research files, no early-close look-ahead in backtests, fees
+  rounded the real way, retired ideas remembered across rebuilds, research in its own
+  process (memory), retried after a restart. All stricter; no defaults changed.
+- Honest state: nothing has traded for real yet (no server). No strategy has a proven
+  edge after fees; only locked-in arbitrage is live by default. Expect break-even-ish
+  until the paper results say otherwise.
+
 ## 2026-10-25 06:50 UTC — check-in: three reviewers tried to break it; fixes
 
 - Checked: CI and market-check green on main. No server yet, so no status report.
