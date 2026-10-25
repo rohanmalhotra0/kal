@@ -132,6 +132,10 @@ class Favorites(Strategy):
             if not tight(ask, bid):
                 continue
             for e in edges:
+                # Only the side the edge was proven on. An edge with no side came from pooled
+                # YES+NO data, which can hide a losing side, so it's never traded.
+                if e.get("side") != side:
+                    continue
                 if e["lo"] <= ask < e["hi"] and near_tested_time(m, now, e["hours_before_close"]):
                     picks.append((side, e))
         if len({side for side, _ in picks}) != 1:

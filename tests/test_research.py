@@ -184,8 +184,10 @@ class DiscoverTests(TempHome):
         self.assertTrue(s["ok"], s)
         self.assertEqual(set(s["tested"]), {"FAV", "FAIR", "KXSAY"})
         edges = {e["id"]: e for e in discover.load_edges()}
-        self.assertIn("FAV:0.90-0.95", edges)
-        self.assertEqual(edges["FAV:0.90-0.95"]["status"], "candidate")
+        self.assertIn("FAV:yes:0.90-0.95", edges)  # the YES side won; the NO side didn't
+        self.assertEqual(edges["FAV:yes:0.90-0.95"]["status"], "candidate")
+        self.assertEqual(edges["FAV:yes:0.90-0.95"]["side"], "yes")
+        self.assertFalse([e for e in edges if e.startswith("FAV:no:")])
         self.assertFalse([e for e in edges if e.startswith("FAIR")])
         words = discover.load_words()
         self.assertEqual(words["series"], ["KXSAY"])
@@ -210,7 +212,7 @@ class DiscoverTests(TempHome):
         s = research.run_all(c)
         self.assertIn("boom", s["failed"]["BAD"])
         self.assertEqual(s["tested"], ["FAV"])
-        self.assertIn("FAV:0.90-0.95", s["new_edges"])
+        self.assertIn("FAV:yes:0.90-0.95", s["new_edges"])
         self.assertEqual(len(db.query("SELECT * FROM runs WHERE kind = 'research'")), 1)
 
     def test_named_series_and_quick_mode(self):
@@ -248,7 +250,9 @@ class DiscoverTests(TempHome):
 
 
 def save_edges(*edges):
-    discover.save_edges([{"id": e[0], "series": e[0].split(":")[0], "lo": 0.9, "hi": 0.95,
+    """Edges from (id, status[, roi_lo]). An id like SERIES:side:lo-hi carries its side."""
+    discover.save_edges([{"id": e[0], "series": e[0].split(":")[0],
+                          "side": e[0].split(":")[1] if e[0].count(":") == 2 else None, "lo": 0.9, "hi": 0.95,
                           "hours_before_close": 6.0, "roi": 0.05, "roi_lo": e[2] if len(e) > 2 else 0.02,
                           "trades": 300, "events": 300, "status": e[1]} for e in edges])
 
@@ -383,8 +387,9 @@ def book_for(c, m, depth=100):
 
 
 class FavoritesTests(TempHome):
-    EDGE = {"id": "FAV:0.90-0.95", "series": "FAV", "lo": 0.9, "hi": 0.95, "hours_before_close": 6.0,
-            "roi": 0.05, "roi_lo": 0.02, "trades": 300, "events": 300, "status": "candidate"}
+    EDGE = {"id": "FAV:yes:0.90-0.95", "series": "FAV", "side": "yes", "lo": 0.9, "hi": 0.95,
+            "hours_before_close": 6.0, "roi": 0.05, "roi_lo": 0.02, "trades": 300, "events": 300,
+            "status": "candidate"}
 
     def setUp(self):
         super().setUp()
@@ -412,7 +417,7 @@ class FavoritesTests(TempHome):
         p = (0.93 + fee_per_contract(0.93)) * 1.02
         self.assertEqual(leg.count, sizing.contracts(p, 0.93, 1000.0, 0.25, 10.0))
         self.assertLessEqual(sig.cost, 10.0)
-        self.assertEqual(sig.meta, {"edge": "FAV:0.90-0.95", "paper_only": True})
+        self.assertEqual(sig.meta, {"edge": "FAV:yes:0.90-0.95", "paper_only": True})
         self.assertAlmostEqual(sig.exp_profit, leg.count * p - sig.cost)
         live = dict(self.EDGE, status="live")
         self.assertFalse(favorites.STRATEGY.scan(ctx_for(self.c, {"edges": [live]}))[0].meta["paper_only"])
@@ -420,7 +425,7 @@ class FavoritesTests(TempHome):
     def test_no_side_and_limits(self):
         # 7c NO ask on a 93c favorite: an edge at 0.05-0.10 would buy NO. Not with ours.
         self.assertEqual(favorites.STRATEGY.scan(ctx_for(self.c, {"edges": [self.EDGE]}, held={"FAV-X-1"})), [])
-        no_edge = dict(self.EDGE, id="FAV:0.05-0.10", lo=0.05, hi=0.10)
+        no_edge = dict(self.EDGE, id="FAV:no:0.05-0.10", side="no", lo=0.05, hi=0.10)
         sig = favorites.STRATEGY.scan(ctx_for(self.c, {"edges": [no_edge]}))[0]
         self.assertEqual((sig.legs[0].side, sig.legs[0].price), ("no", 0.08))
         # Two edges that disagree about one market: stay out.
@@ -430,6 +435,16 @@ class FavoritesTests(TempHome):
         self.assertEqual(favorites.STRATEGY.scan(ctx_for(self.c, {"edges": [self.EDGE]}))[0].legs[0].count, 2)
         book_for(self.c, self.good)
         self.assertEqual(favorites.STRATEGY.scan(ctx_for(self.c, {"edges": [self.EDGE]}, budget=0.5)), [])
+
+    def test_edge_only_buys_its_own_side(self):
+        # A NO-side edge at 0.90-0.95 must never buy YES at 0.93, and a pooled edge with no
+        # side (it could hide a losing side) is never traded at all.
+        no_side = dict(self.EDGE, id="FAV:no:0.90-0.95", side="no")
+        self.assertEqual(favorites.STRATEGY.scan(ctx_for(self.c, {"edges": [no_side]})), [])
+        pooled = {k: v for k, v in self.EDGE.items() if k != "side"}
+        self.assertEqual(favorites.STRATEGY.scan(ctx_for(self.c, {"edges": [pooled]})), [])
+        sig = favorites.STRATEGY.scan(ctx_for(self.c, {"edges": [self.EDGE]}))[0]
+        self.assertEqual(sig.legs[0].side, "yes")
 
     def test_bad_or_retired_edges_are_ignored(self):
         for e in (dict(self.EDGE, status="retired"), dict(self.EDGE, roi_lo=None), {"id": "x"},
@@ -469,7 +484,7 @@ class FavoritesTests(TempHome):
         self.assertEqual(s["live_trades"], 1)
         self.assertEqual([o[:2] for o in self.c.orders], [("FAV-X-1", "yes")])
         meta = json.loads(db.query("SELECT meta FROM signals")[0]["meta"])
-        self.assertEqual(meta["edge"], "FAV:0.90-0.95")
+        self.assertEqual(meta["edge"], "FAV:yes:0.90-0.95")
 
     def test_engine_keeps_candidate_on_paper(self):
         s = self._engine("candidate")

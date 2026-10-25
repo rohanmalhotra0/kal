@@ -205,24 +205,32 @@ def buy_trades(o):
         yield round(1 - o["yes_bid"], 4), o["result"] == "no"
 
 
-def calibration(obs, max_spread=None):
+def calibration(obs, max_spread=None, by_side=False):
     """For each price range: if you bought every contract there, did you make money?
-    max_spread keeps only markets as tight as the live strategy would trade."""
-    z = z_for(len(BUCKETS) - 1)  # every bucket is a separate try at finding an edge
+    max_spread keeps only markets as tight as the live strategy would trade.
+
+    by_side splits YES buys from NO buys. Real Kalshi data shows they differ a lot at the
+    same price (YES favorites lost while NO favorites made money), so an edge found by
+    pooling the two could send a strategy to buy the losing side."""
+    sides = ("yes", "no") if by_side else (None,)
+    z = z_for(len(sides) * (len(BUCKETS) - 1))  # every bucket (and side) is a separate try
     trades = defaultdict(list)
     for o in obs:
         if max_spread is not None and not (0 < o["yes_bid"] and o["yes_ask"] - o["yes_bid"] <= max_spread + 1e-9):
             continue
-        for p, won in buy_trades(o):
+        for side, (p, won) in zip(("yes", "no"), buy_trades(o)):
             if 0.01 <= p <= 0.99:
-                trades[bucket_of(p)].append(trade(o["event"], p, won))
+                trades[(side if by_side else None, bucket_of(p))].append(trade(o["event"], p, won))
     rows = []
-    for b in sorted(trades):
-        t = trades[b]
+    for side, b in sorted(trades, key=lambda k: (k[0] or "", k[1])):
+        t = trades[(side, b)]
         roi, lo = roi_stats(t, z)
-        rows.append({"lo": BUCKETS[b], "hi": BUCKETS[b + 1], "trades": len(t),
-                     "events": len({x[0] for x in t}), "win_rate": sum(1 for x in t if x[2] > 0) / len(t),
-                     "roi": roi, "roi_lo": lo})
+        row = {"lo": BUCKETS[b], "hi": BUCKETS[b + 1], "trades": len(t),
+               "events": len({x[0] for x in t}), "win_rate": sum(1 for x in t if x[2] > 0) / len(t),
+               "roi": roi, "roi_lo": lo}
+        if by_side:
+            row["side"] = side
+        rows.append(row)
     return rows
 
 

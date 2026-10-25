@@ -155,8 +155,8 @@ def pick_series(tickers, edges, words, day, max_series, now):
 
 # ---------- merging results ----------
 
-def edge_id(series, lo, hi):
-    return f"{series}:{lo:.2f}-{hi:.2f}"
+def edge_id(series, lo, hi, side=None):
+    return f"{series}:{side}:{lo:.2f}-{hi:.2f}" if side else f"{series}:{lo:.2f}-{hi:.2f}"
 
 
 def merge_edges(edges, series, rows, hours, stamp):
@@ -167,7 +167,7 @@ def merge_edges(edges, series, rows, hours, stamp):
     by_id = {e["id"]: e for e in edges}
     seen = set()
     for r in rows:
-        eid = edge_id(series, r["lo"], r["hi"])
+        eid = edge_id(series, r["lo"], r["hi"], r.get("side"))
         e = by_id.get(eid)
         if e is not None and e.get("hours_before_close") != hours:
             continue  # tested at another decision time: not comparable
@@ -175,8 +175,9 @@ def merge_edges(edges, series, rows, hours, stamp):
         if backtest.is_edge(r):
             seen.add(eid)
             if e is None:
-                e = {"id": eid, "series": series, "lo": r["lo"], "hi": r["hi"], "hours_before_close": hours,
-                     "first_seen": stamp, "status": "candidate", "note": "new: trading on paper first"}
+                e = {"id": eid, "series": series, "side": r.get("side"), "lo": r["lo"], "hi": r["hi"],
+                     "hours_before_close": hours, "first_seen": stamp, "status": "candidate",
+                     "note": "new: trading on paper first"}
                 edges.append(e)
                 by_id[eid] = e
                 changes["new"].append(eid)
@@ -256,7 +257,7 @@ def run(client, cfg, quick=False, now=None, series=None):
         info = all_series.get(s, {"ticker": s})
         try:
             obs = backtest.load_observations(client, s, hours, max_markets=max_markets)
-            rows = backtest.calibration(obs, max_spread=favorites.MAX_SPREAD)
+            rows = backtest.calibration(obs, max_spread=favorites.MAX_SPREAD, by_side=True)
             changes = merge_edges(edges, s, rows, hours, stamp)
             backtest.record("calibration", {"series": s, "hours_before_close": hours, "max_markets": max_markets,
                                             "max_spread": favorites.MAX_SPREAD},
