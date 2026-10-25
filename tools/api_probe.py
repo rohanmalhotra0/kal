@@ -285,4 +285,21 @@ if busy:
         r = requests.get(BASE + path, params={"limit": 1}, timeout=30)
         show(f"cache {path}", {"code": r.status_code, "headers": {k: v for k, v in r.headers.items()
                                                                   if k.lower() in ("age", "cache-control", "x-cache")}})
+# ---- Fees per series and per event (the bot refuses fee rules it can't price)
+for path, params in (("/series/KXHIGHNY", {}), ("/series/INXD", {}), ("/series/NOSUCHSERIES", {}),
+                     ("/series/fee_changes", {}), ("/series/fee_changes", {"show_historical": "true"}),
+                     ("/events/fee_changes", {})):
+    code, d = get(path, **params)
+    show(f"fees {path} {params}", {"code": code, "body": d if not isinstance(d, dict) else {
+        k: (v if not isinstance(v, list) else {"n": len(v), "first": v[:3]}) for k, v in d.items()}}, limit=2500)
+fee_types = collections.Counter()
+for page_cursor in [None]:
+    code, d = get("/series", limit=1000)
+    for s_ in (d.get("series") or []) if isinstance(d, dict) else []:
+        fee_types[(s_.get("fee_type"), s_.get("fee_multiplier"))] += 1
+show("fee types on the first 1000 series", {str(k): v for k, v in fee_types.most_common()})
+markets_ps = collections.Counter(str(m.get("price_level_structure")) for e in events for m in e.get("markets") or [])
+show("price_level_structure on open markets", dict(markets_ps.most_common()))
+frac = collections.Counter(str(m.get("fractional_trading_enabled")) for e in events for m in e.get("markets") or [])
+show("fractional_trading_enabled on open markets", dict(frac.most_common()))
 sys.exit(0)
