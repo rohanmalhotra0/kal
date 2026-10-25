@@ -631,8 +631,9 @@ class PlainPayoutTests(unittest.TestCase):
     GAME = ("If the game is cancelled or rescheduled to over 48 hours away, the market will resolve to a "
             "fair price in accordance with the rules.")
     UNSTARTED = "If the game is not started within 48 hours, the market will resolve to a fair price."
-    TENNIS = ("In the event of a player injury, walkover, forfeiture, or any other cancellation (all before "
-              "the match starts), the market will resolve to a fair price in accordance with the rules.")
+    TENNIS = ("If the match does not occur (signaled by a ball being played) due to a player injury, walkover, "
+              "forfeiture, or any other cancellation (all before the match starts), the market will resolve to a "
+              "fair price in accordance with the rules.")
     WEATHER = ("If no data is available at the end of this period, all markets will resolve to the last fair "
                "price determined by Kalshi.")
     DEATH = ("In the event of death, the market will resolve to the last traded price prior to death, unless "
@@ -668,12 +669,32 @@ class PlainPayoutTests(unittest.TestCase):
         self.assertFalse(fair_price_only_if_cancelled([{
             "rules_primary": "If X wins, Yes. In the event of death the market resolves to the last traded price",
             "rules_secondary": self.GAME}]))
-        # The real variants (2026-10-25) still pass.
+        # The real variants (2026-10-25, a probe of every open one-winner event) still pass.
         for rule in ("If the game is cancelled or not started within 48 hours of its originally scheduled "
                      "start, all markets will resolve to a fair price.",
                      "If the game is cancelled or not started within 48 hours of its originally scheduled "
-                     "start, the market will resolve to a fair price."):
+                     "start, both markets will resolve to a fair price.",
+                     "If the race is cancelled, moved to a different circuit, or not started within 48 hours of "
+                     "its originally scheduled start, all markets will resolve to a fair price.",
+                     "If the qualifying session is cancelled, moved to a different circuit, or not started within "
+                     "48 hours of its originally scheduled start, all markets will resolve to a fair price.",
+                     "If the game is cancelled or not started within 2 days of its originally scheduled start, "
+                     "the market will resolve to a fair price.",
+                     "If the game is cancelled or rescheduled to over two days away, the market will resolve to a "
+                     "fair price in accordance with the rules.",
+                     "If the cancelled event is not played or is rescheduled further than two weeks out, the market "
+                     "will resolve to a fair price for each team in accordance with the rules.",
+                     "If the race is moved to a different circuit, rescheduled more than 48 hours later, or "
+                     "cancelled, all markets settle to a fair price."):
             self.assertTrue(fair_price_only_if_cancelled([{"rules_primary": "If X wins, Yes. " + rule}]), rule)
+        # Real wordings left out on purpose: they hang on other rules or say less than they seem to.
+        for rule in ("Otherwise, all markets settle to a fair price.",
+                     "If the relevant match or game is postponed and not completed within 48 hours of its "
+                     "originally scheduled start time, the market will resolve to the last fair price, subject to "
+                     "the postponement provisions of the Contract Rules.",
+                     "If interruption or cancellation without postponement or rescheduling leaves no winner, all "
+                     "markets resolve to the last fair price determined by the Exchange."):
+            self.assertFalse(fair_price_only_if_cancelled([{"rules_primary": rule}]), rule)
 
     def test_a_cancellation_clause_basket_is_found_but_kept_on_paper(self):
         from tests.test_core import fake_with_arb
