@@ -11,10 +11,10 @@ import unittest
 from datetime import datetime, timezone
 from unittest import mock
 
-from kal import config, db, engine, paper
+from kal import config, db, engine, paper, risk
 from kal.client import fee, price
 from kal.strategies import MODULES, basket_arb, bracket_arb, ladder_arb
-from kal.strategies.base import Context, Leg, plain_payouts
+from kal.strategies.base import Context, Leg, fair_price_only_if_cancelled, plain_payouts
 from tests.fakes import FakeKalshi
 from tests.helpers import TempHome, orders_proven
 
@@ -625,6 +625,100 @@ class PlainPayoutTests(unittest.TestCase):
         ctx = Context(c, dict(config.DEFAULTS, max_per_arb=30), "paper", 100, 100, set(), {}, {})
         self.assertEqual(len(basket_arb.STRATEGY.scan(ctx)), 1)
         c.event_list[0]["markets"][2]["rules_secondary"] = "settles at the last traded price before death"
+        self.assertEqual(basket_arb.STRATEGY.scan(ctx), [])
+
+    # Real wording (2026-10-25): games, tennis, weather. The clause blocked 2,257 events.
+    GAME = ("If the game is cancelled or rescheduled to over 48 hours away, the market will resolve to a "
+            "fair price in accordance with the rules.")
+    UNSTARTED = "If the game is not started within 48 hours, the market will resolve to a fair price."
+    TENNIS = ("If the match does not occur (signaled by a ball being played) due to a player injury, walkover, "
+              "forfeiture, or any other cancellation (all before the match starts), the market will resolve to a "
+              "fair price in accordance with the rules.")
+    WEATHER = ("If no data is available at the end of this period, all markets will resolve to the last fair "
+               "price determined by Kalshi.")
+    DEATH = ("In the event of death, the market will resolve to the last traded price prior to death, unless "
+             "such a price is not available.")
+
+    def test_a_fair_price_only_for_cancelled_games_is_told_apart(self):
+        for rule in (self.GAME, self.UNSTARTED, self.TENNIS, self.WEATHER):
+            markets = [{"rules_primary": "If Team A wins, the market resolves to Yes. " + rule}, {}]
+            self.assertFalse(plain_payouts(markets))
+            self.assertTrue(fair_price_only_if_cancelled(markets), rule)
+        self.assertFalse(fair_price_only_if_cancelled([{"rules_secondary": self.DEATH}]))
+        self.assertFalse(fair_price_only_if_cancelled([{"rules_primary": "the exchange may determine a Fair Value"}]))
+        self.assertFalse(fair_price_only_if_cancelled([{"rules_primary": self.GAME + " " + self.DEATH}]))
+        self.assertFalse(fair_price_only_if_cancelled([{"rules_primary": "If the game is cancelled. "
+                                                        "The market will resolve to a fair price."}]))
+        self.assertFalse(fair_price_only_if_cancelled([{"rules_primary": self.GAME, "settlement_bounds_type": "floor"}]))
+        self.assertFalse(fair_price_only_if_cancelled([{"rules_primary": self.GAME, "market_type": "scalar"}]))
+
+    def test_only_the_exact_cancellation_wordings_pass(self):
+        # Wordings an independent review showed slipping past a keyword check.
+        sneaky = [
+            "If the match is cancelled or a player dies, the market will resolve to the last traded price.",
+            "Kalshi may, at its sole discretion, cancel the market and resolve it to a fair price.",
+            "Even if the game is not cancelled, Kalshi may resolve the market to a fair price for any reason.",
+            self.GAME + "; in the event of death, the market will resolve to the last traded price",
+            self.GAME + "\nIn the event of death, the market will resolve to the last traded price",
+            "If a player is suspended by the league, the market will resolve to a fair price.",
+            self.GAME[:-1] + " unless Kalshi decides otherwise.",
+        ]
+        for rule in sneaky:
+            self.assertFalse(fair_price_only_if_cancelled([{"rules_primary": rule}]), rule)
+        # A death clause at the end of one field must not merge with the next field's clause.
+        self.assertFalse(fair_price_only_if_cancelled([{
+            "rules_primary": "If X wins, Yes. In the event of death the market resolves to the last traded price",
+            "rules_secondary": self.GAME}]))
+        # The real variants (2026-10-25, a probe of every open one-winner event) still pass.
+        for rule in ("If the game is cancelled or not started within 48 hours of its originally scheduled "
+                     "start, all markets will resolve to a fair price.",
+                     "If the game is cancelled or not started within 48 hours of its originally scheduled "
+                     "start, both markets will resolve to a fair price.",
+                     "If the race is cancelled, moved to a different circuit, or not started within 48 hours of "
+                     "its originally scheduled start, all markets will resolve to a fair price.",
+                     "If the qualifying session is cancelled, moved to a different circuit, or not started within "
+                     "48 hours of its originally scheduled start, all markets will resolve to a fair price.",
+                     "If the game is cancelled or not started within 2 days of its originally scheduled start, "
+                     "the market will resolve to a fair price.",
+                     "If the game is cancelled or rescheduled to over two days away, the market will resolve to a "
+                     "fair price in accordance with the rules.",
+                     "If the cancelled event is not played or is rescheduled further than two weeks out, the market "
+                     "will resolve to a fair price for each team in accordance with the rules.",
+                     "If the race is moved to a different circuit, rescheduled more than 48 hours later, or "
+                     "cancelled, all markets settle to a fair price."):
+            self.assertTrue(fair_price_only_if_cancelled([{"rules_primary": "If X wins, Yes. " + rule}]), rule)
+        # Real wordings left out on purpose: they hang on other rules or say less than they seem to.
+        for rule in ("Otherwise, all markets settle to a fair price.",
+                     "If the relevant match or game is postponed and not completed within 48 hours of its "
+                     "originally scheduled start time, the market will resolve to the last fair price, subject to "
+                     "the postponement provisions of the Contract Rules.",
+                     "If interruption or cancellation without postponement or rescheduling leaves no winner, all "
+                     "markets resolve to the last fair price determined by the Exchange."):
+            self.assertFalse(fair_price_only_if_cancelled([{"rules_primary": rule}]), rule)
+
+    def test_a_cancellation_clause_basket_is_found_but_kept_on_paper(self):
+        from tests.test_core import fake_with_arb
+        c = fake_with_arb()
+        ctx = Context(c, dict(config.DEFAULTS, max_per_arb=30), "live", 100, 100, set(), {}, {})
+        plain = basket_arb.STRATEGY.scan(ctx)
+        self.assertEqual(len(plain), 1)
+        self.assertFalse(plain[0].meta.get("paper_only"))       # no clause: locked in, may trade for real
+        for m in c.event_list[0]["markets"]:
+            m["rules_primary"] = "If this team wins, Yes. " + self.GAME
+        sigs = basket_arb.STRATEGY.scan(ctx)
+        self.assertEqual(len(sigs), 1)
+        s = sigs[0]
+        self.assertIs(s.meta["paper_only"], True)
+        self.assertIn("paper only", s.note)
+        # Not locked in: a bet with $0 as its worst case, sized and checked like one.
+        self.assertFalse(s.guaranteed)
+        self.assertEqual((s.payout_min, s.max_loss), (0.0, s.cost))
+        self.assertLessEqual(s.cost, config.DEFAULTS["max_per_trade"])
+        self.assertGreater(plain[0].cost, config.DEFAULTS["max_per_trade"])      # the plain one could use $30
+        self.assertGreater(s.meta["pays_if_played"], s.cost)
+        self.assertAlmostEqual(s.exp_profit, s.meta["pays_if_played"] - s.cost)
+        self.assertIsNone(risk.Limits(dict(config.DEFAULTS), 1000).refuse(s))  # passes the bet limits
+        c.event_list[0]["markets"][1]["rules_secondary"] = self.DEATH   # any other clause: skipped
         self.assertEqual(basket_arb.STRATEGY.scan(ctx), [])
 
     def test_ladder_skips_markets_with_payout_bounds(self):

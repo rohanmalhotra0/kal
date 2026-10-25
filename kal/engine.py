@@ -416,7 +416,7 @@ def _trade(client, cfg, summary):
         db.insert("equity", balance=0, exposure=0, equity=0, paper_equity=paper.equity(cfg))
         summary["notes"].append("no API key: live strategies run as paper")
 
-    # Real money waits until Kalshi has accepted one zero-risk test order for this key.
+    # Real money waits until Kalshi has accepted both zero-risk test orders for this key.
     wants_live = live and cfg["budget"] > 0 and any(
         (s or {}).get("mode") == "live" for s in cfg["strategies"].values())
     proven_orders = gate.passed(client, cfg["env"])
@@ -429,9 +429,9 @@ def _trade(client, cfg, summary):
                 summary["notes"].append(f"STOPPED: {detail}")
                 return
         if not proven_orders:
-            summary["notes"].append(f"real trading waits for the $0.01 test order: {detail}")
+            summary["notes"].append(f"real trading waits for the $0.01 test orders: {detail}")
             _alert_once("probe", "kal is trading on paper for now",
-                        f"Its $0.01 test order didn't pass yet: {detail}. It tries again every hour.")
+                        f"Its $0.01 test orders didn't pass yet: {detail}. It tries again every hour.")
 
     research = research_outputs()
     # The ledger caps spending at the bot's capital; the account balance and cash floor cap
@@ -442,6 +442,7 @@ def _trade(client, cfg, summary):
     paper_limits = risk.Limits(cfg, paper.cash(cfg), paper.open_by_event(), paper.open_directional(),
                                paper_capital)
     held_live, held_paper = {p["ticker"] for p in positions}, paper.held()
+    paper_kinds = paper.open_cost_by_kind()   # kinds that may hold only a share of paper money
 
     # Bet smaller after losses (Grossman-Zhou style); arbitrage sizing doesn't use this.
     live_peak = max(ledger.peak_equity() or 0, cfg["budget"])
@@ -459,14 +460,14 @@ def _trade(client, cfg, summary):
             ok, why = strat.proven(probe)
             if not (ok and live and cfg["budget"] > 0 and proven_orders):
                 why = (why if not ok else "no API key" if not live else "budget is $0" if cfg["budget"] <= 0
-                       else "the $0.01 test order hasn't passed")
+                       else "the $0.01 test orders haven't passed")
                 summary["notes"].append(f"{name}: paper instead of live ({why})")
                 mode = "paper"
         is_live = mode == "live"
         limits = live_limits if is_live else paper_limits
         ctx = Context(client, cfg, mode, limits.budget_left, live_bankroll if is_live else paper_bankroll,
                       held_live if is_live else held_paper, research, params,
-                      open_exposure=limits.directional_open)
+                      open_exposure=limits.directional_open, held_paper=frozenset(held_paper))
         try:
             signals = strat.scan(ctx)
         except Exception as e:
@@ -491,6 +492,10 @@ def _trade(client, cfg, summary):
                 reason = flow.veto(client, sig)  # paper too, so practice results match real ones
             if not reason:
                 reason = fees.check(client, sig)
+            kind, share = sig.meta.get("paper_kind"), sig.meta.get("paper_share")
+            if not reason and not sig_live and kind and share is not None:
+                if paper_kinds.get(kind, 0.0) + sig.cost > float(share) * paper_capital + 1e-9:
+                    reason = f"over its {float(share):.0%} share of the paper money"
             sid = db.insert("signals", strategy=name, event=sig.event, title=sig.title,
                             mode="live" if sig_live else "paper",
                             guaranteed=int(sig.guaranteed), cost=sig.cost, payout_min=sig.payout_min,
@@ -505,6 +510,8 @@ def _trade(client, cfg, summary):
                     continue  # a copy would count as a second win or loss and fool promotion
                 paper.record(sig, sid)
                 limits.spend(sig)
+                if kind:
+                    paper_kinds[kind] = paper_kinds.get(kind, 0.0) + sig.cost
                 summary["paper_trades"] += 1
                 held_paper.update(leg.ticker for leg in sig.legs)
                 continue

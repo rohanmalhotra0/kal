@@ -6,10 +6,11 @@ finds nothing, or worse, misreads a price. These checks catch that early.
 
 run() never raises. Every problem becomes a row with ok=False.
 
-The order probe (only with a key, only when asked) sends one real order: an
-immediate-or-cancel buy of 1 YES at $0.01 in a market whose YES ask is $0.10 or
-more. Nobody is selling that low, so it can't fill. If Kalshi accepts the order and
-fills 0, our order format works, at zero risk.
+The order probe (only with a key, only when asked) sends two real orders, both
+immediate-or-cancel, in one busy market: buy 1 YES at $0.01 where the YES ask is $0.10
+or more, and buy 1 NO at $0.01 where the YES bid is $0.90 or less. Nobody trades that
+far off, so neither can fill. If Kalshi accepts both and fills 0, our order format
+works, at zero risk.
 
 The clock check compares this machine's clock with Kalshi's: Kalshi refuses signed
 requests with a wrong timestamp, so a bad clock would make orders fail.
@@ -211,7 +212,7 @@ class _Checks:
         return True, f"{len(ps)} open positions"
 
     def order_probe(self):
-        """One IOC buy of 1 YES at $0.01 where the YES ask is far higher. Never a second order.
+        """Two IOC buys at $0.01, 1 YES then 1 NO, where the price is far off. Never more.
         The same test the engine runs before real money (kal/gate.py), so a pass here also
         unlocks real trading for this key and exchange, and a fill or a resting order stops it."""
         if not self.c.can_trade:
