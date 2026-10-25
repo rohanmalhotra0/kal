@@ -116,6 +116,48 @@ def main():
         print(f"  {s}: {len(v)} events, e.g. " + " | ".join(
             f"{(e.get('title') or '')[:50]} (closes {m.get('close_time')}, bid {price(m, 'yes_bid')}, ask {price(m, 'yes_ask')})"
             for _, e, m in v[:3]))
+    # One-winner events: why plain_payouts says no, and whether any shows a gap at all.
+    from kal.strategies.base import FAIR_PRICE_WORDS
+    why, gap_plain, gap_not, clauses, samples = collections.Counter(), 0, 0, collections.Counter(), []
+    for ev in events:
+        if not ev.get("mutually_exclusive") or (ev.get("event_ticker") or "").startswith("KXMVE"):
+            continue
+        ms = [m for m in ev.get("markets") or [] if m.get("status", "active") in ("active", "open")]
+        if len(ms) < 2:
+            continue
+        total = sum(price(m, "yes_bid") for m in ms)
+        if plain_payouts(ms):
+            gap_plain += total > 1
+            continue
+        gap_not += total > 1
+        reasons = set()
+        for m in ms:
+            if m.get("market_type", "binary") != "binary":
+                reasons.add(f"market_type {m.get('market_type')}")
+            if m.get("settlement_bounds_type", "default") != "default":
+                reasons.add(f"settlement_bounds_type {m.get('settlement_bounds_type')}")
+            rules = f"{m.get('rules_primary') or ''} {m.get('rules_secondary') or ''}"
+            low = rules.lower()
+            for w in FAIR_PRICE_WORDS:
+                i = low.find(w)
+                if i >= 0:
+                    reasons.add(f"rules say '{w}'")
+                    clauses[rules[max(0, i - 120):i + 60].strip()] += 1
+        for r in reasons:
+            why[r] += 1
+        if total > 1 and len(samples) < 8:
+            samples.append({"event": ev.get("event_ticker"), "title": (ev.get("title") or "")[:70],
+                            "markets": len(ms), "yes_bids_add_to": round(total, 3), "why": sorted(reasons)})
+    print(f"\nOne-winner events with plain payouts and YES bids over $1 (before books and fees): {gap_plain}")
+    print(f"One-winner events skipped for payouts, with YES bids over $1: {gap_not}")
+    print("Why skipped (events):")
+    for r, n in why.most_common():
+        print(f"  {n:6}  {r}")
+    print("Most common fair-price clauses (markets):")
+    for cl, n in clauses.most_common(6):
+        print(f"  {n:6}  ...{cl}...")
+    for x in samples:
+        print("  GAP " + json.dumps(x))
     print(f"\ndone in {time.time() - t0:.0f}s")
 
 
