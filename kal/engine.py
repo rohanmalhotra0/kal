@@ -12,7 +12,7 @@ import time
 import traceback
 import uuid
 
-from . import config, db, ledger, paper, risk, sizing
+from . import config, db, gate, ledger, paper, risk, sizing
 from .client import Kalshi, KalshiError, UnknownSettlement, fee, filled, is_transient, resting
 from .strategies import load_all
 from .strategies.base import Context
@@ -116,6 +116,8 @@ def execute(client, sig, signal_id):
                 db.execute("UPDATE orders SET status = 'unknown', error = ? WHERE id = ?", str(e)[:500], oid)
                 raise OrderUnknown(f"{leg.ticker}: {e}") from e
             db.execute("UPDATE orders SET status = 'rejected', error = ? WHERE id = ?", str(e)[:500], oid)
+            if not is_transient(e):
+                gate.clear(f"Kalshi refused an order: {e}")  # re-prove the format on the next run
             if i == 0:
                 raise
             raise LegFailed(f"leg {i + 1}/{len(sig.legs)} {leg.ticker} rejected after earlier legs filled: {e}")
@@ -222,6 +224,19 @@ def _maybe_alert_outage(e):
             log.warning("outage alert failed", exc_info=True)
 
 
+def _alert_once(key, title, message, every=86400):
+    """A phone alert at most once a day per kind."""
+    last = (db.get("alerted") or {}).get(key, 0)
+    if time.time() - last < every:
+        return
+    db.put("alerted", {**(db.get("alerted") or {}), key: time.time()})
+    try:
+        from . import notify
+        notify.send(title, message, priority="high", tags=("warning",))
+    except Exception:
+        log.warning("alert failed", exc_info=True)
+
+
 def _count_error(cfg, e):
     errors = (db.get("consecutive_errors", 0) or 0) + 1
     db.put("consecutive_errors", errors)
@@ -277,6 +292,23 @@ def _run(client, cfg, summary):
         db.insert("equity", balance=0, exposure=0, equity=0, paper_equity=paper.equity(cfg))
         summary["notes"].append("no API key: live strategies run as paper")
 
+    # Real money waits until Kalshi has accepted one zero-risk test order for this key.
+    wants_live = live and cfg["budget"] > 0 and any(
+        (s or {}).get("mode") == "live" for s in cfg["strategies"].values())
+    proven_orders = gate.passed(client, cfg["env"])
+    if wants_live and not proven_orders:
+        detail = gate.status().get("detail", "")
+        if gate.due(client, cfg["env"]):
+            proven_orders, detail = gate.probe(client, cfg["env"])
+            summary["order_probe"] = detail
+            if not config.load()["enabled"]:
+                summary["notes"].append(f"STOPPED: {detail}")
+                return
+        if not proven_orders:
+            summary["notes"].append(f"real trading waits for the $0.01 test order: {detail}")
+            _alert_once("probe", "kal is trading on paper for now",
+                        f"Its $0.01 test order didn't pass yet: {detail}. It tries again every hour.")
+
     research = research_outputs()
     # The ledger caps spending at the bot's capital; the account balance and cash floor cap
     # it again in case the account holds less. A $0 budget means no real trades at all.
@@ -301,9 +333,10 @@ def _run(client, cfg, summary):
         probe = Context(client, cfg, mode, 0, paper_bankroll, set(), research, params)
         if mode == "live":
             ok, why = strat.proven(probe)
-            if not (ok and live and cfg["budget"] > 0):
-                summary["notes"].append(f"{name}: paper instead of live "
-                                        f"({why if not ok else 'no API key' if not live else 'budget is $0'})")
+            if not (ok and live and cfg["budget"] > 0 and proven_orders):
+                why = (why if not ok else "no API key" if not live else "budget is $0" if cfg["budget"] <= 0
+                       else "the $0.01 test order hasn't passed")
+                summary["notes"].append(f"{name}: paper instead of live ({why})")
                 mode = "paper"
         is_live = mode == "live"
         limits = live_limits if is_live else paper_limits

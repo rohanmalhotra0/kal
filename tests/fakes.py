@@ -14,6 +14,8 @@ class _OrderLog(list):
 
 
 class FakeKalshi:
+    key_id = "test-key"
+
     def __init__(self, can_trade=True, balance=100.0):
         self.can_trade = can_trade
         self._balance = balance

@@ -16,7 +16,7 @@ from kal.client import fee, price
 from kal.strategies import MODULES, bracket_arb, ladder_arb
 from kal.strategies.base import Context, Leg
 from tests.fakes import FakeKalshi
-from tests.helpers import TempHome
+from tests.helpers import TempHome, orders_proven
 
 FUTURE = datetime.fromtimestamp(time.time() + 3 * 86400, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 UP, DOWN = ladder_arb.UP, ladder_arb.DOWN
@@ -479,6 +479,7 @@ class EngineTests(TempHome):
         super().setUp()
         config.update({"enabled": True, "budget": 60, "max_per_arb": 30,
                        "strategies": {k: {"mode": "off"} for k in config.DEFAULTS["strategies"]}})
+        orders_proven()
         # Only our two strategies, so another module being edited can't break these tests.
         mine = {"ladder_arb": ladder_arb.STRATEGY, "bracket_arb": bracket_arb.STRATEGY}
         patcher = mock.patch.object(engine, "load_all", lambda: mine)

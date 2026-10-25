@@ -8,7 +8,7 @@ from kal import client, config, db, engine, paper, risk, sizing
 from kal.strategies import basket_arb
 from kal.strategies.base import Context, Leg, Signal
 from tests.fakes import FakeKalshi
-from tests.helpers import TempHome
+from tests.helpers import TempHome, orders_proven
 
 
 SOON = __import__("datetime").datetime.fromtimestamp(
@@ -175,6 +175,7 @@ class EngineTests(TempHome):
         config.update({"enabled": True, "budget": 60, "max_per_arb": 30,
                        "strategies": {k: {"mode": "off"} for k in config.DEFAULTS["strategies"]}})
         config.update({"strategies": {"basket_arb": {"mode": "live"}}})
+        orders_proven()
 
     def test_off_does_nothing(self):
         config.update({"enabled": False})
@@ -408,6 +409,7 @@ class NotifyTests(TempHome):
         config.update({"enabled": True, "budget": 60,
                        "strategies": {k: {"mode": "off"} for k in config.DEFAULTS["strategies"]}})
         config.update({"strategies": {"basket_arb": {"mode": "live"}}})
+        orders_proven()
         with mock.patch.object(notify.requests, "post") as post:
             engine.run_once(fake_with_arb())
         self.assertIn("real trade", post.call_args.kwargs["headers"]["Title"])

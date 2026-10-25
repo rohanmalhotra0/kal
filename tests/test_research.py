@@ -14,7 +14,7 @@ from kal.strategies import favorites, mentions
 from kal.strategies.base import Context
 from kal import sizing
 from tests.fakes import FakeKalshi
-from tests.helpers import TempHome
+from tests.helpers import TempHome, orders_proven
 
 T0 = 1_760_000_000
 NOW = T0 + 400 * 86400
@@ -474,6 +474,7 @@ class FavoritesTests(TempHome):
         config.update({"enabled": True, "budget": 50,
                        "strategies": {k: {"mode": "off"} for k in config.DEFAULTS["strategies"]}})
         config.update({"strategies": {"favorites": {"mode": "live"}}})
+        orders_proven()
         save_edges((self.EDGE["id"], status))
         with mock.patch.object(engine, "load_all", return_value={"favorites": favorites.STRATEGY}):
             return engine.run_once(self.c)

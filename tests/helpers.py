@@ -4,6 +4,14 @@ import tempfile
 import unittest
 
 
+def orders_proven(env="prod"):
+    """Mark the $0.01 test order as passed for the fake client's key (tests/test_gate.py
+    covers the probe itself), so engine tests can trade live."""
+    from kal import gate
+    from tests.fakes import FakeKalshi
+    gate.record(FakeKalshi(), env, True, "test order passed")
+
+
 class TempHome(unittest.TestCase):
     """Gives each test its own empty KAL_HOME."""
 

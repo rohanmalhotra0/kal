@@ -71,6 +71,10 @@ tests/            unittest; tests/fakes.py has FakeKalshi, tests/helpers.py has 
 - An order whose reply was lost is marked `unknown`; the next run looks it up on
   Kalshi (by client_order_id) before trading. Can't tell yet -> no live trading.
 - An order left resting -> cancelled, and the bot trips.
+- No real money until Kalshi accepts one $0.01 test order (`kal/gate.py`): buy 1 YES,
+  immediate-or-cancel, where the cheapest seller asks $0.10+, so it can't fill. Needed
+  again for a new key or exchange, or after Kalshi refuses any order. Until it passes,
+  live strategies trade on paper; a failed try waits an hour. If it fills or rests -> trip.
 - OFF is re-checked before every live order, and works even with a bad config file.
 - Kalshi closed (maintenance) -> run skipped. Network errors, 5xx and 429 never count
   toward the error trip (nothing can be bought then); 6+ hours of that sends one alert.
