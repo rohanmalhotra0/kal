@@ -114,7 +114,7 @@ def order_test(cfg, key_id):
     """The $0.01 test order that real money waits for (kal/gate.py): has it passed for this
     key and exchange? A pass for another key or exchange doesn't count."""
     rec = gate.status()
-    ok = bool(rec.get("ok")) and key_id is not None and rec.get("fingerprint") == gate.fingerprint(key_id, cfg["env"])
+    ok = gate.passed_for(key_id, cfg["env"])
     return {"passed": ok, "detail": str(rec.get("detail") or "")[:200], "ts": _float(rec.get("ts")) or None}
 
 

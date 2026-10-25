@@ -272,7 +272,7 @@ def run(input_fn=input, print_fn=print, selftest_fn=None, balance_fn=None, inter
         say("", f"Not changed: {e}")
         return end(1)
 
-    say("", "Testing your key with Kalshi (one $0.01 order that can't fill)...")
+    say("", "Testing your key with Kalshi (two $0.01 orders that can't fill)...")
     if selftest_fn is None:
         from .selftest import run as selftest_fn
     rows = selftest_fn(order_probe=True)

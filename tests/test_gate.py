@@ -38,12 +38,48 @@ class GateTests(TempHome):
         c = fake_with_probe_market()
         s = engine.run_once(c)
         self.assertTrue(s["ok"], s)
-        self.assertEqual(self.probes(c), [(BUSY, "yes", 1, 0.01)])
-        self.assertEqual(c.orders[0][0], BUSY)  # the test order goes before any real one
+        # Both order shapes real trades use: a YES bid, and a NO buy (an ask on the YES book).
+        self.assertEqual(self.probes(c), [(BUSY, "yes", 1, 0.01), (BUSY, "no", 1, 0.01)])
+        self.assertEqual([o[0] for o in c.orders[:2]], [BUSY, BUSY])  # tests go before any real order
         self.assertEqual(s["live_trades"], 1)
         self.assertTrue(gate.passed(c, "prod"))
         engine.run_once(c)
-        self.assertEqual(len(self.probes(c)), 1)  # proven once per key, not every run
+        self.assertEqual(len(self.probes(c)), 2)  # proven once per key, not every run
+
+    def test_a_refused_no_test_order_keeps_money_on_paper(self):
+        # Baskets buy NO. If Kalshi refuses that shape, real baskets would fail at their 2nd leg.
+        c = fake_with_probe_market()
+        real_buy = c.buy
+
+        def buy(ticker, side, count, limit_price, client_order_id=None):
+            if ticker == BUSY and side == "no":
+                c.orders.append((ticker, side, count, limit_price))
+                raise KalshiError("Order failed (400): bad side", 400)
+            return real_buy(ticker, side, count, limit_price, client_order_id)
+        c.buy = buy
+        s = engine.run_once(c)
+        self.assertEqual(s["live_trades"], 0)
+        self.assertEqual([o for o in c.orders if o[0] != BUSY], [])
+        self.assertFalse(gate.passed(c, "prod"))
+        self.assertIn("NO test order", gate.status()["detail"])
+        self.assertTrue(config.load()["enabled"])
+
+    def test_a_no_test_order_that_fills_stops_the_bot(self):
+        c = fake_with_probe_market()
+        c.fill = lambda t, side, n, p: n if (t != BUSY or side == "no") else 0
+        engine.run_once(c)
+        self.assertIn("NO test order", config.load()["disabled_reason"])
+        self.assertIn("FILLED", config.load()["disabled_reason"])
+        self.assertEqual([o for o in c.orders if o[0] != BUSY], [])
+
+    def test_the_no_test_needs_a_low_yes_bid(self):
+        # Our NO buy is an ask at $0.99: where someone bids YES at $0.95 it could fill.
+        c = fake_with_probe_market()
+        c.books[BUSY] = {"yes": [(0.95, 10)], "no": [(0.03, 10)]}
+        s = engine.run_once(c)
+        self.assertEqual(self.probes(c), [])
+        self.assertEqual(s["live_trades"], 0)
+        self.assertFalse(gate.passed(c, "prod"))
 
     def test_refused_test_order_keeps_money_on_paper_and_retries_hourly(self):
         c = fake_with_probe_market()
@@ -151,16 +187,19 @@ class GateTests(TempHome):
         other.key_id = self.REAL_ID[:-1] + "c"
         self.assertFalse(gate.passed(other, "prod"))   # one character off is another key
 
-    def test_a_pass_saved_before_the_hash_still_counts(self):
-        """Books from before this change say "prod:<key ID>". The owner mustn't be sent back
-        to paper by an upgrade, and the plain ID is rewritten as the hash."""
+    def test_an_old_pass_is_hashed_and_tested_again_for_no(self):
+        """Books from before these changes say "prod:<key ID>", and proved only the YES
+        shape. The plain ID is rewritten as the hash, and the next run sends both test
+        orders (they can't fill) before any real money."""
         c = fake_with_probe_market()
         c.key_id = self.REAL_ID
         db.put(gate.KEY, {"ok": True, "fingerprint": f"prod:{self.REAL_ID}", "detail": "accepted, 0 filled",
                           "ts": time.time() - 30 * 86400})
+        self.assertFalse(gate.passed(c, "prod"))
+        self.assertNotIn(self.REAL_ID, json.dumps(db.get(gate.KEY)))
         s = engine.run_once(c)
-        self.assertEqual(self.probes(c), [])           # no new test order
-        self.assertEqual(s["live_trades"], 1, s)       # real money, as before the upgrade
+        self.assertEqual(self.probes(c), [(BUSY, "yes", 1, 0.01), (BUSY, "no", 1, 0.01)])
+        self.assertEqual(s["live_trades"], 1, s)       # then real money, in the same run
         self.assertNotIn(self.REAL_ID, json.dumps(db.get(gate.KEY)))
         self.assertTrue(gate.passed(c, "prod"))
         self.assertFalse(gate.passed(c, "demo"))

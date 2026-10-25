@@ -85,10 +85,12 @@ tests/            unittest; tests/fakes.py has FakeKalshi, tests/helpers.py has 
 - Bets (never locked-in trades) are skipped when the last hour of public trades on that
   market went 70%+ the other way, or one big trade (5x the median, $50+) just did
   (`kal/flow.py`). Paper too, so practice matches real. Unreadable trades -> skip.
-- No real money until Kalshi accepts one $0.01 test order (`kal/gate.py`): buy 1 YES,
-  immediate-or-cancel, where the cheapest seller asks $0.10+, so it can't fill. Needed
-  again for a new key or exchange, or after Kalshi refuses any order. Until it passes,
-  live strategies trade on paper; a failed try waits an hour. If it fills or rests -> trip.
+- No real money until Kalshi accepts two $0.01 test orders (`kal/gate.py`), one per order
+  shape on its single YES book, both immediate-or-cancel so they can't fill: buy 1 YES (a
+  bid) where the cheapest seller asks $0.10+, and buy 1 NO (an ask at $0.99, the shape
+  baskets use) where the best YES buyer bids $0.90 or less. Needed again for a new key
+  or exchange, or after Kalshi refuses any order. Until it passes, live strategies trade
+  on paper; a failed try waits an hour. If either fills or rests -> trip.
 - OFF is re-checked before every live order, and works even with a bad config file.
 - Kalshi closed (maintenance) -> run skipped. Network errors, 5xx and 429 never count
   toward the error trip (nothing can be bought then); 6+ hours of that sends one alert.
