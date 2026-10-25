@@ -40,6 +40,21 @@ def pick(m):
 code, d = get("/exchange/status")
 show("exchange status", {"code": code, "body": d})
 
+# Which order endpoints exist? With no key, an existing endpoint answers 401 and a removed
+# one 404. Nothing can be placed without a key, so this is harmless.
+for host in ("https://api.elections.kalshi.com", "https://external-api.kalshi.com"):
+    for path in ("/trade-api/v2/portfolio/orders", "/trade-api/v2/portfolio/events/orders",
+                 "/trade-api/v2/portfolio/balance"):
+        try:
+            if path.endswith("balance"):
+                r = requests.get(host + path, timeout=20)
+            else:
+                r = requests.post(host + path, json={}, timeout=20)
+            show(f"endpoint {'GET' if path.endswith('balance') else 'POST'} {host}{path}",
+                 {"code": r.status_code, "body": r.text[:200]})
+        except Exception as e:
+            show(f"endpoint {host}{path}", {"error": str(e)[:200]})
+
 # The demo (fake money) exchange the setup guide tells people to try first
 for demo in ("https://demo-api.kalshi.co/trade-api/v2", "https://demo-api.elections.kalshi.com/trade-api/v2"):
     try:
