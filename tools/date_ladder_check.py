@@ -108,6 +108,15 @@ def main():
                 m = ev["markets"][0]
                 print(f"          | {m.get('market_type')} {m.get('settlement_bounds_type')} "
                       f"{(m.get('rules_primary') or '')[:200]} || {(m.get('rules_secondary') or '')[:300]}")
+    pairs = listed = 0
+    for ev in events:
+        if before_family(ev) and why(ev) == "ok":
+            ms = sorted(ev["markets"], key=d.deadline)
+            for i, a in enumerate(ms):
+                for b in ms[i + 1:]:
+                    pairs += 1
+                    listed += not d.nested(a, b)
+    print(f"accepted ladders: {pairs} earlier/later pairs; {listed} refused for listing order (after issuance)")
     gaps = []
     for ev in events:
         if before_family(ev) and why(ev) == "ok":
