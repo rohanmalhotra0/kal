@@ -162,6 +162,7 @@ def run_once(client=None):
             client = client or Kalshi.from_env(config.home(), cfg["env"])
             _run(client, cfg, summary)
             db.put("consecutive_errors", 0)
+            db.put("last_ok_run", time.time())
         except (LegFailed, OrderUnknown, Halted) as e:
             summary.update(ok=False, error=str(e))
             log.error("run stopped: %s", traceback.format_exc())
@@ -179,6 +180,7 @@ def run_once(client=None):
                 summary["transient"] = True
                 log.warning("run skipped, Kalshi unreachable: %s", e)
                 db.put("last_transient_error", {"ts": time.time(), "error": str(e)[:300]})
+                _maybe_alert_outage(e)
             else:
                 log.error("run failed: %s", traceback.format_exc())
                 _count_error(cfg, e)
@@ -199,6 +201,25 @@ def _alert_trades(summary):
         notify.send(f"kal made {summary['live_trades']} real trade(s)", "\n".join(lines), tags=("moneybag",))
     except Exception:
         log.warning("trade alert failed", exc_info=True)
+
+
+OUTAGE_ALERT_AFTER = 6 * 3600
+
+
+def _maybe_alert_outage(e):
+    """One phone alert when Kalshi has been unreachable for 6+ hours (then at most every 6)."""
+    now = time.time()
+    last_ok = db.get("last_ok_run") or now
+    last_alert = db.get("last_outage_alert") or 0
+    if now - last_ok >= OUTAGE_ALERT_AFTER and now - last_alert >= OUTAGE_ALERT_AFTER:
+        db.put("last_outage_alert", now)
+        try:
+            from . import notify
+            notify.send("kal can't reach Kalshi", f"No good run for {(now - last_ok) / 3600:.0f} hours. "
+                        f"It keeps trying and won't trade until it can. Last error: {str(e)[:200]}",
+                        priority="high", tags=("warning",))
+        except Exception:
+            log.warning("outage alert failed", exc_info=True)
 
 
 def _count_error(cfg, e):

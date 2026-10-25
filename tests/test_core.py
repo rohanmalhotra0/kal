@@ -180,6 +180,22 @@ class EngineTests(TempHome):
         self.assertTrue(config.load()["enabled"])
         self.assertEqual(db.get("consecutive_errors", 0), 0)
 
+    def test_long_outage_sends_one_alert(self):
+        import os, time as _t
+        from unittest import mock
+        from kal import notify
+        from kal.client import KalshiError
+        os.environ["KAL_NTFY_TOPIC"] = "t"
+        self.addCleanup(os.environ.pop, "KAL_NTFY_TOPIC", None)
+        db.put("last_ok_run", _t.time() - 7 * 3600)
+        c = fake_with_arb()
+        c.balance = lambda: (_ for _ in ()).throw(KalshiError("502", 502))
+        with mock.patch.object(notify.requests, "post") as post:
+            engine.run_once(c)
+            engine.run_once(c)
+        self.assertEqual(post.call_count, 1)
+        self.assertIn("can't reach Kalshi", post.call_args.kwargs["headers"]["Title"])
+
     def test_network_errors_never_trip(self):
         import requests
         c = fake_with_arb()
