@@ -45,8 +45,8 @@ It runs by itself on a $6-a-month server.
 Turn it on only if you trust every push to `main`:
 `sudo systemctl enable --now kal-update.timer`
 
-Before its first real trade, the bot sends one $0.01 test order that can't fill, to
-prove Kalshi accepts its orders. Want to practice with fake money first? See
+Before its first real trade, the bot sends two $0.01 test orders (one YES, one NO) that
+can't fill, to prove Kalshi accepts its orders. Want to practice with fake money first? See
 [docs/DEPLOY.md](docs/DEPLOY.md), step 7.
 
 ## What it does

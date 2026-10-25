@@ -146,15 +146,19 @@ class OrderTestStateTests(Base):
         self.assertFalse(t["passed"])
         self.assertIn("400 bad field", t["detail"])
 
-    def test_a_pass_saved_before_the_key_id_was_hashed_still_counts(self):
-        """The books hold a hash of the key ID now, not the ID (they are in every backup)."""
+    def test_an_old_pass_is_hashed_and_waits_for_the_no_test(self):
+        """The books hold a hash of the key ID now, not the ID (they are in every backup).
+        A pass saved before the NO test order existed doesn't count until it's redone."""
         from kal import gate
         db.put(gate.KEY, {"ok": True, "fingerprint": "prod:kid-1", "detail": "KXA-1: accepted", "ts": time.time()})
+        with mock.patch.object(dash, "_key_id", return_value="kid-1"):
+            self.assertFalse(self.state()["passed"])
+        self.assertNotIn("kid-1", json.dumps(db.get(gate.KEY)))
+        gate.record(types.SimpleNamespace(key_id="kid-1"), "prod", True, "KXA-1: YES and NO accepted")
         with mock.patch.object(dash, "_key_id", return_value="kid-1"):
             self.assertTrue(self.state()["passed"])
         with mock.patch.object(dash, "_key_id", return_value="kid-2"):
             self.assertFalse(self.state()["passed"])
-        self.assertNotIn("kid-1", json.dumps(db.get(gate.KEY)))
 
 
 class StateTests(Base):

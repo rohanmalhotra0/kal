@@ -770,7 +770,7 @@ class OrderProbeTests(TempHome):
         c.fill = lambda t, side, n, p: 0
         probe = rows_by_check(selftest.run(c, order_probe=True))["order probe"]
         self.assertTrue(probe["ok"], probe)
-        self.assertEqual(c.orders, [("KXA-1", "yes", 1, 0.01)])
+        self.assertEqual(c.orders, [("KXA-1", "yes", 1, 0.01), ("KXA-1", "no", 1, 0.01)])
         self.assertTrue(gate.passed(c, "prod"))  # `kal setup` passing unlocks real trading too
 
     def test_a_fill_fails_the_probe(self):
@@ -835,7 +835,7 @@ class OrderProbeTests(TempHome):
             rows = selftest.run(k, order_probe=True)
         self.assertEqual([r for r in rows if not r["ok"]], [])
         self.assertEqual(get.call_args.args[0], k.base + "/trade-api/v2/markets")   # the clock check
-        self.assertEqual(len(posts), 1)
+        self.assertEqual(len(posts), 2)
         endpoint, body = posts[0]
         # Kalshi's V2 order endpoint (V1 now answers 410): buying YES is a bid on the YES book.
         self.assertEqual(endpoint, "/portfolio/events/orders")
@@ -843,6 +843,12 @@ class OrderProbeTests(TempHome):
         self.assertEqual((body["side"], body["ticker"]), ("bid", "KXA-1"))
         self.assertEqual(body["price"], "0.0100")
         self.assertEqual(body["count"], "1.00")
+        # Buying NO at $0.01 is an ask at $0.99 on the YES book: the shape baskets use.
+        endpoint, body = posts[1]
+        self.assertEqual(endpoint, "/portfolio/events/orders")
+        self.assertEqual(body["time_in_force"], "immediate_or_cancel")
+        self.assertEqual((body["side"], body["ticker"], body["price"], body["count"]),
+                         ("ask", "KXA-1", "0.9900", "1.00"))
 
 
 # ---------- report ----------
