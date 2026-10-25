@@ -1,15 +1,50 @@
 # kal
 
 A bot that trades on [Kalshi](https://kalshi.com), a US prediction market.
-It runs on a small server, day and night.
+It runs by itself on a $6-a-month server.
 
 **Profits are not guaranteed.** Only give it money you can afford to lose.
+
+## Turn it on (9 steps, about 20 minutes)
+
+1. **Put exactly $300 in your Kalshi account.** Then even a bug can't lose more.
+2. **Make a Kalshi API key.** kalshi.com > Account > API Keys > Create.
+   Save the key file. Copy the Key ID.
+3. **Rent a server.** [DigitalOcean](https://www.digitalocean.com) > Create > Droplet >
+   Ubuntu 24.04 > Basic > **$6/month** > New York > Create. Copy its IP address.
+4. **Log in** from your computer's terminal: `ssh root@SERVER_IP`
+5. **Install** (paste both lines):
+   ```bash
+   git clone https://github.com/rohanmalhotra0/kal.git /opt/kal
+   sudo bash /opt/kal/deploy/install.sh
+   ```
+   Write down the **dashboard password** and **alerts topic** it prints.
+6. **Send it your key file.** In a *second* terminal on your computer:
+   `scp ~/Downloads/YOUR_KEY_FILE root@SERVER_IP:/tmp/kalshi.pem`
+7. **Answer 5 questions.** Back on the server: `sudo kal setup`
+   - Key ID: paste it. Key file: `/tmp/kalshi.pem`.
+   - Practice or real: **real** (new ideas still start on paper).
+   - Budget: **300**. Alerts: yes.
+
+   It checks everything, then asks to turn the bot on. Say yes.
+   Then delete the copy: `sudo rm /tmp/kalshi.pem`
+8. **Phone alerts.** Install the free **ntfy** app. Subscribe to the topic from step 5.
+9. **Watch it.** On your computer: `ssh -L 8787:localhost:8787 root@SERVER_IP`,
+   then open **http://localhost:8787** (password from step 5).
+
+**Stop it:** `sudo kal off`. **From your phone:** delete the API key in the Kalshi app.
+
+Before its first real trade, the bot sends one $0.01 test order that can't fill, to
+prove Kalshi accepts its orders. Want to practice with fake money first? See
+[docs/DEPLOY.md](docs/DEPLOY.md), step 7.
 
 ## What it does
 
 - **Every 5 minutes:** looks for trades. Makes the ones its rules allow.
-- **Every day:** tests new ideas on past markets (research).
+- **Every 10 minutes:** checks disk space, the clock, and that trading works.
 - **Every hour:** writes a short report to the `status` branch on GitHub.
+- **Every day:** tests new ideas on past markets (research), backs up its books,
+  and sends yesterday's summary to your phone.
 - **Dashboard:** turn it on or off, set the budget, see what it did.
 
 ## Strategies, safest first
@@ -17,7 +52,7 @@ It runs on a small server, day and night.
 | Strategy | What it does | Risk | Starts as |
 |---|---|---|---|
 | `basket_arb` | Only one outcome can win, so NO on several outcomes pays a known amount. Buys when that costs less. | Very low. Profit is locked in. | Live |
-| `ladder_arb` | "Above 60" can't win unless "above 50" wins. Buys when that pair costs less than $1. | Very low. Profit is locked in. | Live |
+| `ladder_arb` | "Above 60" can't win unless "above 50" wins. Buys when that pair costs less than $1. | Very low. Profit is locked in. | Paper |
 | `bracket_arb` | Ranges that cover every result: one must win. Buys all when they cost less than $1. | Low, once checked. | Paper, until a person checks it |
 | `favorites` | Buys price ranges that won more often than their price in past markets. | Medium. A bet, not a sure thing. | Paper |
 | `mentions` | "Will X say Y?" markets. Uses how often each word was said before. | Higher. | Paper |
@@ -43,8 +78,11 @@ The bot checks prices again first, and stops at the first order that doesn't fil
 - **Stays off** after a safety stop, until a person says so.
 - **Paper first.** New ideas never start with real money.
 - **Demo mode.** Practice on Kalshi's fake-money exchange.
-- **Zero-risk order test.** `selftest --order-probe` sends one $0.01 bid that can't fill.
+- **Zero-risk order test.** No real money until Kalshi accepts one $0.01 bid that can't fill.
 - **Dashboard is never open to the internet.** You reach it with an SSH tunnel.
+- **Disk and clock checks.** Under 200 MB of disk, or a clock 30 s off Kalshi's, it stops itself.
+- **Phone alerts** (free ntfy app) when it stops itself, trades real money, or needs a look.
+- **Daily backups** of its books, 14 days kept. `restore` puts one back.
 
 ## Quick start (on your computer)
 
@@ -70,7 +108,34 @@ python -m kal app
 
 ## Run it on a server
 
-See **[docs/DEPLOY.md](docs/DEPLOY.md)**. About $5 to $6 a month.
+See **[docs/DEPLOY.md](docs/DEPLOY.md)**. About $6 to $8 a month, always under $20:
+
+| What | Per month |
+|---|---|
+| 1 GB server in the US (DigitalOcean, Vultr or Linode) | $5 to $6 |
+| Host snapshots (optional) | $1 to $2 |
+| Phone alerts (ntfy), GitHub | free |
+
+The $300 setup, in short:
+
+```bash
+sudo kal set env demo              # practice with fake money
+sudo kal selftest --order-probe    # test
+sudo kal on --budget 300           # watch it for a day or two, then:
+sudo kal off
+sudo kal set env prod              # real money (with your real Kalshi key)
+sudo kal on --budget 300
+```
+
+## Phone alerts
+
+1. Install the free **ntfy** app.
+2. Pick a long random name: set `KAL_NTFY_TOPIC`, or run `python -m kal setup`.
+   (The server install makes one for you.) Anyone who knows the name can read your alerts.
+3. Subscribe to that name in the app.
+4. Test: `python -m kal summary --send` (on the server: `sudo kal summary --send`).
+
+docs/DEPLOY.md says what each alert means and what to do.
 
 ## Commands
 
@@ -84,8 +149,15 @@ See **[docs/DEPLOY.md](docs/DEPLOY.md)**. About $5 to $6 a month.
 | `python -m kal selftest` | Check Kalshi's API. `--order-probe` also tests orders. |
 | `python -m kal status` | A few lines on how it's doing. |
 | `python -m kal report` | The full report. `--push` puts it on GitHub. |
+| `python -m kal health` | Disk, clock, timer, backups, last runs, last error. |
+| `python -m kal logs` | The last 50 log lines (`-n 200` for more). |
+| `python -m kal backup` | Back up the books now. |
+| `python -m kal restore` | List backups. `restore 2026-10-24 --yes` puts one back. |
+| `python -m kal summary` | Yesterday's phone summary. `--send` tests alerts. |
+| `python -m kal setup` | Guided setup: five plain questions (key, demo or real, budget, alerts). |
 | `python -m kal on --budget 300` | Turn it on. |
 | `python -m kal off` | Turn it off. |
+| `python -m kal set env demo` | Change a setting (here: fake money). |
 
 ## Good to know
 
