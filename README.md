@@ -19,6 +19,7 @@ It runs by itself on a $6-a-month server.
    ```
    Create the droplet. Copy its IP address. (Install then turns off password login.)
 4. **Log in** from your computer's terminal: `ssh root@SERVER_IP`
+   (Or click **Web Console** on the droplet's page. It needs no SSH.)
 5. **Install** (paste both lines):
    ```bash
    git clone https://github.com/rohanmalhotra0/kal.git /opt/kal
@@ -27,6 +28,8 @@ It runs by itself on a $6-a-month server.
    Write down the **dashboard password** and **alerts topic** it prints.
 6. **Send it your key file.** In a *second* terminal on your computer:
    `scp ~/Downloads/YOUR_KEY_FILE root@SERVER_IP:/tmp/kalshi.pem`
+   In the Web Console instead: open the key file in a text editor and copy all of it.
+   Then type `nano /tmp/kalshi.pem`, paste, and press Ctrl+O, Enter, Ctrl+X.
 7. **Answer 5 questions.** Back on the server: `sudo kal setup`
    - Key ID: paste it. Key file: `/tmp/kalshi.pem`.
    - Practice or real: **real** (new ideas still start on paper).
