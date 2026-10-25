@@ -83,11 +83,25 @@ SSHD
   fi
 }
 
+# A new server runs Ubuntu's own updates in its first minutes. They hold apt's locks, and
+# apt-get gives up at once when a lock is held. So wait for them (up to 10 minutes).
+apt_get() { apt-get -o DPkg::Lock::Timeout=600 "$@"; }
+apt_update() {
+  local i tries="${KAL_APT_TRIES:-40}"
+  for i in $(seq 1 "$tries"); do
+    apt_get update -qq && return 0
+    [ "$i" = 1 ] && echo "Ubuntu is busy updating itself. Waiting for it (up to 10 minutes)..."
+    [ "$i" = "$tries" ] || sleep "${KAL_APT_PAUSE:-15}"
+  done
+  die "apt-get update keeps failing. Wait 5 minutes, then run this again."
+}
+
 # Tests call one helper without needing root or a full install.
 case "${1:-}" in
   --emit-topic)   ntfy_topic_name; exit 0 ;;
   --emit-wrapper) kal_wrapper; exit 0 ;;
   --harden-ssh)   harden_ssh; exit 0 ;;
+  --apt-update)   apt_update; exit 0 ;;
 esac
 
 [ "$(id -u)" -eq 0 ] || die "Run it with sudo: sudo bash $0"
@@ -96,18 +110,18 @@ command -v apt-get >/dev/null || die "This script is for Ubuntu (it needs apt-ge
 
 say "Installing system packages"
 export DEBIAN_FRONTEND=noninteractive
-apt-get update -qq
-apt-get install -y -qq python3 python3-venv python3-pip git curl ca-certificates >/dev/null
+apt_update
+apt_get install -y -qq python3 python3-venv python3-pip git curl ca-certificates >/dev/null
 
 python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)' \
   || die "Python 3.11 or newer is needed. Use Ubuntu 24.04."
 
 say "Keeping the clock right (Kalshi refuses orders sent with a wrong time)"
-if apt-get install -y -qq chrony >/dev/null 2>&1; then
+if apt_get install -y -qq chrony >/dev/null 2>&1; then
   systemctl enable --now chrony >/dev/null 2>&1 || true
 else
   echo "(Couldn't install chrony. Using systemd-timesyncd instead.)"
-  apt-get install -y -qq systemd-timesyncd >/dev/null 2>&1 || true
+  apt_get install -y -qq systemd-timesyncd >/dev/null 2>&1 || true
   timedatectl set-ntp true >/dev/null 2>&1 || true
 fi
 if [ "$(timedatectl show -p NTPSynchronized --value 2>/dev/null || true)" = "yes" ]; then
