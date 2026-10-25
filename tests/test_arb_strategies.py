@@ -591,3 +591,12 @@ class RealDataRegressionTests(unittest.TestCase):
         fair = Signal("ladder_arb", "E", "t", [Leg("A", "yes", 0.48, 10), Leg("B", "no", 0.49, 10)],
                       payout_min=10.0)
         self.assertIsNone(risk.Limits(cfg, 100).refuse(fair))
+
+
+class BinaryOnlyTests(unittest.TestCase):
+    def test_non_binary_markets_are_never_a_ladder(self):
+        ev = RealDataRegressionTests()._ev("KXBTCD-26OCT2517", [("T110000", 110000, "$110,000 or above"),
+                                                                ("T112000", 112000, "$112,000 or above")])
+        self.assertIsNotNone(ladder_arb.ladder(ev))
+        ev["markets"][0]["market_type"] = "scalar"
+        self.assertIsNone(ladder_arb.ladder(ev))

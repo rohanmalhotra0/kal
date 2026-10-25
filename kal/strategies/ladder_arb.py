@@ -66,9 +66,11 @@ def one_close_time(ev):
 
 
 def own_markets(ev):
-    """The event has a ticker, and so does every market, which all belong to it."""
+    """The event has a ticker, and so does every market, which all belong to it, and every
+    market is a plain binary one (pays exactly $0 or $1), which the locked-in math needs."""
     return bool(ev.get("event_ticker")) and all(
         m.get("ticker") and m.get("event_ticker") in (None, ev["event_ticker"])
+        and m.get("market_type", "binary") == "binary"
         for m in ev.get("markets") or [])
 
 

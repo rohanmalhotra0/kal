@@ -66,6 +66,8 @@ class BasketArb(Strategy):
         for ev in ctx.client.events(status="open", with_nested_markets="true"):
             if not ev.get("mutually_exclusive"):
                 continue
+            if any(m.get("market_type", "binary") != "binary" for m in ev.get("markets", [])):
+                continue  # the math needs every market to pay exactly $0 or $1
             markets = [m for m in ev.get("markets", []) if m.get("status", "active") in ("active", "open")]
             if sum(price(m, "yes_bid") for m in markets) <= 1:
                 continue  # quick filter: no basket can lock in a profit

@@ -6,7 +6,7 @@ from cryptography.hazmat.primitives.asymmetric import padding, rsa
 
 from kal import client, config, db, engine, paper, risk, sizing
 from kal.strategies import basket_arb
-from kal.strategies.base import Leg, Signal
+from kal.strategies.base import Context, Leg, Signal
 from tests.fakes import FakeKalshi
 from tests.helpers import TempHome
 
@@ -119,6 +119,12 @@ class BasketArbTests(TempHome):
             payout = sum(l.count for l in sig.legs if l.ticker != winner)
             self.assertGreater(payout - sig.cost, 0)
         self.assertTrue(sig.guaranteed)
+
+    def test_non_binary_event_is_skipped(self):
+        c = fake_with_arb()
+        c.event_list[0]["markets"][0]["market_type"] = "scalar"
+        ctx = Context(c, dict(config.DEFAULTS), "paper", 100, 100, set(), {}, {})
+        self.assertEqual(basket_arb.STRATEGY.scan(ctx), [])
 
     def test_no_arb_when_bids_under_a_dollar(self):
         self.assertIsNone(basket_arb.no_basket([("A", 0.60, 50), ("B", 0.38, 50)], 30))
