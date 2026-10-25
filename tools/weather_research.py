@@ -58,6 +58,7 @@ def main():
                 markets = client.settled_markets(series, args.markets_per_series)
                 hushed = weather.quiet(client, series, obs, markets, h)   # what the volume filter left out
                 obs = obs + hushed
+                events, tiled = weather.tiling(markets)
                 wants = {o["event"]: (weather.run_for(o["decided"]), weather.day_of(o["anchor"])) for o in obs}
                 cache = os.path.join(backtest.folder("cache"), f"nbm_{station}.json")
                 runs = weather.forecasts(fetch, station, wants.values(), cache)
@@ -68,16 +69,24 @@ def main():
             s = weather.scores(got) or {}
             print(f"{h:g}h {series:11} {len(obs):5} priced ({len(hushed)} quiet, "
                   f"{sum(1 for o in hushed if o['result'] == 'yes')} of them won), {len(got):5} with a fitted "
-                  f"forecast. Brier: forecast {s.get('brier_forecast', float('nan')):.4f}, "
-                  f"market mid {s.get('brier_market', float('nan')):.4f}", flush=True)
+                  f"forecast. Brackets tile every degree in {tiled} of {events} events. Brier: forecast "
+                  f"{s.get('brier_forecast', float('nan')):.4f}, market mid {s.get('brier_market', float('nan')):.4f}",
+                  flush=True)
             rows += got
         s = weather.scores(rows) or {}
         print(f"\n===== {h:g} hours before the scheduled end: {len(rows)} markets, "
               f"{len({str(weather.day_of(o['anchor'])) for o in rows})} days")
         print(f"Brier (lower is better; a guide only, trades must beat the ask): forecast "
               f"{s.get('brier_forecast', float('nan')):.4f}, market mid {s.get('brier_market', float('nan')):.4f}")
+        days, far = weather.far_misses(rows)
+        if far is not None:
+            print(f"Results beyond 2 spreads of the forecast: {far:.1%} of {days} days (a Normal error: under 4.6%)")
+        print("forecast chance   markets  forecast  market mid  YES won")
+        for r in weather.calibration(rows):
+            print(f"  {r['lo']:.2f}-{r['hi']:.2f}     {r['markets']:7}  {r['forecast']:8.3f}  {r['market']:10.3f}  "
+                  f"{r['won']:7.3f}")
         print("margin side  trades days   win   ROI    worst  edge?")
-        out = {"scores": s, "trades": []}
+        out = {"scores": s, "trades": [], "calibration": weather.calibration(rows), "far_misses": far}
         for margin in args.margins:
             for side, t in weather.trades(rows, margin).items():
                 roi, lo = backtest.roi_stats(t, z) if t else (None, None)

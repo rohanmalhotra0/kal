@@ -27,7 +27,8 @@ import statistics
 from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
 
-from ..client import UnknownSettlement, fee_per_contract, num, yes_payout
+from ..client import UnknownSettlement, num, yes_payout
+from ..strategies.favorites import cost_each
 from . import backtest
 
 # Kalshi series -> the station its rules settle on (CLINYC is Central Park, CLIMDW Midway).
@@ -36,6 +37,8 @@ STATIONS = {"KXHIGHNY": "KNYC", "KXHIGHCHI": "KMDW", "KXHIGHMIA": "KMIA", "KXHIG
 IEM_MOS = "https://mesonet.agron.iastate.edu/cgi-bin/request/mos.py"
 LATENCY = 2 * 3600        # use a run only once it's surely published
 LOOK_BACK = 6 * 3600      # if that run isn't archived, the latest one up to 6 hours older
+CHUNK_DAYS = 7            # one archive request covers a week of runs
+TAILS = [(w, k) for w in (0.0, 0.05, 0.1, 0.2, 0.3) for k in (2.0, 3.0, 4.0)]   # (share, width) of a wider error
 FIT_DAYS, MIN_FIT = 120, 20   # bias and spread from up to 120 earlier days; skip a day with under 20
 
 log = logging.getLogger(__name__)
@@ -61,12 +64,18 @@ def bracket(m):
     return None
 
 
-def prob(rng, mu, s):
-    """Chance the reported (whole-degree) high lands in rng, if the high is Normal(mu, s)."""
+def _normal(rng, mu, s):
     lo, hi = rng
     up = 1.0 if hi is None else phi((hi + 0.5 - mu) / s)
     down = 0.0 if lo is None else phi((lo - 0.5 - mu) / s)
     return max(0.0, up - down)
+
+
+def prob(rng, mu, s, w=0.0, k=1.0):
+    """Chance the reported (whole-degree) high lands in rng. The error is Normal(0, s),
+    except on a share w of days it's k times wider: fronts can put the calendar-day high
+    outside the forecast's daytime window, and those days make the tails fat."""
+    return (1 - w) * _normal(rng, mu, s) + (w * _normal(rng, mu, k * s) if w else 0.0)
 
 
 def day_of(anchor):
@@ -113,8 +122,8 @@ def parse_max(text, day, latest):
 def forecasts(fetch, station, wants, cache_file=None):
     """{(runtime, day): (high, spread, run) or None} for each wanted pair: the latest
     archived run that started by `runtime` (up to LOOK_BACK older), via fetch(url, params)
-    -> CSV text. Cached in cache_file (runs never change). An empty reply isn't cached:
-    it may be a hiccup, so it's asked again next time."""
+    -> CSV text. One request covers CHUNK_DAYS of wanted runs. Cached in cache_file (runs
+    never change). An empty reply isn't cached: it may be a hiccup, so it's asked again."""
     cache = {}
     if cache_file and os.path.exists(cache_file):
         try:
@@ -122,25 +131,32 @@ def forecasts(fetch, station, wants, cache_file=None):
                 cache = json.load(f)
         except (OSError, ValueError):
             cache = {}
-    out, new = {}, 0
+    def stamp(t):
+        return datetime.fromtimestamp(t, timezone.utc).strftime("%Y-%m-%dT%H:%MZ")
+
+    todo = [(r, d) for r, d in sorted(set(wants)) if f"{r}|{d}" not in cache]
+    new = 0
     try:
-        for runtime, day in sorted(set(wants)):
-            key = f"{runtime}|{day}"
-            if key not in cache:
-                stamp = datetime.fromtimestamp(runtime, timezone.utc).strftime("%Y-%m-%dT%H:%MZ")
-                since = datetime.fromtimestamp(runtime - LOOK_BACK, timezone.utc).strftime("%Y-%m-%dT%H:%MZ")
-                try:
-                    text = fetch(IEM_MOS, {"station": station, "model": "NBS", "sts": since, "ets": stamp,
-                                           "format": "csv"})
-                except Exception as e:  # one failed run: skip that day, try again next time
-                    log.warning("NBM %s %s: %s", station, stamp, e)
-                    continue
-                if len((text or "").strip().splitlines()) < 2:
-                    continue  # no rows at all: not cached
-                got = parse_max(text, day, runtime)
-                cache[key] = list(got) if got else None
+        while todo:
+            chunk = [x for x in todo if x[0] < todo[0][0] + CHUNK_DAYS * 86400]
+            todo = todo[len(chunk):]
+            try:
+                text = fetch(IEM_MOS, {"station": station, "model": "NBS", "sts": stamp(chunk[0][0] - LOOK_BACK),
+                                       "ets": stamp(chunk[-1][0]), "format": "csv"})
+            except Exception as e:  # one failed request: skip those days, try again next time
+                log.warning("NBM %s %s: %s", station, stamp(chunk[0][0]), e)
+                continue
+            if len((text or "").strip().splitlines()) < 2:
+                continue  # no rows at all: not cached
+            for runtime, day in chunk:
+                got = parse_max(text, day, runtime)   # only runs that started by this one's time
+                cache[f"{runtime}|{day}"] = list(got) if got else None
                 new += 1
-            out[(runtime, day)] = tuple(cache[key]) if cache[key] else None
+        out = {}
+        for runtime, day in set(wants):
+            hit = cache.get(f"{runtime}|{day}")
+            if f"{runtime}|{day}" in cache:
+                out[(runtime, day)] = tuple(hit) if hit else None
     finally:
         if cache_file and new:
             with open(cache_file + ".tmp", "w") as f:
@@ -159,13 +175,37 @@ def winners(markets):
 
 
 def fit(days):
-    """(bias, spread) in °F that best explain past days, by likelihood: a coarse grid (bias
-    -8..8, spread 1..10), then a finer one around the best. days: [(mu, (lo, hi))]."""
-    def ll(a):
-        return sum(math.log(max(prob(rng, mu + a[0], a[1]), 1e-9)) for mu, rng in days)
-    b0, s0 = max(((b, s / 2) for b in range(-8, 9) for s in range(2, 21)), key=ll)
-    return max(((b0 + i / 4, round(s0 + j / 10, 2)) for i in range(-3, 4) for j in range(-4, 5)
-                if s0 + j / 10 >= 0.5), key=ll)
+    """(bias, spread, w, k) that best explain past days, by likelihood. Bias and spread
+    first (a coarse grid, bias -8..8°F and spread 1..10°F, then a finer one), then how fat
+    the tails are (TAILS; w = 0 is a plain Normal), then the spread again for those tails.
+    days: [(mu, (lo, hi))]."""
+    def ll(b, s, w=0.0, k=1.0):
+        return sum(math.log(max(prob(rng, mu + b, s, w, k), 1e-9)) for mu, rng in days)
+    b0, s0 = max(((b, s / 2) for b in range(-8, 9) for s in range(2, 21)), key=lambda a: ll(*a))
+    b, s = max(((b0 + i / 4, round(s0 + j / 10, 2)) for i in range(-3, 4) for j in range(-4, 5)
+                if s0 + j / 10 >= 0.5), key=lambda a: ll(*a))
+    w, k = max(TAILS, key=lambda t: ll(b, s, *t))
+    s = max((round(s + j / 10, 2) for j in range(-6, 3) if s + j / 10 >= 0.5), key=lambda x: ll(b, x, w, k))
+    return b, s, w, k
+
+
+def tiling(markets):
+    """(events, events whose brackets cover every whole degree exactly once, with exactly
+    one winner). A gap or an overlap means the strike mapping is off, and the tails are
+    where the model and the market disagree most."""
+    by_event = defaultdict(list)
+    for m in markets:
+        by_event[m.get("event_ticker")].append(m)
+    ok = 0
+    for ms in by_event.values():
+        rngs = [bracket(m) for m in ms]
+        if None in rngs:
+            continue
+        rngs.sort(key=lambda r: -math.inf if r[0] is None else r[0])
+        ok += (rngs[0][0] is None and rngs[-1][1] is None
+               and all(a[1] is not None and b[0] == a[1] + 1 for a, b in zip(rngs, rngs[1:]))
+               and sum(1 for m in ms if m.get("result") == "yes") == 1)
+    return len(by_event), ok
 
 
 def quiet(client, series, obs, markets, hours_before_close):
@@ -218,24 +258,57 @@ def priced(obs, markets, fc):
             fits[week] = fit(past) if len(past) >= MIN_FIT else None
         if not fits[week]:
             continue
-        b, s = fits[week]
-        out.append({**o, "p": prob(rng, mu + b, s), "mu": mu, "bias": b, "s": s})
+        b, s, w, k = fits[week]
+        out.append({**o, "p": prob(rng, mu + b, s, w, k), "mu": mu, "bias": b, "s": s, "w": w, "k": k,
+                    "won_range": won.get(o["event"])})
     return out
 
 
 def trades(rows, margin):
-    """{side: [trade]} buying where the forecast beats the price by `margin` per contract,
-    after the taker fee. Trades on one day count as one unit (cities' errors move together)."""
+    """{side: [trade]} buying where the forecast beats the price by `margin` per contract.
+    The cost is a full-size order's, fee rounded up per order, as backtest.trade scores it.
+    Trades on one day count as one unit (cities' errors move together)."""
     out = {"yes": [], "no": []}
     for o in rows:
         unit = str(day_of(o["anchor"]))
         ask, bid, p = o["yes_ask"], o["yes_bid"], o["p"]
-        if 0.01 <= ask <= 0.99 and p - ask - fee_per_contract(ask) >= margin:
+        if 0.01 <= ask <= 0.99 and p - cost_each(ask) >= margin:
             out["yes"].append(backtest.trade(unit, ask, backtest.paid(o, "yes")))
         no = round(1 - bid, 4)
-        if bid > 0 and 0.01 <= no <= 0.99 and (1 - p) - no - fee_per_contract(no) >= margin:
+        if bid > 0 and 0.01 <= no <= 0.99 and (1 - p) - cost_each(no) >= margin:
             out["no"].append(backtest.trade(unit, no, backtest.paid(o, "no")))
     return out
+
+
+CALIBRATION = [0, 0.02, 0.05, 0.10, 0.20, 0.40, 0.60, 1.01]
+
+
+def calibration(rows):
+    """Per range of the forecast's chance: markets, mean forecast, mean market mid, and how
+    often YES won. Fat tails show as low ranges that win more often than forecast."""
+    out = []
+    for lo, hi in zip(CALIBRATION, CALIBRATION[1:]):
+        r = [o for o in rows if lo <= o["p"] < hi]
+        if r:
+            out.append({"lo": lo, "hi": min(hi, 1.0), "markets": len(r),
+                        "forecast": statistics.fmean(o["p"] for o in r),
+                        "market": statistics.fmean((o["yes_ask"] + o["yes_bid"]) / 2 for o in r),
+                        "won": statistics.fmean(backtest.paid(o, "yes") for o in r)})
+    return out
+
+
+def far_misses(rows):
+    """(days, share whose result landed wholly beyond 2 spreads of the forecast). Under a
+    Normal error that share is under 4.6%; far above it means fat tails."""
+    days = {}
+    for o in rows:
+        rng = o.get("won_range")
+        if rng and o["event"] not in days:
+            mu, s = o["mu"] + o["bias"], o["s"]
+            beyond = (rng[0] is not None and rng[0] - 0.5 > mu + 2 * s) or \
+                     (rng[1] is not None and rng[1] + 0.5 < mu - 2 * s)
+            days[o["event"]] = beyond
+    return len(days), (sum(days.values()) / len(days) if days else None)
 
 
 def scores(rows):

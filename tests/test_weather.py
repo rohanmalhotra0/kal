@@ -98,13 +98,46 @@ class PricingTests(unittest.TestCase):
             high = round(mu + 2.0 + rng.gauss(0, 2.5))
             lo = high - high % 2
             days.append((mu, (lo, lo + 1)))
-        b, s = weather.fit(days)
+        b, s, w, k = weather.fit(days)
         self.assertAlmostEqual(b, 2.0, delta=0.6)
         self.assertAlmostEqual(s, 2.6, delta=0.6)
+        self.assertLessEqual(w, 0.1)                   # a Normal error: thin tails
         far = [(mu + 5.0, rng) for mu, rng in days]   # a forecast 7°F too warm still fits
         self.assertAlmostEqual(weather.fit(far)[0], -3.0, delta=0.6)
         wide = [(mu, (lo - 6, lo + 1)) for mu, (lo, _) in days[:40]] + days[40:]
         self.assertLessEqual(weather.fit(wide)[1], 10.0)
+
+    def test_fat_tails_are_found_and_priced(self):
+        # 85% of days the error is 2°F wide; on 15% it's 8°F (fronts). A plain Normal would
+        # price the far brackets near zero.
+        rng, days = random.Random(9), []
+        for i in range(300):
+            mu = rng.uniform(40, 90)
+            high = round(mu + rng.gauss(0, 8.0 if rng.random() < 0.15 else 2.0))
+            lo = high - high % 2
+            days.append((mu, (lo, lo + 1)))
+        b, s, w, k = weather.fit(days)
+        self.assertGreaterEqual(w, 0.05)
+        self.assertGreater(weather.prob((70, None), 60, s, w, k), weather.prob((70, None), 60, s))
+
+    def test_brackets_must_tile_every_degree_once(self):
+        def event(e, rungs, winner):
+            return [{"event_ticker": e, "strike_type": t, "floor_strike": f, "cap_strike": c,
+                     "result": "yes" if i == winner else "no"} for i, (t, f, c) in enumerate(rungs)]
+        good = event("A", LADDER, 2)
+        gap = event("B", [("less", None, 57), ("between", 58, 59)] + LADDER[2:], 1)   # 57 is in no bracket
+        two = event("C", LADDER, 2)
+        two[3]["result"] = "yes"
+        self.assertEqual(weather.tiling(good), (1, 1))
+        self.assertEqual(weather.tiling(good + gap + two), (3, 1))
+
+    def test_trades_are_chosen_on_the_cost_they_are_scored_at(self):
+        from kal.strategies.favorites import cost_each
+        ask = 0.40
+        row = {"anchor": 1_760_000_000, "yes_ask": ask, "yes_bid": 0.39, "result": "yes", "yes_value": 1.0}
+        just = cost_each(ask) + 0.05
+        self.assertEqual(len(weather.trades([dict(row, p=just + 0.001)], 0.05)["yes"]), 1)
+        self.assertEqual(len(weather.trades([dict(row, p=just - 0.001)], 0.05)["yes"]), 0)
 
 
 def city_days(n, bias_of=lambda i: 0.0, start=date(2026, 3, 1), seed=5, price_of=None):
@@ -192,6 +225,29 @@ class NoPeekingTests(unittest.TestCase):
         self.assertTrue(all(o["result"] == "no" and o["yes_ask"] == 0.22 for o in back))
         lone = dict(markets[0], event_ticker="KXHIGHNY-ELSEWHERE", ticker="X")
         self.assertEqual(weather.quiet(c, "KXHIGHNY", kept, [lone], 18), [])   # no anchor known: skipped
+
+    def test_calibration_and_far_misses(self):
+        markets, obs, fc = city_days(120)
+        rows = weather.priced(obs, markets, fc)
+        cal = weather.calibration(rows)
+        self.assertEqual(sum(r["markets"] for r in cal), len(rows))
+        days, share = weather.far_misses(rows)
+        self.assertGreater(days, 50)
+        self.assertLess(share, 0.10)          # this fake's errors are Normal
+
+    def test_one_request_covers_a_week_of_runs(self):
+        calls, start = [], date(2026, 10, 1)
+
+        def fetch(url, params):
+            calls.append((params["sts"], params["ets"]))
+            rows = [nbs_csv(d, "60.0", "2.0", runtime=f"{d.isoformat()} 09:00:00").split("\n", 1)[1]
+                    for d in (start + timedelta(days=i) for i in range(10))]
+            return "runtime,ftime,model,tmp,txn,xnd\n" + "".join(rows)
+        wants = [(ts(start + timedelta(days=i), 9), start + timedelta(days=i)) for i in range(10)]
+        got = weather.forecasts(fetch, "KNYC", wants)
+        self.assertEqual(len(calls), 2)       # 10 days: two weekly requests
+        self.assertEqual(sorted(got), sorted(wants))
+        self.assertTrue(all(v and v[0] == 60.0 for v in got.values()))
 
     def test_scores_compare_forecast_and_market(self):
         markets, obs, fc = city_days(60)
