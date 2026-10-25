@@ -2,6 +2,21 @@
 
 Newest first. Each 2-hour check-in adds one entry: what it checked, what it found, links.
 
+## 2026-10-25 21:00 UTC — check-in: all green; fresh money-path audit, 5 holes fixed (PR #23)
+
+- Checked: CI green on main 84f0d0d. market-check green on f793218 (19:05): self-test passes,
+  every strategy scanned with no errors, 0 trades found (normal). No status report yet: the
+  server is still being set up.
+- Fix this check-in: a fresh audit (2 reviewers, 1 critic; each finding needed a failing test)
+  found 5 money-path holes. All fixed in PR #23, with 27 new tests (13 fail on main):
+  - after a restore, the owner's own winning bets became the bot's capital (past $300);
+  - contracts sold outside the bot were booked as paid at settlement;
+  - a same-day budget raise hid the day's loss from the daily stop;
+  - a strategy turned live for demo practice stayed live on real money;
+  - the fair-price guard was exact text. On real data, 224 open one-winner events counted as
+    locked in despite a "fair market price" clause (mostly elections). Now off real money.
+  https://github.com/rohanmalhotra0/kal/pull/23
+
 ## 2026-10-25 19:05 UTC — date ladders merged, paper only
 
 - Merged PR #21 (`date_ladder_arb`, idea #6) as f793218. CI green on its last commit. 745 tests pass.
