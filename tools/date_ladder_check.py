@@ -66,6 +66,19 @@ def main():
         counts[r] += 1
         if len(examples[r]) < 3:
             examples[r].append(ev)
+    import re
+    tails, sample = collections.Counter(), []
+    for ev in events:
+        if before_family(ev) and why(ev).startswith("rules don't say"):
+            m = next(m for m in ev["markets"] if not d.claims_it_happens_before(m))
+            text = m.get("rules_primary") or ""
+            g = re.search(r"\bbefore\s+[A-Za-z]{3,9}\.?\s+\d{1,2}(?:st|nd|rd|th)?,?\s+\d{4}(.{0,40})", text)
+            tails[(g.group(1)[:25] if g else "(no 'before <date>')").lower()] += 1
+            if len(sample) < 25:
+                sample.append(f"{ev['event_ticker']}: {text[:230]!r}")
+    print("what follows 'before <date>' in rejected rules:", tails.most_common(15))
+    for line in sample:
+        print("   ", line)
     keys = collections.Counter()
     for ev in events:
         if before_family(ev) and why(ev) == "custom_strike differs":
@@ -113,6 +126,10 @@ def main():
             e = dict(ev.get("event") or {})
             e.setdefault("markets", ev.get("markets") or [])
             print(f"  {t}: {why(e)}  ({len(e['markets'])} markets, me={e.get('mutually_exclusive')!r})")
+            if why(e).startswith("rules don't say"):
+                for m in e["markets"][:2]:
+                    print(f"      {m['ticker']} | {m.get('yes_sub_title')!r}\n        P: {m.get('rules_primary')!r}"
+                          f"\n        S: {(m.get('rules_secondary') or '')[:400]!r}")
             if why(e) != "ok":
                 for m in e["markets"][:3]:
                     print(f"      {m['ticker']} | {m.get('yes_sub_title')!r} | event_ticker={m.get('event_ticker')!r}"
