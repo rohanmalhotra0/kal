@@ -1,4 +1,5 @@
 # Side branch only (probe/early-close), never merged. Public data only: no key, no orders.
+# The coverage guard from #9, run against main's research code and #9's.
 name: api-probe
 
 on:
@@ -8,13 +9,33 @@ permissions:
   contents: read
 
 jobs:
-  probe:
+  guard:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: main
+            ref: main
+          - label: with-9
+            ref: fix/schedule-anchor
+    name: coverage guard on ${{ matrix.label }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      KAL_HOME: ./state
+      PYTHONUNBUFFERED: 1
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ matrix.ref }}
+          path: code
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/schedule-anchor
+          path: guard
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install requests
-      - run: python tools/anchor_snapshot.py compare tools/snapshot-all-2026-10-25.jsonl
+      - run: pip install -r code/requirements.txt
+      - run: cp guard/tools/coverage_check.py code/tools/coverage_check.py && cd code && git log --oneline -1
+      - run: cd code && python tools/coverage_check.py
