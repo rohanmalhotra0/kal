@@ -67,6 +67,11 @@ class OrderUnknown(RuntimeError):
     """An order may or may not exist. Stop and reconcile before trading again."""
 
 
+class OrderPending(OrderUnknown):
+    """An order we sent isn't visible on Kalshi yet. Nothing trades until it is (or until
+    RECONCILE_GRACE says it never landed), but waiting isn't a failure."""
+
+
 class Halted(RuntimeError):
     """The bot already tripped itself with a specific reason. Just stop."""
 
@@ -102,8 +107,30 @@ def reconcile(client):
             db.execute("UPDATE orders SET status = 'never_placed' WHERE id = ?", r["id"])
             fixed += 1
         else:
-            raise OrderUnknown(f"order {r['client_order_id']} on {r['ticker']} not visible yet")
+            raise OrderPending(f"order {r['client_order_id']} on {r['ticker']} not visible yet")
     return fixed
+
+
+def stranded_baskets():
+    """Live baskets an earlier run left part-bought: some legs filled, the rest didn't or
+    were never sent (a lost reply, or the process dying between legs). Each is marked
+    'stranded' so it's reported once. Call after reconcile(), so every order is resolved.
+    Returns their events."""
+    out = []
+    for s in db.query("SELECT id, event, legs, status FROM signals WHERE mode = 'live' "
+                      "AND (status = 'accepted' OR status LIKE 'failed:%')"):
+        legs = json.loads(s["legs"] or "[]")
+        fills = [r["filled"] or 0 for r in db.query("SELECT filled FROM orders WHERE signal_id = ?", s["id"])]
+        bought = bool(fills) and max(fills) > 0
+        whole = len(fills) == len(legs) and bought and min(fills) == max(fills)
+        if len(legs) > 1 and bought and not whole:
+            db.execute("UPDATE signals SET status = ? WHERE id = ?",
+                       f"stranded: {sum(f > 0 for f in fills)} of {len(legs)} legs bought", s["id"])
+            out.append(s["event"])
+        elif s["status"] == "accepted":   # a run died after its last order: just finish the record
+            db.execute("UPDATE signals SET status = ? WHERE id = ?",
+                       "executed" if bought else "missed (no fill)", s["id"])
+    return out
 
 
 def execute(client, sig, signal_id):
@@ -122,30 +149,37 @@ def execute(client, sig, signal_id):
                         client_order_id=coid)
         try:
             order = client.buy(leg.ticker, leg.side, want, leg.price, client_order_id=coid)
-        except KalshiError as e:
-            if not e.rejected:
-                db.execute("UPDATE orders SET status = 'unknown', error = ? WHERE id = ?", str(e)[:500], oid)
-                raise OrderUnknown(f"{leg.ticker}: {e}") from e
-            db.execute("UPDATE orders SET status = 'rejected', error = ? WHERE id = ?", str(e)[:500], oid)
-            if not is_transient(e):
-                gate.clear(f"Kalshi refused an order: {e}")  # re-prove the format on the next run
-            if i == 0:
-                raise
-            raise LegFailed(f"leg {i + 1}/{len(sig.legs)} {leg.ticker} rejected after earlier legs filled: {e}")
         except Exception as e:
+            if isinstance(e, KalshiError) and e.rejected:
+                db.execute("UPDATE orders SET status = 'rejected', error = ? WHERE id = ?", str(e)[:500], oid)
+                if not is_transient(e):
+                    gate.clear(f"Kalshi refused an order: {e}")  # re-prove the format on the next run
+                if i == 0:
+                    raise
+                raise LegFailed(f"leg {i + 1}/{len(sig.legs)} {leg.ticker} rejected after earlier legs filled: {e}")
+            # No clear answer: the order may exist. The next run looks it up.
             db.execute("UPDATE orders SET status = 'unknown', error = ? WHERE id = ?", str(e)[:500], oid)
-            raise OrderUnknown(f"{leg.ticker}: {e}") from e
+            if i == 0:
+                raise OrderUnknown(f"{leg.ticker}: {e}") from e
+            # Earlier legs filled and this one may not have: the basket is part-bought.
+            raise LegFailed(f"leg {i + 1}/{len(sig.legs)} {leg.ticker} got no clear reply after earlier "
+                            f"legs filled ({e})") from e
         n = filled(order, want)
         db.execute("UPDATE orders SET status = ?, filled = ?, order_id = ? WHERE id = ?",
                    order.get("status", "?"), n, order.get("order_id", ""), oid)
         if resting(order):
             # Immediate-or-cancel should never rest. If it does, Kalshi isn't doing what we
-            # assume: pull it and stop everything.
+            # assume: pull it and stop everything. 'unknown' makes the next run look the order
+            # up, so whatever filled before the cancel lands in the books.
+            db.execute("UPDATE orders SET status = 'unknown' WHERE id = ?", oid)
             try:
                 client.cancel(order.get("order_id", ""))
-            finally:
-                config.trip(f"an order on {leg.ticker} stayed on the book (status "
-                            f"{order.get('status')!r}); cancelled it and stopped")
+                done = "cancelled it and stopped"
+            except Exception as e:
+                log.error("cancel of resting order %s failed: %s", order.get("order_id"), e)
+                done = (f"the cancel FAILED ({type(e).__name__}): cancel order {order.get('order_id', '?')} "
+                        f"on Kalshi now")
+            config.trip(f"an order on {leg.ticker} stayed on the book (status {order.get('status')!r}); {done}")
             raise Halted(f"{leg.ticker} order rested instead of filling or cancelling")
         spent += n * leg.price + (fee(n, leg.price) if n else 0)
         if len(sig.legs) == 1:
@@ -169,39 +203,48 @@ def run_once(client=None):
         cfg = config.load()  # re-read under the lock: someone may have pressed OFF meanwhile
         if not cfg["enabled"]:
             return {"ok": True, "skipped": cfg["disabled_reason"] or "bot is off"}
-        summary = {"ok": True, "signals": 0, "live_trades": 0, "paper_trades": 0, "notes": []}
-        try:
-            config.validate(cfg)
-            client = client or Kalshi.from_env(config.home(), cfg["env"])
-            _run(client, cfg, summary)
-            db.put("consecutive_errors", 0)
-            db.put("last_ok_run", time.time())
-        except (LegFailed, OrderUnknown, Halted) as e:
-            summary.update(ok=False, error=str(e))
+        with db.pinned(cfg.get("env", "prod")):  # this run's books, even if env changes meanwhile
+            return _run_once(client, cfg, t0)
+
+
+def _run_once(client, cfg, t0):
+    summary = {"ok": True, "signals": 0, "live_trades": 0, "paper_trades": 0, "notes": []}
+    try:
+        config.validate(cfg)
+        client = client or Kalshi.from_env(config.home(), cfg["env"])
+        _run(client, cfg, summary)
+        db.put("consecutive_errors", 0)
+        db.put("last_ok_run", time.time())
+    except (LegFailed, OrderUnknown, Halted) as e:
+        summary.update(ok=False, error=str(e))
+        if isinstance(e, OrderPending) or (isinstance(e, OrderUnknown) and is_transient(e.__cause__)):
+            # A lost reply or an order not visible yet: the next runs look it up, and nothing
+            # trades until they do. A network blip isn't a failure, so it isn't counted.
+            summary["waiting"] = True
+            log.warning("run waiting on an order: %s", e)
+        else:
             log.error("run stopped: %s", traceback.format_exc())
-            if isinstance(e, Halted):
-                pass
-            elif isinstance(e, LegFailed):
+            if isinstance(e, LegFailed):
                 config.trip(f"basket left half-built: {e}. Check open positions on Kalshi.")
-            else:
+            elif not isinstance(e, Halted):
                 _count_error(cfg, e)
-        except Exception as e:
-            summary.update(ok=False, error=str(e))
-            if is_transient(e):
-                # Kalshi down, maintenance, network blip: try again next run. Not a reason to
-                # stop, since nothing can be bought while it lasts.
-                summary["transient"] = True
-                log.warning("run skipped, Kalshi unreachable: %s", e)
-                db.put("last_transient_error", {"ts": time.time(), "error": str(e)[:300]})
-                _maybe_alert_outage(e)
-            else:
-                log.error("run failed: %s", traceback.format_exc())
-                _count_error(cfg, e)
-        db.insert("runs", kind="trade", ok=int(summary["ok"]), duration=time.time() - t0,
-                  message=json.dumps(summary)[:4000])
-        if summary.get("live_trades"):
-            _alert_trades(summary)
-        return summary
+    except Exception as e:
+        summary.update(ok=False, error=str(e))
+        if is_transient(e):
+            # Kalshi down, maintenance, network blip: try again next run. Not a reason to
+            # stop, since nothing can be bought while it lasts.
+            summary["transient"] = True
+            log.warning("run skipped, Kalshi unreachable: %s", e)
+            db.put("last_transient_error", {"ts": time.time(), "error": str(e)[:300]})
+            _maybe_alert_outage(e)
+        else:
+            log.error("run failed: %s", traceback.format_exc())
+            _count_error(cfg, e)
+    db.insert("runs", kind="trade", ok=int(summary["ok"]), duration=time.time() - t0,
+              message=json.dumps(summary)[:4000])
+    if summary.get("live_trades"):
+        _alert_trades(summary)
+    return summary
 
 
 def _alert_trades(summary):
@@ -211,7 +254,8 @@ def _alert_trades(summary):
                         "WHERE status = 'executed' ORDER BY id DESC LIMIT ?", summary["live_trades"])
         lines = [f"{'locked-in' if r['guaranteed'] else 'bet'}: ${r['cost']:.2f} on {r['title'][:50]} "
                  f"(expect +${r['exp_profit']:.2f})" for r in rows]
-        notify.send(f"kal made {summary['live_trades']} real trade(s)", "\n".join(lines), tags=("moneybag",))
+        notify.send(f"kal made {summary['live_trades']} real trade(s)", "\n".join(lines),
+                    priority="low", tags=("moneybag",))  # nothing to do, so no buzz at night
     except Exception:
         log.warning("trade alert failed", exc_info=True)
 
@@ -259,6 +303,31 @@ def _still_on():
     return config.load()["enabled"]
 
 
+def _write_off_sold(client, positions, summary):
+    """Kalshi holds fewer of the bot's contracts than its books say on a market that's still
+    trading: someone sold them outside the bot. Count them as lost, so the books never earn
+    on contracts they don't hold. (Closed markets are skipped: Kalshi may be paying out.)"""
+    short = ledger.shortfalls(positions)
+    if not short:
+        return 0
+    markets = client.markets_by_ticker({t for t, _, _ in short})
+    done = 0
+    for ticker, side, n in short:
+        if markets.get(ticker, {}).get("status") not in ledger.OPEN:
+            continue
+        lost = ledger.write_off(ticker, side, n, "Kalshi holds fewer than the books: sold outside the bot?")
+        done += 1
+        note = (f"Kalshi shows {n:.0f} fewer {side.upper()} on {ticker} than the bot bought. "
+                f"It counted them as lost (${lost:.2f}). If you sold them, that's fine.")
+        summary["notes"].append(note)
+        try:
+            from . import notify
+            notify.send("kal wrote off some contracts", note, tags=("warning",))
+        except Exception:
+            log.warning("write-off alert failed", exc_info=True)
+    return done
+
+
 def _run(client, cfg, summary):
     cache = RunCache(client)
     try:
@@ -276,6 +345,23 @@ def _trade(client, cfg, summary):
     positions, balance = [], 0.0
     if live:
         summary["reconciled"] = reconcile(client)
+        try:
+            added = ledger.catch_up(client)
+        except ledger.CatchUpError as e:
+            reason = (f"the books were restored, but the bot can't read Kalshi's fills to bring them up "
+                      f"to date: {e}. Check the trades since the backup on Kalshi.")
+            config.trip(reason)
+            summary["notes"].append(f"STOPPED: {reason}")
+            return
+        if added:
+            summary["notes"].append(f"added {added} order(s) from Kalshi that the restored books were missing")
+        stranded = stranded_baskets()
+        if stranded:
+            reason = (f"basket left half-built on {', '.join(stranded)} (an earlier run stopped between "
+                      f"legs). Check open positions on Kalshi.")
+            config.trip(reason)
+            summary["notes"].append(f"STOPPED: {reason}")
+            return
     try:
         summary["settled"] = ledger.settle(client)
     except UnknownSettlement as e:
@@ -285,6 +371,7 @@ def _trade(client, cfg, summary):
         return
     summary["paper_settled"] = paper.settle(client)
     capital = ledger.capital(cfg)
+    at_risk = capital
     if live:
         balance = client.balance()
         positions = client.positions()
@@ -296,10 +383,25 @@ def _trade(client, cfg, summary):
             config.trip(reason)
             summary["notes"].append(f"STOPPED: {reason}")
             return
+        if db.get("restore_check"):
+            db.execute("DELETE FROM kv WHERE key = 'restore_check'")   # one look, then Reset decides
+            unknown = ledger.strangers(positions)
+            if unknown:
+                reason = (f"after the restore, Kalshi shows positions the books don't know: "
+                          f"{', '.join(unknown[:5])}. If they're yours, not the bot's, press Reset.")
+                config.trip(reason)
+                summary["notes"].append(f"STOPPED: {reason}")
+                return
+        if _write_off_sold(client, positions, summary):
+            capital = ledger.capital(cfg)
         equity = ledger.equity(client, cfg)
-        db.insert("equity", balance=balance, exposure=ledger.open_cost(), equity=equity,
+        open_cost = ledger.open_cost()
+        db.insert("equity", balance=balance, exposure=open_cost, equity=equity,
                   paper_equity=paper.equity(cfg))
-        reason = risk.daily_loss(cfg, equity)
+        # The limits that scale with capital (daily stop, bets cap, bet size) use what the bot
+        # could really lose, so a budget typed bigger than the account can't loosen them.
+        at_risk = min(capital, balance + open_cost)
+        reason = risk.daily_loss(cfg, equity, at_risk)
         if not reason and cfg["budget"] > 0 and capital < 1:
             reason = f"the ${cfg['budget']:.2f} of capital is used up"
         if reason:
@@ -331,7 +433,7 @@ def _trade(client, cfg, summary):
     # The ledger caps spending at the bot's capital; the account balance and cash floor cap
     # it again in case the account holds less. A $0 budget means no real trades at all.
     live_room = 0.0 if cfg["budget"] <= 0 else max(0.0, min(ledger.available(cfg), balance - cfg["cash_floor"]))
-    live_limits = risk.Limits(cfg, live_room, ledger.open_by_event(), ledger.open_directional(), capital)
+    live_limits = risk.Limits(cfg, live_room, ledger.open_by_event(), ledger.open_directional(), at_risk)
     paper_capital = cfg["paper_bankroll"] + paper.realized()
     paper_limits = risk.Limits(cfg, paper.cash(cfg), paper.open_by_event(), paper.open_directional(),
                                paper_capital)
@@ -339,7 +441,7 @@ def _trade(client, cfg, summary):
 
     # Bet smaller after losses (Grossman-Zhou style); arbitrage sizing doesn't use this.
     live_peak = max(ledger.peak_equity() or 0, cfg["budget"])
-    live_bankroll = capital * sizing.drawdown_multiplier(ledger.equity(client, cfg), live_peak) if live else 0.0
+    live_bankroll = at_risk * sizing.drawdown_multiplier(ledger.equity(client, cfg), live_peak) if live else 0.0
     paper_peak = max(paper.peak_equity() or 0, cfg["paper_bankroll"])
     paper_bankroll = paper_capital * sizing.drawdown_multiplier(paper.equity(cfg), paper_peak)
 
@@ -403,7 +505,9 @@ def _trade(client, cfg, summary):
             try:
                 spent = execute(client, sig, sid)
             except (LegFailed, OrderUnknown, Halted) as e:
-                db.execute("UPDATE signals SET status = ? WHERE id = ?", f"failed: {e}", sid)
+                # 'stranded' is already reported (the trip); 'failed' gets checked next run.
+                kind = "stranded" if isinstance(e, LegFailed) else "failed"
+                db.execute("UPDATE signals SET status = ? WHERE id = ?", f"{kind}: {e}", sid)
                 raise
             limits.spend(sig, spent)
             db.execute("UPDATE signals SET status = ? WHERE id = ?",

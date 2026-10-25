@@ -85,7 +85,24 @@ tests/            unittest; tests/fakes.py has FakeKalshi, tests/helpers.py has 
 - OFF is re-checked before every live order, and works even with a bad config file.
 - Kalshi closed (maintenance) -> run skipped. Network errors, 5xx and 429 never count
   toward the error trip (nothing can be bought then); 6+ hours of that sends one alert.
+- Waiting for a lost order to show up isn't counted as an error: a network blip
+  mustn't trip the bot. If cancelling a resting order fails, the trip says so, and the
+  order is looked up again after Reset.
+- No clear reply on a basket's 2nd+ leg -> trip at once. Each live run also checks for
+  baskets an earlier run left part-bought (a lost reply, or a crash between legs) and
+  trips once for each.
+- Each trade run keeps one exchange's books from start to end (`db.pinned`), even if
+  someone switches env part way.
 - Kalshi shows more contracts than the books explain on a market the bot traded -> trip.
+  Fewer, on a market still trading (someone sold them outside the bot) -> those are
+  written off as lost, so the books never earn on contracts they don't hold.
+- Account lists (positions, orders, fills) missing their key -> error, not "empty".
+- After `kal restore`, the next live run adds the buys Kalshi shows since the backup's
+  day before it trades (`ledger.catch_up`). A fill it can't read -> trip. Then any
+  Kalshi position the books still don't know -> one trip (the owner's own? Reset).
+- The daily stop, the bets cap and bet sizes scale with min(capital, account cash +
+  open cost), so a budget typed bigger than the account can't loosen them.
+- Baskets skip events with a market closing in under 5 minutes.
 - Locked-in trades: binary markets only, return under 25% (more is a misread), a known
   settle date within `max_arb_days`, and at least `min_arb_apr` a year.
 

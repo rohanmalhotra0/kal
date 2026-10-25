@@ -348,12 +348,10 @@ Only do this if the books (`kal.db`) are broken.
 2. Put one back: `sudo kal restore 2026-10-24 --yes`
    If it says to stop the service first: `sudo systemctl stop kal`,
    run step 2 again, then `sudo systemctl start kal`.
-3. The bot stops. On Kalshi, look at your trades since that day.
-   They are not in the restored books.
-4. Lower the budget by what those trades lost. Count any still open as lost.
-   For example, $50: `sudo kal set budget 250`
-   (The $300 limit is worked out from the books. This keeps it true.)
-5. Turn it back on: `sudo kal on --clear-trip`
+3. The bot stops. Turn it back on: `sudo kal on --clear-trip`
+4. Before it trades again, it adds the trades Kalshi shows since that day
+   to the books, so the $300 limit stays true. If it can't read them, it
+   stops again and says so.
 
 The old books are kept in `/var/lib/kal/backups/before-restore-.../`.
 

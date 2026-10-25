@@ -384,11 +384,9 @@ def cmd_restore(args):
     say(f"Restored {os.path.basename(r['db'])} from {args.day}.")
     if r["saved"]:
         say(f"The books from before are kept in {r['saved']}.")
-    say("The bot is stopped. Next:",
-        f" 1. On Kalshi, look at your trades since {args.day}. They are not in these books.",
-        " 2. Lower the budget by what they lost. Count any still open as lost.",
-        f"    For example, $50: {_cmd('set budget 250')}",
-        f" 3. Then: {_cmd('on --clear-trip')}")
+    say("The bot is stopped. When it's back on, it first adds the trades",
+        f"Kalshi shows since {args.day} to these books. If it can't, it stops and says why.",
+        f"Turn it back on: {_cmd('on --clear-trip')}")
     return 0
 
 

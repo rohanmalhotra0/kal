@@ -281,14 +281,33 @@ def restore(day, env=None, wait=120):
             before = str(config.load().get("disabled_reason") or "")[:200]
         except Exception:
             before = ""
-        config.trip(f"Books restored from the {day} backup. Trades after that are missing from them. "
-                    "Check Kalshi before you press Reset." + (f" (It had stopped before: {before})" if before else ""))
+        config.trip(f"Books restored from the {day} backup. When you press Reset, the bot first adds the "
+                    "trades Kalshi shows since then." + (f" (It had stopped before: {before})" if before else ""))
         try:
             saved = _put_back(src, live, name, stamp)
+            _mark_restored(live, day)
         except Exception as e:
             config.trip(f"Restoring the {day} backup failed: {e}. Check the books before you press Reset.")
             raise
     return {"db": live, "from": src, "saved": saved}
+
+
+def _mark_restored(path, day):
+    """Tell the next live run to bring the books up to date: every buy Kalshi shows since the
+    backup's day (an hour early, for clock slack) that these books don't have gets added
+    (ledger.catch_up). Until then the bot doesn't trade: the restore tripped it. A backup
+    taken while an older restore still waited keeps the older, earlier start."""
+    since = day_start(day) - 3600
+    with _open(path) as c:
+        c.execute("CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT)")
+        row = c.execute("SELECT value FROM kv WHERE key = 'restored'").fetchone()
+        try:
+            since = min(since, float(json.loads(row[0])["since"])) if row else since
+        except (TypeError, ValueError, KeyError):
+            since = 0   # unreadable: look at every fill Kalshi has
+        c.execute("INSERT OR REPLACE INTO kv (key, value) VALUES ('restored', ?)",
+                  (json.dumps({"day": day, "since": since, "at": time.time()}),))
+        c.commit()
 
 
 def _put_back(src, live, name, stamp):
