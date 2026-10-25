@@ -60,7 +60,9 @@ class _Pacer:
             time.sleep(delay)
 
 
+# Kalshi's basic tier: 20 reads and 10 writes a second. Stay a little under both.
 PACER = _Pacer(0.06)
+WRITE_PACER = _Pacer(0.11)
 
 
 # ---------- auth ----------
@@ -116,6 +118,8 @@ class Kalshi:
                     "KALSHI-ACCESS-SIGNATURE": sign(self.private_key, ts_ms, method, path),
                 }
             PACER.wait()
+            if method != "GET":
+                WRITE_PACER.wait()
             try:
                 r = self.s.request(method, self.base + path, params=params, json=body, headers=headers, timeout=30)
             except requests.RequestException:
