@@ -272,4 +272,17 @@ for path, params in (("/markets", {"limit": 1}), ("/exchange/status", {}), ("/ma
             ahead = f"? {e}"
         show(f"clock {path} {params} try {i + 1}", {"code": r.status_code, "local_minus_date_s": ahead, "headers": h})
         _time.sleep(1)
+# ---- Are order books cached too? (stale books could show arbitrage that isn't there)
+import uuid as _uuid
+if busy:
+    tk = busy[0]["ticker"]
+    for label, params in (("plain", {}), ("plain", {}), ("nonce", {"_": "1"}), ("nonce", {"_": _uuid.uuid4().hex}),
+                          ("depth", {"depth": 10})):
+        r = requests.get(f"{BASE}/markets/{tk}/orderbook", params=params, timeout=30)
+        h = {k: v for k, v in r.headers.items() if k.lower() in ("age", "cache-control", "x-cache", "date")}
+        show(f"orderbook cache {label} {params}", {"code": r.status_code, "headers": h})
+    for path in ("/events", "/series/" + (busy[0].get("event_ticker") or "").split("-")[0]):
+        r = requests.get(BASE + path, params={"limit": 1}, timeout=30)
+        show(f"cache {path}", {"code": r.status_code, "headers": {k: v for k, v in r.headers.items()
+                                                                  if k.lower() in ("age", "cache-control", "x-cache")}})
 sys.exit(0)
