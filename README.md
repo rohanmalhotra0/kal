@@ -72,6 +72,7 @@ can't fill, to prove Kalshi accepts its orders. Want to practice with fake money
 | `bracket_arb` | Ranges that cover every result: one must win. Buys all when they cost less than $1. | Low, once checked. | Paper, until a person checks it |
 | `favorites` | Buys price ranges that won more often than their price in past markets. | Medium. A bet, not a sure thing. | Paper |
 | `mentions` | "Will X say Y?" markets. Uses how often each word was said before. | Higher. | Paper |
+| `longshot_fade` | Buys NO on cheap YES bets, only where cheap YES lost more often than its price in past markets. | High. One longshot that hits wipes out about 19 wins. | Paper |
 
 **Paper** means pretend trades: no money, real results.
 

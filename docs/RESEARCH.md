@@ -118,13 +118,14 @@ status: **testing** (add the PR link), **built**, or **rejected** (say why in on
   - The rest: a Drake album ladder at about 15c for 3 hours, and 1-2c gaps in 3 others.
   - 0 of 131 settled events broke the order (an earlier date YES, a later one NO).
   - Those are a ceiling: the count used the written deadlines and none of the strategy's
-    checks. With them (open events, 2026-10-25): 307 of 405 ladders pass. Skipped: 46 with a
-    "fair price if the person dies" rule, 36 whose rules don't say plainly "if it happens
-    before <date>" (e.g. "resolved ... and not retracted before expiration"), 9 whose rules
-    differ between dates ("meet (including phone calls)" vs "meet"), 7 with mixed data.
-    4 of the 5 events with gaps pass (the 5th has the death rule).
-  - "After issuance" windows (the Drake ladder) pair only when the later market was listed
-    no later than the earlier one: 161 of 3,864 pairs fail that.
+    checks. With the merged ones (open events, 2026-10-25): 266 of 405 ladders pass.
+    Skipped: 46 with a "fair price if the person dies" rule, 43 whose rules let the outcome
+    be undone (e.g. "not retracted before expiration"), 34 whose rules don't say just "if it
+    happens before <date>", 9 whose rules differ between dates ("meet (including phone
+    calls)" vs "meet"), 7 with mixed data. 6 of the 8 gap hours pass (Hegseth has the death
+    rule; the 29c one hits the cap).
+  - Every pair needs the later market listed no later than the earlier one, so "after
+    issuance" windows (the Drake ladder) nest: 360 of 3,614 pairs fail that.
   - So: rare but real. Built as `date_ladder_arb` on paper.
   - Three rounds of independent review each found new rule wordings that read the question
     the wrong way round ("nothing is released", "refrains from", "the night before"). So the
@@ -177,7 +178,7 @@ status: **testing** (add the PR link), **built**, or **rejected** (say why in on
   a deposit) never raises what the bot may spend. A test pins that. Counting it would add about
   $10 a year to what the bot may reinvest: not worth a money-path change.
 
-**13. Longshot fade (NO on cheap YES)** - being built, paper only
+**13. Longshot fade (NO on cheap YES)** - built, paper until promoted (`longshot_fade`)
 - What: buy NO where YES costs under 20c.
 - Evidence: weak for a taker. The research swarm found it about break-even or worse after spread and fees in 2025-2026 Kalshi data; one niche (liquid weather brackets the evening before) didn't hold up elsewhere.
 - Risk: high. A NO at 95c loses 95c when the longshot hits.
