@@ -43,6 +43,22 @@ tests/            unittest; tests/fakes.py has FakeKalshi, tests/helpers.py has 
   `words.json` holds mention-word history). The engine loads each file into
   `ctx.research[<file stem>]` every run.
 
+## Facts from the real Kalshi API (checked by tools/api_probe.py)
+
+- Prices come as dollar strings: `yes_bid_dollars: "0.9300"`. Historical candles use
+  `close: "0.8000"` (dollars, no suffix). Counts come as `_fp` strings. `client.price`
+  reads every shape; `client.price_strict` is for the self-test.
+- Settled markets say `status: "finalized"` (also `settled`). `determined` is not final.
+- Markets settled before the historical cutoff live under `/historical/...`
+  (`client.candles` falls back there on 404).
+- One event can hold different questions (both teams' spreads, every player's props),
+  so ladders need matching wording, ticker letters and `custom_strike`.
+- Some real ladders close in 2040. Locked-in trades must settle within `max_arb_days`
+  and return at least `min_arb_apr` a year.
+- Price ticks are 1c, 0.1c, or 0.1c near the ends (`price_ranges`). Orders are priced off
+  the opposite side's real bid, so they're always on a tick.
+- Combo markets (`KXMVE...`) are skipped everywhere.
+
 ## Failing closed
 
 - Unknown strategy mode -> never traded. Invalid config -> no run.
@@ -50,6 +66,11 @@ tests/            unittest; tests/fakes.py has FakeKalshi, tests/helpers.py has 
   Kalshi (by client_order_id) before trading. Can't tell yet -> no live trading.
 - An order left resting -> cancelled, and the bot trips.
 - OFF is re-checked before every live order, and works even with a bad config file.
+- Kalshi closed (maintenance) -> run skipped. Network errors, 5xx and 429 never count
+  toward the error trip (nothing can be bought then); 6+ hours of that sends one alert.
+- Kalshi shows more contracts than the books explain on a market the bot traded -> trip.
+- Locked-in trades: binary markets only, return under 25% (more is a misread), a known
+  settle date within `max_arb_days`, and at least `min_arb_apr` a year.
 
 ## Modes
 
