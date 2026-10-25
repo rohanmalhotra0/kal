@@ -847,3 +847,23 @@ class VolumeTests(TempHome):
         discover.run(c, config.load(), series=["Q"])
         self.assertEqual({e["id"]: e for e in discover.load_edges()}[eid]["status"], "candidate")
 
+
+
+class NoStaleNamesTests(TempHome):
+    def test_nothing_uses_a_name_backtest_no_longer_has(self):
+        # Weather research (#11) used backtest.MIN_VOLUME, which this change removed. Python
+        # finds that only when the line runs, so a merge can leave it broken and green.
+        import ast
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        missing = []
+        for top in ("kal", "tools"):
+            for d, _, files in os.walk(os.path.join(root, top)):
+                for f in (f for f in files if f.endswith(".py")):
+                    path = os.path.join(d, f)
+                    with open(path) as fh:
+                        tree = ast.parse(fh.read())
+                    missing += [f"{os.path.relpath(path, root)}:{n.lineno} backtest.{n.attr}"
+                                for n in ast.walk(tree)
+                                if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name)
+                                and n.value.id == "backtest" and not hasattr(backtest, n.attr)]
+        self.assertEqual(missing, [])

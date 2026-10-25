@@ -393,3 +393,19 @@ class StrictAccountListTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class InterestTests(TempHome):
+    """Kalshi pays interest on cash (RESEARCH.md idea #12). It lands in the account, never
+    in the bot's books, so it can't stretch the rule that the bot loses at most its budget.
+    The same holds for a deposit or anything else the bot didn't trade."""
+
+    def test_money_the_bot_did_not_trade_never_raises_what_it_may_spend(self):
+        config.update({"budget": 300.0})
+        cfg = config.load()
+        c = FakeKalshi(balance=300.0)
+        before = (ledger.capital(cfg), ledger.available(cfg), ledger.equity(c, cfg))
+        for balance in (301.0, 310.0, 1000.0):     # a month of interest, a year, a deposit
+            c._balance = balance
+            self.assertEqual((ledger.capital(cfg), ledger.available(cfg), ledger.equity(c, cfg)), before)
+        self.assertEqual(before[1], 300.0)

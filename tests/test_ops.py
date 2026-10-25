@@ -1247,7 +1247,7 @@ class DeployFileTests(unittest.TestCase):
 
     def test_install_keeps_the_clock_right_and_sets_up_alerts(self):
         sh = read("deploy", "install.sh")
-        for bit in ("apt-get install -y -qq chrony", "systemd-timesyncd", "timedatectl", "KAL_NTFY_TOPIC=",
+        for bit in ("apt_get install -y -qq chrony", "systemd-timesyncd", "timedatectl", "KAL_NTFY_TOPIC=",
                     "SystemMaxUse=", 'KAL_CMD="sudo kal"', "sudo kal health", "sudo kal summary --send",
                     '"$DATA/ntfy_topic"', "umask 077"):
             self.assertIn(bit, sh)

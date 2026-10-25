@@ -82,18 +82,27 @@ status: **testing** (add the PR link), **built**, or **rejected** (say why in on
 - What: buy in price ranges that won more often than the price said.
 - Evidence: strong that the bias exists; weak that a taker keeps much. Bürgi, Deng & Whelan (300,000+ Kalshi contracts): under 10c loses over 60%. But most of the bias goes to makers: a taker at the real ask keeps about 0-1% at 90-99c (research swarm, 2026-10-25). The gap is shrinking.
 - Risk: medium. The edge is a few cents. One upset wipes out many wins. Cancelled games pay a split ($0.33 each on a 3-way), now counted in backtests.
-- Test: built in (backtest, then 30 paper trades). Next: try 1, 3 and 24 hours before close (the research says the last 24 h is best); keep spreads at 2c or less.
+- Test: built in (backtest, then 30 paper trades). Tried 1, 6 and 24 hours before close on
+  busy markets only (2026-10-25, PR #12): no price range clears the bar at any horizon. Best:
+  NO 95c+ with spreads of 2c or less, +0.1% to +0.6% (worst case -1.6% to -2.9%). Next: count
+  its paper trades; nothing to promote.
 
 **4. Bracket arbitrage** - built, paper
 - What: brackets cover every value, so one must win. Buy YES on all when under $1.
 - Evidence: strong, if there's no gap. Risk: high if there is one. All is lost.
 - Test: a person checks 20+ settled events. One bracket won each time? Set "verified".
 
-**5. NO on over-bet YES, by market type** - untested (top pick for the next check-in)
+**5. NO on over-bet YES, by market type** - tested 2026-10-25: no edge for a taker
 - What: people over-bet YES on "will X happen?" markets that mostly end NO. Buy NO.
 - Evidence: medium. Bartlett & O'Hara (41.6M Kalshi trades) found it, mostly in single-name markets (one person or company). A summary says YES was bought 61% of the time there, but won 32%.
 - Risk: medium-high. Those same markets have the most insiders.
 - Test: reuse `backtest.calibration`, split by market type and side. Need a lower bound above 0 after fees. The research swarm ranks this the second most likely edge for a small taker, after near-resolution favorites.
+- Result (deep research on PR #9, 24,878 markets, 12 categories, 6 h before the end): no NO range has an edge in any category. Best: NO 95c+ with spreads of 2c or less, +0.2% (worst case -2.7%); politics NO 95c+, +0.7% (worst -4.1%).
+- Rerun on busy markets only (PR #12: 200+ contracts in the day before, as live strategies
+  ask), at 1 h, 6 h and 24 h before the end: 15,605 to 19,752 markets each, 576 tries per
+  run, and the bar raised for 3x the tries (z = 4.02). No row clears it at any horizon. No
+  row has even a lower bound above 0. Best: NO 95c+ with tight spreads at 24 h, +0.1% (worst
+  -1.6%). The verdict stands: no taker edge.
 
 **6. Related markets that must agree** - untested
 - What: linked prices must fit. E.g. "Fed cuts in Dec" vs "rate below X in Jan".
@@ -101,11 +110,13 @@ status: **testing** (add the PR link), **built**, or **rejected** (say why in on
 - Risk: medium-high. If the rules differ (source, time, rounding), both legs can lose.
 - Test: pick 3 pairs where the rules text proves the link. Log gaps on paper for 2 weeks.
 
-**7. Scheduled data releases (weather, CPI, jobs)** - untested
+**7. Scheduled data releases (weather, CPI, jobs)** - weather tested 2026-10-25: rejected
 - What: compare the price with a public forecast before the report comes out.
 - Evidence: medium-low. A Fed study found Kalshi macro prices about as good as expert surveys. Weather "edges" online come from sellers, not studies.
 - Risk: medium. Model error, thin markets, news moves first.
 - Test: daily high temps (settle on the NWS Daily Climate Report). Save forecast + price 6h before close for 60+ days. Compare with results.
+- Backtest: `tools/weather_research.py` (`kal/research/weather.py`). Daily highs in 7 cities. It uses the latest NBM forecast run published 2+ hours before the decision time (the Iowa Environmental Mesonet keeps every run). Each city's bias and spread are fitted only on earlier days. It buys where the forecast and the price disagree by 5c or 10c after the taker fee, and counts one day in all cities as one unit. It also compares how well the forecast and the market called the results (Brier score).
+- Result (4,686 markets, 112 days, 7 cities): Kalshi's prices beat the NBM forecast in every city (Brier 0.095 vs 0.121 at 18 h before the end; 0.098 vs 0.122 at 30 h). The market is calibrated at every level. The forecast is overconfident in the likeliest bracket: at 60%+ it won 50%. Every trading rule lost: YES about -50%, NO -11% to -17%. The brackets map right (every event tiles), and the tails aren't fat (2.7% of results beyond 2 spreads). Rejected: the public forecast knows less than the market.
 
 **8. Mention words** - built, paper
 - What: YES on words said more often than the price says. NO on less.
@@ -119,22 +130,29 @@ status: **testing** (add the PR link), **built**, or **rejected** (say why in on
 - Evidence: medium. Bartlett & O'Hara: one-sided flow predicts maker losses in single-name markets.
 - Risk: low. It only removes trades. Next test: did skipped trades do worse than taken ones? (Log the would-be result of each skip.)
 
-**10. Maker quotes + Liquidity Incentive Program** - untested, needs engine work
+**10. Maker quotes + Liquidity Incentive Program** - tested 2026-10-25: no lead
 - What: rest orders instead of taking. Most series charge makers nothing; series with fee_type `quadratic_with_maker_fees` charge 0.0175 x M (a quarter of taker), combos 0.035. Kalshi's LIP pays for resting orders near the best price, even unfilled.
 - Evidence: medium. Makers beat takers (Bürgi et al.). In single-name markets, makers earn ~2x per contract vs broad ones (Bartlett & O'Hara).
 - Risk: high. Better-informed traders pick off resting orders. The engine can't cancel orders. LIP terms change often: check they still apply.
 - Test: paper only. Log would-be quotes. Count a fill when trades go through our price. Score at settlement, plus our LIP share.
+- Backtest: `tools/maker_research.py` (`kal/research/maker.py`). At the decision time, rest a one-contract bid at the best bid (or 1c better). It fills only when a later trade reached it, and every fill pays a maker fee. One contract is a maker's best case, so a price range that loses here loses at any size. A range that wins is only a lead: check it with real trade sizes first.
+- Result (4,633 markets, 224 category-days, 6 h before the end, each series' own maker fee): no lead. Best: NO bids at 90-95c, +2.4% (worst case -20%). Most ranges lose even in this best case. Fills come when the price runs through the bid (a 95c+ NO bid filled about 1 time in 10). Not worth the engine work now.
+- LIP (docs/LIP.md, 2026-10-25): not yet. It ends by 2027-01-01. The best public test scales to about +$2 a day at $300, and about $0 once rivals compete. Resting quotes need safe cancels the engine doesn't have. Look again only if Kalshi extends it, starting with a logger that sends no orders.
 
-**11. Other venues as a fair-price guide** - untested
+**11. Other venues as a fair-price guide** - tested 2026-10-25: no edge, the prices match
 - What: use Polymarket or sportsbook prices to judge Kalshi's. Trade only Kalshi.
 - Evidence: weak-medium. A 2024 election study found Polymarket led Kalshi.
 - Risk: medium. Venues can settle the same event differently.
 - Test: log both prices. Which was closer to the result?
+- Result (`tools/xvenue_research.py`): 3,132 games in 13 leagues, 90 days, 6 h before the end. Same price (over 2c apart on 0.3% of markets), same skill (Brier 0.1984 Kalshi, 0.1985 Polymarket), same results on all 6,836 markets. Buying Kalshi on a 2-6c gap: 4-11 trades, all lost.
 
-**12. Interest on positions** - untested (accounting, not a strategy)
+**12. Interest on positions** - checked 2026-10-25: kept as the owner's money (accounting, not a strategy)
 - What: Kalshi pays variable interest (seen 3.25-4%) on cash and open positions. Monthly, $250+ only.
 - Evidence: strong (Kalshi help page). Small: ~$10 a year on $300. Risk: low.
 - Test: find it in account history. Ask for the ledger to count it. Never loosen risk rules for it.
+- Result: the ledger is built from the bot's own fills and settlements only, so interest (like
+  a deposit) never raises what the bot may spend. A test pins that. Counting it would add about
+  $10 a year to what the bot may reinvest: not worth a money-path change.
 
 **13. Longshot fade (NO on cheap YES)** - being built, paper only
 - What: buy NO where YES costs under 20c.
