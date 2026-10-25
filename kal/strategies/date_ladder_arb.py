@@ -53,6 +53,27 @@ def _date(text, before=True):
         return None   # "Before Feb 30, 2026"
 
 
+_ISO = re.compile(r"^\s*((?:19|20)\d\d)-(\d\d)-(\d\d)(?:[T ][\d:.]+(?:Z|[+-]\d\d:?\d\d)?)?\s*$")
+_SHORT = re.compile(r"^\s*(\d\d)([a-z]{3})(\d\d)\s*$", re.I)    # "27Jan01", Kalshi's ticker style
+
+
+def _value_date(v):
+    """A date written any way Kalshi writes one in custom_strike: "Sep 1, 2026", "Before Sep 1,
+    2026", "2026-09-01", "2026-09-01T14:00:00.000Z" or "26Sep01". None if it isn't one."""
+    d = _date(v, before=False)
+    if d is not None:
+        return d
+    g, short = _ISO.match(v), _SHORT.match(v)
+    try:
+        if g:
+            return datetime.date(int(g[1]), int(g[2]), int(g[3]))
+        if short and short[2].lower() in MONTHS:
+            return datetime.date(2000 + int(short[1]), MONTHS[short[2].lower()], int(short[3]))
+    except ValueError:
+        pass
+    return None
+
+
 def deadline(m):
     """The date in a market's wording, "Before Sep 1, 2026", or None."""
     return _date(m.get("yes_sub_title") or m.get("subtitle"))
@@ -60,14 +81,15 @@ def deadline(m):
 
 def _about(m):
     """What the market is about besides its deadline, from its custom_strike, comparable across
-    markets. Kalshi puts the deadline there too: {"Date": "Sep 1, 2026", "Player": "Kade
-    Anderson"}. None if a date there disagrees with the wording: then trust neither."""
+    markets. Kalshi puts the deadline there too, written many ways: {"Date": "Sep 1, 2026",
+    "Player": "Kade Anderson"}, {"deadline": "2026-10-15"}, {"Policy": "27Jan01"}. None if a
+    date there disagrees with the wording: then trust neither."""
     cs = m.get("custom_strike") or {}
     if not isinstance(cs, dict):
         return None
     out = []
     for k, v in sorted(cs.items()):
-        d = _date(v, before=False) if isinstance(v, str) else None
+        d = _value_date(v) if isinstance(v, str) else None
         if d is not None:
             if d != deadline(m):
                 return None
