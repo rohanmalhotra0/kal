@@ -43,17 +43,19 @@ show("exchange status", {"code": code, "body": d})
 # Which order endpoints exist? With no key, an existing endpoint answers 401 and a removed
 # one 404. Nothing can be placed without a key, so this is harmless.
 for host in ("https://api.elections.kalshi.com", "https://external-api.kalshi.com"):
-    for path in ("/trade-api/v2/portfolio/orders", "/trade-api/v2/portfolio/events/orders",
-                 "/trade-api/v2/portfolio/balance"):
+    checks = [("POST", "/trade-api/v2/portfolio/orders"), ("POST", "/trade-api/v2/portfolio/events/orders"),
+              ("DELETE", "/trade-api/v2/portfolio/events/orders/00000000-0000-0000-0000-000000000000"),
+              ("GET", "/trade-api/v2/portfolio/balance"), ("GET", "/trade-api/v2/portfolio/positions"),
+              ("GET", "/trade-api/v2/portfolio/orders"), ("GET", "/trade-api/v2/portfolio/fills"),
+              ("GET", "/trade-api/v2/portfolio/settlements"), ("GET", "/trade-api/v2/portfolio/events/orders")]
+    for method, path in checks:
+        if host != "https://api.elections.kalshi.com" and method == "GET":
+            continue
         try:
-            if path.endswith("balance"):
-                r = requests.get(host + path, timeout=20)
-            else:
-                r = requests.post(host + path, json={}, timeout=20)
-            show(f"endpoint {'GET' if path.endswith('balance') else 'POST'} {host}{path}",
-                 {"code": r.status_code, "body": r.text[:200]})
+            r = requests.request(method, host + path, json={} if method == "POST" else None, timeout=20)
+            show(f"endpoint {method} {host}{path}", {"code": r.status_code, "body": r.text[:200]})
         except Exception as e:
-            show(f"endpoint {host}{path}", {"error": str(e)[:200]})
+            show(f"endpoint {method} {host}{path}", {"error": str(e)[:200]})
 
 # The demo (fake money) exchange the setup guide tells people to try first
 for demo in ("https://demo-api.kalshi.co/trade-api/v2", "https://demo-api.elections.kalshi.com/trade-api/v2"):
