@@ -18,8 +18,8 @@ the order. So it starts on paper.
 The deadline comes from each market's own wording ("Before Sep 1, 2026"), never its
 close_time: Kalshi rewrites close_time when a market settles early, and the order
 flips. We only trust an event where every market reads exactly "Before <date>", each
-with its own date, and every market's rules match once the dates are taken out.
-Anything odd and the event is skipped.
+with its own date, and every market's rules and custom_strike match once the dates are
+taken out. Anything odd and the event is skipped.
 """
 import datetime
 import re
@@ -27,7 +27,7 @@ import time
 
 from .base import Leg, Signal, Strategy
 from .ladder_arb import (MIN_TIME_LEFT, allocate, close_ts, locked_basket, looks_inverted, own_markets,
-                         quote, same_custom_strike, thinnest_first, tradeable)
+                         quote, thinnest_first, tradeable)
 
 _MONTHS = (r"jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?"
            r"|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?")
@@ -40,9 +40,10 @@ _DATES = re.compile(rf"\b(?:{_MONTHS})\.?\s+\d{{1,2}}(?:st|nd|rd|th)?(?:,?\s+(?:
                     r"|(?<=before )(?:19|20)\d\d\b", re.I)
 
 
-def deadline(m):
-    """The date in a market's "Before Sep 1, 2026" ("Before 2028" is Jan 1, 2028), or None."""
-    g = BEFORE.match(m.get("yes_sub_title") or m.get("subtitle") or "")
+def _date(text, before=True):
+    """The date in "Before Sep 1, 2026" ("Before 2028" is Jan 1, 2028), or None. With
+    before=False, a bare "Sep 1, 2026" counts too."""
+    g = BEFORE.match(text or "") or (None if before else BEFORE.match(f"before {text or ''}"))
     if not g:
         return None
     month, day, year = g.groups()
@@ -50,6 +51,29 @@ def deadline(m):
         return datetime.date(int(year), MONTHS[month[:3].lower()] if month else 1, int(day) if day else 1)
     except ValueError:
         return None   # "Before Feb 30, 2026"
+
+
+def deadline(m):
+    """The date in a market's wording, "Before Sep 1, 2026", or None."""
+    return _date(m.get("yes_sub_title") or m.get("subtitle"))
+
+
+def _about(m):
+    """What the market is about besides its deadline, from its custom_strike, comparable across
+    markets. Kalshi puts the deadline there too: {"Date": "Sep 1, 2026", "Player": "Kade
+    Anderson"}. None if a date there disagrees with the wording: then trust neither."""
+    cs = m.get("custom_strike") or {}
+    if not isinstance(cs, dict):
+        return None
+    out = []
+    for k, v in sorted(cs.items()):
+        d = _date(v, before=False) if isinstance(v, str) else None
+        if d is not None:
+            if d != deadline(m):
+                return None
+            v = "<deadline>"
+        out.append((k, v))
+    return repr(out)
 
 
 def _rules(m):
@@ -65,11 +89,14 @@ def ladder(ev):
     markets = ev.get("markets") or []
     if len(markets) < 2 or ev.get("mutually_exclusive") is not False:
         return None   # several deadlines can all be YES, so a ladder is never mutually exclusive
-    if not own_markets(ev) or not same_custom_strike(ev):
+    if not own_markets(ev):
         return None
     days = [deadline(m) for m in markets]
     if None in days or len(set(days)) != len(days):
         return None
+    about = {_about(m) for m in markets}
+    if len(about) != 1 or None in about:
+        return None   # another player, team or thing, or a date that disagrees
     rules = {_rules(m) for m in markets}
     if len(rules) != 1 or None in rules:
         return None   # the same question at every date, or no trade

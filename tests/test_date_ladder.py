@@ -219,6 +219,38 @@ class DateLadderTests(unittest.TestCase):
         ev["markets"][0]["custom_strike"] = {"person": "A"}
         self.assertEqual(self.scan(ev), [])
 
+    def _custom(self, ev, key="Date", form="{d}", **more):
+        for m in ev["markets"]:
+            m["custom_strike"] = {key: form.format(d=m["yes_sub_title"][len("Before "):]), **more}
+        return ev
+
+    def test_custom_strike_holding_the_deadline_still_counts(self):
+        # Real Kalshi: {"Date": "Sep 1, 2026", "Player": "Kade Anderson"}, each market its own date.
+        for key, form in (("Date", "{d}"), ("Date", "Before {d}"), ("Before", "{d}")):
+            ev = self._custom(date_event(), key, form, Player="Kade Anderson")
+            self.assertEqual(len(self.scan(ev)), 1, (key, form))
+
+    def test_custom_strike_naming_another_player_is_not_a_ladder(self):
+        ev = self._custom(date_event(), Player="Kade Anderson")
+        ev["markets"][1]["custom_strike"]["Player"] = "Aidan Miller"
+        self.assertEqual(self.scan(ev), [])
+
+    def test_custom_strike_date_that_disagrees_with_the_wording_means_no(self):
+        ev = self._custom(date_event())
+        ev["markets"][1]["custom_strike"]["Date"] = ev["markets"][2]["custom_strike"]["Date"]
+        self.assertEqual(self.scan(ev), [])
+
+    def test_year_only_deadlines(self):
+        # "Before 2030" with {"Before": "Jan 1, 2030"}, as Kalshi lists FDA approvals.
+        ev = date_event()
+        for m, year in zip(ev["markets"], (2030, 2031, 2032)):
+            m["yes_sub_title"], m["custom_strike"] = f"Before {year}", {"Before": f"Jan 1, {year}"}
+            m["rules_primary"] = f"If the FDA approves VERVE-102 before Jan 1, {year}, then the market resolves to Yes."
+            m["close_time"] = iso(time.time() + 9 * DAY)   # the money rule is checked elsewhere
+        ev["markets"][2]["close_time"] = iso(time.time() + 12 * DAY)
+        rungs = date_ladder_arb.ladder(ev)
+        self.assertEqual([m["yes_sub_title"] for m in rungs], ["Before 2030", "Before 2031", "Before 2032"])
+
     def test_held_or_closing_markets_are_skipped(self):
         ev = date_event()
         self.assertEqual(self.scan(ev, held={ev["markets"][0]["ticker"]}), [])
