@@ -1,5 +1,6 @@
 """Does date_ladder_arb accept real date ladders? Side branch only, never merged.
 Public data only: no key, no orders. Reads events and order books, runs the scan."""
+import calendar
 import collections
 import os
 import sys
@@ -30,11 +31,11 @@ def why(ev):
         return "a subtitle isn't 'Before <date>'"
     if len(set(days)) != len(days):
         return "a deadline repeats"
-    about = {d._about(m) for m in ms}
-    if None in about:
-        return "custom_strike date disagrees with the wording"
-    if len(about) != 1:
-        return "custom_strike differs"
+    if not d.same_about(ms):
+        return "custom_strike differs (or its date disagrees)"
+    bad = [m for m in ms if not d.claims_it_happens_before(m)]
+    if bad:
+        return "rules don't say 'If <it happens> before <its date>, then ... Yes'"
     rules = {d._rules(m) for m in ms}
     if None in rules:
         return "no rules"
@@ -83,7 +84,10 @@ def main():
                         seen.append(x)
                 for x in seen[:2]:
                     print(f"          | {x[:400]}")
-            if r == "custom_strike differs":
+            if r.startswith("rules don't say"):
+                m = next(m for m in ev["markets"] if not d.claims_it_happens_before(m))
+                print(f"          | {m['ticker']} {m.get('yes_sub_title')!r}: {(m.get('rules_primary') or '')[:220]!r}")
+            if r.startswith("custom_strike differs"):
                 for m in ev["markets"][:4]:
                     print(f"          | {m['ticker']} {m.get('yes_sub_title')!r} custom_strike={m.get('custom_strike')!r}"
                           f" strike_type={m.get('strike_type')!r} floor={m.get('floor_strike')!r}")
@@ -91,6 +95,17 @@ def main():
                 m = ev["markets"][0]
                 print(f"          | {m.get('market_type')} {m.get('settlement_bounds_type')} "
                       f"{(m.get('rules_primary') or '')[:200]} || {(m.get('rules_secondary') or '')[:300]}")
+    gaps = []
+    for ev in events:
+        if before_family(ev) and why(ev) == "ok":
+            for m in ev["markets"]:
+                dl = d.deadline(m)
+                gaps.append((d.close_ts(m) - calendar.timegm(dl.timetuple())) / 86400)
+    gaps.sort()
+    if gaps:
+        q = lambda f: gaps[min(len(gaps) - 1, int(f * len(gaps)))]
+        print(f"\naccepted ladders: close_time minus written deadline, days: min {gaps[0]:.1f}, "
+              f"10% {q(.1):.1f}, median {q(.5):.1f}, 90% {q(.9):.1f}, max {gaps[-1]:.1f} ({len(gaps)} markets)")
     print("\nthe events where the probe saw gaps:")
     for t in GAPS:
         try:
