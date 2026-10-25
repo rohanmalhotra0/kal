@@ -2,7 +2,8 @@
 import importlib
 import logging
 
-MODULES = ["basket_arb", "ladder_arb", "bracket_arb", "favorites", "mentions", "longshot_fade"]
+MODULES = ["basket_arb", "ladder_arb", "date_ladder_arb", "bracket_arb", "favorites", "mentions",
+           "longshot_fade"]
 log = logging.getLogger(__name__)
 
 
