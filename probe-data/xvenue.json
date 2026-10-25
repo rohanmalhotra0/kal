@@ -1,0 +1,854 @@
+{
+ "days": 90.0,
+ "hours_before_end": 6,
+ "leagues": {
+  "NFL": {
+   "kalshi": 144,
+   "polymarket": 145,
+   "matched": 143,
+   "why": {
+    "two Polymarket games fit as well": 1,
+    "matched, Kalshi's start a placeholder": 1
+   }
+  },
+  "NBA": {
+   "kalshi": 103,
+   "polymarket": 102,
+   "matched": 102,
+   "why": {
+    "no Polymarket game with those teams near that time": 1
+   }
+  },
+  "MLB": {
+   "kalshi": 882,
+   "polymarket": 906,
+   "matched": 865,
+   "why": {
+    "no Polymarket game with those teams near that time": 17,
+    "matched, Kalshi's start a placeholder": 2
+   }
+  },
+  "NHL": {
+   "kalshi": 238,
+   "polymarket": 241,
+   "matched": 238,
+   "why": {}
+  },
+  "CFB": {
+   "kalshi": 1040,
+   "polymarket": 1043,
+   "matched": 969,
+   "why": {
+    "matched, Kalshi's start a placeholder": 82,
+    "no Polymarket game with those teams near that time": 69,
+    "two Polymarket games fit as well": 1,
+    "its Polymarket game was taken by a surer match": 1
+   }
+  },
+  "WNBA": {
+   "kalshi": 149,
+   "polymarket": 155,
+   "matched": 147,
+   "why": {
+    "no Polymarket game with those teams near that time": 2,
+    "matched, Kalshi's start a placeholder": 1
+   }
+  },
+  "MLS": {
+   "kalshi": 213,
+   "polymarket": 211,
+   "matched": 208,
+   "why": {
+    "no Polymarket game with those teams near that time": 5
+   }
+  },
+  "EPL": {
+   "kalshi": 75,
+   "polymarket": 80,
+   "matched": 75,
+   "why": {}
+  },
+  "La Liga": {
+   "kalshi": 98,
+   "polymarket": 97,
+   "matched": 90,
+   "why": {
+    "no Polymarket game with those teams near that time": 8,
+    "matched, Kalshi's start a placeholder": 3
+   }
+  },
+  "Bundesliga": {
+   "kalshi": 61,
+   "polymarket": 63,
+   "matched": 61,
+   "why": {}
+  },
+  "Serie A": {
+   "kalshi": 76,
+   "polymarket": 78,
+   "matched": 72,
+   "why": {
+    "no Polymarket game with those teams near that time": 4
+   }
+  },
+  "Ligue 1": {
+   "kalshi": 66,
+   "polymarket": 71,
+   "matched": 65,
+   "why": {
+    "its Polymarket game was taken by a surer match": 1
+   }
+  },
+  "UCL": {
+   "kalshi": 102,
+   "polymarket": 100,
+   "matched": 97,
+   "why": {
+    "no Polymarket game with those teams near that time": 5
+   }
+  }
+ },
+ "matched": 3132,
+ "markets": 6851,
+ "busy": 6742,
+ "left_out": {
+  "decision too close to Polymarket's start": 19,
+  "not open at the decision time": 62
+ },
+ "agree": 6836,
+ "differ": 0,
+ "examples": [
+  "NFL: KXNFLGAME-26AUG06CARARI (Arizona, Carolina)  =  nfl-car-ari-2026-08-07 (Cardinals, Panthers)",
+  "NFL: KXNFLGAME-26AUG13DETCIN (Cincinnati, Detroit)  =  nfl-det-cin-2026-08-13 (Bengals, Lions)",
+  "NBA: KXNBAGAME-26OCT03MIATOR (Miami, Toronto)  =  nba-mia-tor-2026-10-03 (Heat, Raptors)",
+  "NBA: KXNBAGAME-26OCT04GSWLAC (Golden State, Los Angeles C)  =  nba-gsw-lac-2026-10-04 (Warriors, Clippers)",
+  "MLB: KXMLBGAME-26JUL271435SEATEX (Seattle, Texas)  =  mlb-sea-tex-2026-07-27 (Seattle Mariners, Texas Rangers)",
+  "MLB: KXMLBGAME-26JUL271840AZPIT (Arizona, Pittsburgh)  =  mlb-ari-pit-2026-07-27 (Arizona Diamondbacks, Pittsburgh Pirates)",
+  "NHL: KXNHLGAME-26SEP19DALSTL (Dallas, St. Louis)  =  nhl-dal-stl-2026-09-19 (Stars, Blues)",
+  "NHL: KXNHLGAME-26SEP19CHIMIN (Chicago, Minnesota)  =  nhl-chi-min-2026-09-19 (Blackhawks, Wild)",
+  "CFB: KXNCAAFGAME-26AUG27METOWS (Maine, Towson)  =  cfb-maine-tows-2026-08-27 (Maine, Towson)",
+  "CFB: KXNCAAFGAME-26AUG27MHUYSU (Mercyhurst, Youngstown St.)  =  cfb-mhud34ce7-yngst-2026-08-27 (Mercyhurst, Youngstown State)",
+  "WNBA: KXWNBAGAME-26JUL28CONNWSH (Connecticut, Washington)  =  wnba-conn-wsh-2026-07-28 (Connecticut Sun, Washington Mystics)",
+  "WNBA: KXWNBAGAME-26JUL28TORMIN (Minnesota, Toronto)  =  wnba-tor-min-2026-07-28 (Minnesota Lynx, Toronto Tempo)",
+  "MLS: KXMLSGAME-26JUL31NYCTOR (New York City, Tie, Toronto)  =  mls-nyc-tor-2026-07-31 (New York City FC, Draw (New York City FC vs. Toronto FC), Toronto FC)",
+  "MLS: KXMLSGAME-26AUG01CINSJ (Cincinnati, San Jose, Tie)  =  mls-fcc-sje-2026-08-01 (FC Cincinnati, San Jose Earthquakes, Draw (FC Cincinnati vs. San Jose Earthquakes))",
+  "EPL: KXEPLGAME-26AUG21ARSCOV (Arsenal, Coventry, Tie)  =  epl-ars-cov-2026-08-21 (Arsenal FC, Coventry City FC, Draw (Arsenal FC vs. Coventry City FC))",
+  "EPL: KXEPLGAME-26AUG22HULMUN (Hull City, Manchester United, Tie)  =  epl-hul-mun-2026-08-22 (Hull City AFC, Manchester United FC, Draw (Hull City AFC vs. Manchester United FC))",
+  "La Liga: KXLALIGAGAME-26AUG15ALAGET (Alaves, Getafe, Tie)  =  lal-ala-get-2026-08-15 (Deportivo Alav\u00e9s, Getafe CF, Draw (Deportivo Alav\u00e9s vs. Getafe CF))",
+  "La Liga: KXLALIGAGAME-26AUG15SEVRVC (Vallecano, Sevilla, Tie)  =  lal-sev-ray-2026-08-15 (Rayo Vallecano de Madrid, Sevilla FC, Draw (Sevilla FC vs. Rayo Vallecano de Madrid))",
+  "Bundesliga: KXBUNDESLIGAGAME-26AUG28BMUVFB (Bayern Munich, Tie, Stuttgart)  =  bun-bay-stu-2026-08-28 (FC Bayern M\u00fcnchen, Draw (FC Bayern M\u00fcnchen vs. VfB Stuttgart), VfB Stuttgart)",
+  "Bundesliga: KXBUNDESLIGAGAME-26AUG29KOETSG (FC K\u00f6ln, Tie, Hoffenheim)  =  bun-koe-hof-2026-08-29 (1. FC K\u00f6ln, Draw (1. FC K\u00f6ln vs. TSG 1899 Hoffenheim), TSG 1899 Hoffenheim)",
+  "Serie A: KXSERIEAGAME-26AUG22INTMON (Inter, Monza, Tie)  =  sea-int-mon-2026-08-22 (FC Internazionale Milano, AC Monza, Draw (FC Internazionale Milano vs. AC Monza))",
+  "Serie A: KXSERIEAGAME-26AUG22UDICOM (Como, Tie, Udinese)  =  sea-udi-com-2026-08-22 (Como 1907, Draw (Udinese Calcio vs. Como 1907), Udinese Calcio)",
+  "Ligue 1: KXLIGUE1GAME-26AUG21OLMRCS (Marseille, Strasbourg Alsace, Tie)  =  fl1-olm-str-2026-08-21 (Olympique de Marseille, RC Strasbourg Alsace, Draw (Olympique de Marseille vs. RC Strasbourg Alsace))",
+  "Ligue 1: KXLIGUE1GAME-26AUG22RCLAUX (Auxerre, Lens, Tie)  =  fl1-rcl-aja-2026-08-22 (AJ Auxerre, Racing Club de Lens, Draw (Racing Club de Lens vs. AJ Auxerre))",
+  "UCL: KXUCLGAME-26JUL28KUPSSBH (Reg Time: Kuopion Palloseura, Reg Time: Sabah Masazir, Reg Time: Tie)  =  ucl-kps-sf-2026-07-29 (Kuopion PS, Sabah FK, Draw (Kuopion PS vs. Sabah FK))",
+  "UCL: KXUCLGAME-26JUL28DINTHU (Reg Time: Dinamo Zagreb, Reg Time: Thun, Reg Time: Tie)  =  ucl-din-thu-2026-07-28 (GNK Dinamo Zagreb, FC Thun, Draw (GNK Dinamo Zagreb vs. FC Thun))"
+ ],
+ "z": 3.0780880728421613,
+ "tries": 48,
+ "groups": [
+  "NFL",
+  "NBA",
+  "MLB",
+  "NHL",
+  "CFB",
+  "WNBA",
+  "Soccer",
+  "ALL"
+ ],
+ "brier": {
+  "NFL": {
+   "markets": 284,
+   "games": 142,
+   "events": 38,
+   "kalshi": 0.2393017605633805,
+   "poly": 0.2385227112676059,
+   "diff": 0.00077904929577465,
+   "lo": -7.557887779085419e-05,
+   "hi": 0.001633677469340154
+  },
+  "NBA": {
+   "markets": 204,
+   "games": 102,
+   "events": 20,
+   "kalshi": 0.2268129901960784,
+   "poly": 0.22717212009803922,
+   "diff": -0.00035912990196078397,
+   "lo": -0.0015212851750218504,
+   "hi": 0.0008030253711002824
+  },
+  "MLB": {
+   "markets": 1728,
+   "games": 864,
+   "events": 82,
+   "kalshi": 0.23808078703703636,
+   "poly": 0.23805385908564713,
+   "diff": 2.6927951388890183e-05,
+   "lo": -0.0003357757992470882,
+   "hi": 0.00038963170202486856
+  },
+  "NHL": {
+   "markets": 476,
+   "games": 238,
+   "events": 34,
+   "kalshi": 0.224178308823529,
+   "poly": 0.22433697478991543,
+   "diff": -0.00015866596638655392,
+   "lo": -0.0008504897861988916,
+   "hi": 0.0005331578534257839
+  },
+  "CFB": {
+   "markets": 1874,
+   "games": 937,
+   "events": 35,
+   "kalshi": 0.15282459978655222,
+   "poly": 0.15326195824439678,
+   "diff": -0.00043735845784418406,
+   "lo": -0.001408964871513894,
+   "hi": 0.000534247955825526
+  },
+  "WNBA": {
+   "markets": 290,
+   "games": 145,
+   "events": 54,
+   "kalshi": 0.18080051724137944,
+   "poly": 0.18048086206896571,
+   "diff": 0.0003196551724137921,
+   "lo": -0.0006176292265020109,
+   "hi": 0.001256939571329595
+  },
+  "Soccer": {
+   "markets": 1995,
+   "games": 665,
+   "events": 186,
+   "kalshi": 0.19448176691729277,
+   "poly": 0.19441387769423507,
+   "diff": 6.78892230576425e-05,
+   "lo": -0.00016241836059569832,
+   "hi": 0.00029819680671098336
+  },
+  "ALL": {
+   "markets": 6851,
+   "games": 3093,
+   "events": 449,
+   "kalshi": 0.198388643993581,
+   "poly": 0.1984576086337781,
+   "diff": -6.896464019851134e-05,
+   "lo": -0.00036349821284369316,
+   "hi": 0.00022556893244667046
+  }
+ },
+ "brier_busy": {
+  "NFL": {
+   "markets": 284,
+   "games": 142,
+   "events": 38,
+   "kalshi": 0.2393017605633805,
+   "poly": 0.2385227112676059,
+   "diff": 0.00077904929577465,
+   "lo": -7.557887779085419e-05,
+   "hi": 0.001633677469340154
+  },
+  "NBA": {
+   "markets": 204,
+   "games": 102,
+   "events": 20,
+   "kalshi": 0.2268129901960784,
+   "poly": 0.22717212009803922,
+   "diff": -0.00035912990196078397,
+   "lo": -0.0015212851750218504,
+   "hi": 0.0008030253711002824
+  },
+  "MLB": {
+   "markets": 1728,
+   "games": 864,
+   "events": 82,
+   "kalshi": 0.23808078703703636,
+   "poly": 0.23805385908564713,
+   "diff": 2.6927951388890183e-05,
+   "lo": -0.0003357757992470882,
+   "hi": 0.00038963170202486856
+  },
+  "NHL": {
+   "markets": 471,
+   "games": 238,
+   "events": 34,
+   "kalshi": 0.22380939490445811,
+   "poly": 0.2239233545647553,
+   "diff": -0.00011395966029723941,
+   "lo": -0.0008181767415436988,
+   "hi": 0.0005902574209492201
+  },
+  "CFB": {
+   "markets": 1804,
+   "games": 932,
+   "events": 35,
+   "kalshi": 0.15389814301552038,
+   "poly": 0.15434281402438976,
+   "diff": -0.00044467100886918024,
+   "lo": -0.0014498330904572205,
+   "hi": 0.0005604910727188599
+  },
+  "WNBA": {
+   "markets": 290,
+   "games": 145,
+   "events": 54,
+   "kalshi": 0.18080051724137944,
+   "poly": 0.18048086206896571,
+   "diff": 0.0003196551724137921,
+   "lo": -0.0006176292265020109,
+   "hi": 0.001256939571329595
+  },
+  "Soccer": {
+   "markets": 1961,
+   "games": 665,
+   "events": 186,
+   "kalshi": 0.19552260326364052,
+   "poly": 0.19545855991840844,
+   "diff": 6.4043345232023e-05,
+   "lo": -0.00017234559910987897,
+   "hi": 0.00030043228957392495
+  },
+  "ALL": {
+   "markets": 6742,
+   "games": 3088,
+   "events": 449,
+   "kalshi": 0.19942652032038294,
+   "poly": 0.1994922357609038,
+   "diff": -6.571544052210045e-05,
+   "lo": -0.000364166307018485,
+   "hi": 0.00023273542597428409
+  }
+ },
+ "trades": [
+  {
+   "group": "NFL",
+   "margin": 0.02,
+   "side": "yes",
+   "trades": 1,
+   "events": 1,
+   "win": 1.0,
+   "roi": null,
+   "roi_lo": null,
+   "edge": false
+  },
+  {
+   "group": "NFL",
+   "margin": 0.02,
+   "side": "no",
+   "trades": 0,
+   "events": 0,
+   "win": null,
+   "roi": null,
+   "roi_lo": null,
+   "edge": false
+  },
+  {
+   "group": "NFL",
+   "margin": 0.04,
+   "side": "yes",
+   "trades": 0,
+   "events": 0,
+   "win": null,
+   "roi": null,
+   "roi_lo": null,
+   "edge": false
+  },
+  {
+   "group": "NFL",
+   "margin": 0.04,
+   "side": "no",
+   "trades": 0,
+   "events": 0,
+   "win": null,
+   "roi": null,
+   "roi_lo": null,
+   "edge": false
+  },
+  {
+   "group": "NFL",
+   "margin": 0.06,
+   "side": "yes",
+   "trades": 0,
+   "events": 0,
+   "win": null,
+   "roi": null,
+   "roi_lo": null,
+   "edge": false
+  },
+  {
+   "group": "NFL",
+   "margin": 0.06,
+   "side": "no",
+   "trades": 0,
+   "events": 0,
+   "win": null,
+   "roi": null,
+   "roi_lo": null,
+   "edge": false
+  },
+  {
+   "group": "NBA",
+   "margin": 0.02,
+   "side": "yes",
+   "trades": 0,
+   "events": 0,
+   "win": null,
+   "roi": null,
+   "roi_lo": null,
+   "edge": false
+  },
+  {
+   "group": "NBA",
+   "margin": 0.02,
+   "side": "no",
+   "trades": 0,
+   "events": 0,
+   "win": null,
+   "roi": null,
+   "roi_lo": null,
+   "edge": false
+  },
+  {
+   "group": "NBA",
+   "margin": 0.04,
+   "side": "yes",
+   "trades": 0,
+   "events": 0,
+   "win": null,
+   "roi": null,
+   "roi_lo": null,
+   "edge": false
+  },
+  {
+   "group": "NBA",
+   "margin": 0.04,
+   "side": "no",
+   "trades": 0,
+   "events": 0,
+   "win": null,
+   "roi": null,
+   "roi_lo": null,
+   "edge": false
+  },
+  {
+   "group": "NBA",
+   "margin": 0.06,
+   "side": "yes",
+   "trades": 0,
+   "events": 0,
+   "win": null,
+   "roi": null,
+   "roi_lo": null,
+   "edge": false
+  },
+  {
+   "group": "NBA",
+   "margin": 0.06,
+   "side": "no",
+   "trades": 0,
+   "events": 0,
+   "win": null,
+   "roi": null,
+   "roi_lo": null,
+   "edge": false
+  },
+  {
+   "group": "MLB",
+   "margin": 0.02,
+   "side": "yes",
+   "trades": 0,
+   "events": 0,
+   "win": null,
+   "roi": null,
+   "roi_lo": null,
+   "edge": false
+  },
+  {
+   "group": "MLB",
+   "margin": 0.02,
+   "side": "no",
+   "trades": 0,
+   "events": 0,
+   "win": null,
+   "roi": null,
+   "roi_lo": null,
+   "edge": false
+  },
+  {
+   "group": "MLB",
+   "margin": 0.04,
+   "side": "yes",
+   "trades": 0,
+   "events": 0,
+   "win": null,
+   "roi": null,
+   "roi_lo": null,
+   "edge": false
+  },
+  {
+   "group": "MLB",
+   "margin": 0.04,
+   "side": "no",
+   "trades": 0,
+   "events": 0,
+   "win": null,
+   "roi": null,
+   "roi_lo": null,
+   "edge": false
+  },
+  {
+   "group": "MLB",
+   "margin": 0.06,
+   "side": "yes",
+   "trades": 0,
+   "events": 0,
+   "win": null,
+   "roi": null,
+   "roi_lo": null,
+   "edge": false
+  },
+  {
+   "group": "MLB",
+   "margin": 0.06,
+   "side": "no",
+   "trades": 0,
+   "events": 0,
+   "win": null,
+   "roi": null,
+   "roi_lo": null,
+   "edge": false
+  },
+  {
+   "group": "NHL",
+   "margin": 0.02,
+   "side": "yes",
+   "trades": 0,
+   "events": 0,
+   "win": null,
+   "roi": null,
+   "roi_lo": null,
+   "edge": false
+  },
+  {
+   "group": "NHL",
+   "margin": 0.02,
+   "side": "no",
+   "trades": 0,
+   "events": 0,
+   "win": null,
+   "roi": null,
+   "roi_lo": null,
+   "edge": false
+  },
+  {
+   "group": "NHL",
+   "margin": 0.04,
+   "side": "yes",
+   "trades": 0,
+   "events": 0,
+   "win": null,
+   "roi": null,
+   "roi_lo": null,
+   "edge": false
+  },
+  {
+   "group": "NHL",
+   "margin": 0.04,
+   "side": "no",
+   "trades": 0,
+   "events": 0,
+   "win": null,
+   "roi": null,
+   "roi_lo": null,
+   "edge": false
+  },
+  {
+   "group": "NHL",
+   "margin": 0.06,
+   "side": "yes",
+   "trades": 0,
+   "events": 0,
+   "win": null,
+   "roi": null,
+   "roi_lo": null,
+   "edge": false
+  },
+  {
+   "group": "NHL",
+   "margin": 0.06,
+   "side": "no",
+   "trades": 0,
+   "events": 0,
+   "win": null,
+   "roi": null,
+   "roi_lo": null,
+   "edge": false
+  },
+  {
+   "group": "CFB",
+   "margin": 0.02,
+   "side": "yes",
+   "trades": 10,
+   "events": 4,
+   "win": 0.4,
+   "roi": -0.4418604651162791,
+   "roi_lo": -3.506428609273577,
+   "edge": false
+  },
+  {
+   "group": "CFB",
+   "margin": 0.02,
+   "side": "no",
+   "trades": 10,
+   "events": 4,
+   "win": 0.4,
+   "roi": -0.4345054493111248,
+   "roi_lo": -3.4943837554884025,
+   "edge": false
+  },
+  {
+   "group": "CFB",
+   "margin": 0.04,
+   "side": "yes",
+   "trades": 6,
+   "events": 3,
+   "win": 0.16666666666666666,
+   "roi": -0.7423565784953624,
+   "roi_lo": -3.9860407375670595,
+   "edge": false
+  },
+  {
+   "group": "CFB",
+   "margin": 0.04,
+   "side": "no",
+   "trades": 5,
+   "events": 3,
+   "win": 0.2,
+   "roi": -0.6772241274964697,
+   "roi_lo": -4.359763776718113,
+   "edge": false
+  },
+  {
+   "group": "CFB",
+   "margin": 0.06,
+   "side": "yes",
+   "trades": 4,
+   "events": 3,
+   "win": 0.25,
+   "roi": -0.6165644171779141,
+   "roi_lo": -4.5363905347207965,
+   "edge": false
+  },
+  {
+   "group": "CFB",
+   "margin": 0.06,
+   "side": "no",
+   "trades": 5,
+   "events": 3,
+   "win": 0.2,
+   "roi": -0.6772241274964697,
+   "roi_lo": -4.359763776718113,
+   "edge": false
+  },
+  {
+   "group": "WNBA",
+   "margin": 0.02,
+   "side": "yes",
+   "trades": 0,
+   "events": 0,
+   "win": null,
+   "roi": null,
+   "roi_lo": null,
+   "edge": false
+  },
+  {
+   "group": "WNBA",
+   "margin": 0.02,
+   "side": "no",
+   "trades": 0,
+   "events": 0,
+   "win": null,
+   "roi": null,
+   "roi_lo": null,
+   "edge": false
+  },
+  {
+   "group": "WNBA",
+   "margin": 0.04,
+   "side": "yes",
+   "trades": 0,
+   "events": 0,
+   "win": null,
+   "roi": null,
+   "roi_lo": null,
+   "edge": false
+  },
+  {
+   "group": "WNBA",
+   "margin": 0.04,
+   "side": "no",
+   "trades": 0,
+   "events": 0,
+   "win": null,
+   "roi": null,
+   "roi_lo": null,
+   "edge": false
+  },
+  {
+   "group": "WNBA",
+   "margin": 0.06,
+   "side": "yes",
+   "trades": 0,
+   "events": 0,
+   "win": null,
+   "roi": null,
+   "roi_lo": null,
+   "edge": false
+  },
+  {
+   "group": "WNBA",
+   "margin": 0.06,
+   "side": "no",
+   "trades": 0,
+   "events": 0,
+   "win": null,
+   "roi": null,
+   "roi_lo": null,
+   "edge": false
+  },
+  {
+   "group": "Soccer",
+   "margin": 0.02,
+   "side": "yes",
+   "trades": 0,
+   "events": 0,
+   "win": null,
+   "roi": null,
+   "roi_lo": null,
+   "edge": false
+  },
+  {
+   "group": "Soccer",
+   "margin": 0.02,
+   "side": "no",
+   "trades": 0,
+   "events": 0,
+   "win": null,
+   "roi": null,
+   "roi_lo": null,
+   "edge": false
+  },
+  {
+   "group": "Soccer",
+   "margin": 0.04,
+   "side": "yes",
+   "trades": 0,
+   "events": 0,
+   "win": null,
+   "roi": null,
+   "roi_lo": null,
+   "edge": false
+  },
+  {
+   "group": "Soccer",
+   "margin": 0.04,
+   "side": "no",
+   "trades": 0,
+   "events": 0,
+   "win": null,
+   "roi": null,
+   "roi_lo": null,
+   "edge": false
+  },
+  {
+   "group": "Soccer",
+   "margin": 0.06,
+   "side": "yes",
+   "trades": 0,
+   "events": 0,
+   "win": null,
+   "roi": null,
+   "roi_lo": null,
+   "edge": false
+  },
+  {
+   "group": "Soccer",
+   "margin": 0.06,
+   "side": "no",
+   "trades": 0,
+   "events": 0,
+   "win": null,
+   "roi": null,
+   "roi_lo": null,
+   "edge": false
+  },
+  {
+   "group": "ALL",
+   "margin": 0.02,
+   "side": "yes",
+   "trades": 11,
+   "events": 5,
+   "win": 0.45454545454545453,
+   "roi": -0.3064667291471415,
+   "roi_lo": -3.10016780022013,
+   "edge": false
+  },
+  {
+   "group": "ALL",
+   "margin": 0.02,
+   "side": "no",
+   "trades": 10,
+   "events": 4,
+   "win": 0.4,
+   "roi": -0.4345054493111248,
+   "roi_lo": -3.4943837554884025,
+   "edge": false
+  },
+  {
+   "group": "ALL",
+   "margin": 0.04,
+   "side": "yes",
+   "trades": 6,
+   "events": 3,
+   "win": 0.16666666666666666,
+   "roi": -0.7423565784953624,
+   "roi_lo": -3.9860407375670595,
+   "edge": false
+  },
+  {
+   "group": "ALL",
+   "margin": 0.04,
+   "side": "no",
+   "trades": 5,
+   "events": 3,
+   "win": 0.2,
+   "roi": -0.6772241274964697,
+   "roi_lo": -4.359763776718113,
+   "edge": false
+  },
+  {
+   "group": "ALL",
+   "margin": 0.06,
+   "side": "yes",
+   "trades": 4,
+   "events": 3,
+   "win": 0.25,
+   "roi": -0.6165644171779141,
+   "roi_lo": -4.5363905347207965,
+   "edge": false
+  },
+  {
+   "group": "ALL",
+   "margin": 0.06,
+   "side": "no",
+   "trades": 5,
+   "events": 3,
+   "win": 0.2,
+   "roi": -0.6772241274964697,
+   "roi_lo": -4.359763776718113,
+   "edge": false
+  }
+ ]
+}
