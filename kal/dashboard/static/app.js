@@ -458,9 +458,9 @@ function moneyNotes(s) {
   }
   const t = s.order_test || {};
   if (s.has_key && m.budget > 0) {
-    if (t.passed) out.push(`Real-money test order: passed (${ago(t.ts)}).`);
-    else if (t.detail) out.push(`Real money waits for the $0.01 test order: ${t.detail}. It tries again every hour.`);
-    else out.push("Before its first real trade, it sends one $0.01 test order that can't fill.");
+    if (t.passed) out.push(`Real-money test orders: passed (${ago(t.ts)}).`);
+    else if (t.detail) out.push(`Real money waits for the $0.01 test orders: ${t.detail}. It tries again every hour.`);
+    else out.push("Before its first real trade, it sends two $0.01 test orders (one YES, one NO) that can't fill.");
   }
   if (isNum((s.today || {}).pnl)) out.push(`Today: ${signed(s.today.pnl)}.`);
   return out;

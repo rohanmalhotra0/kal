@@ -416,7 +416,7 @@ def _trade(client, cfg, summary):
         db.insert("equity", balance=0, exposure=0, equity=0, paper_equity=paper.equity(cfg))
         summary["notes"].append("no API key: live strategies run as paper")
 
-    # Real money waits until Kalshi has accepted one zero-risk test order for this key.
+    # Real money waits until Kalshi has accepted both zero-risk test orders for this key.
     wants_live = live and cfg["budget"] > 0 and any(
         (s or {}).get("mode") == "live" for s in cfg["strategies"].values())
     proven_orders = gate.passed(client, cfg["env"])
@@ -429,9 +429,9 @@ def _trade(client, cfg, summary):
                 summary["notes"].append(f"STOPPED: {detail}")
                 return
         if not proven_orders:
-            summary["notes"].append(f"real trading waits for the $0.01 test order: {detail}")
+            summary["notes"].append(f"real trading waits for the $0.01 test orders: {detail}")
             _alert_once("probe", "kal is trading on paper for now",
-                        f"Its $0.01 test order didn't pass yet: {detail}. It tries again every hour.")
+                        f"Its $0.01 test orders didn't pass yet: {detail}. It tries again every hour.")
 
     research = research_outputs()
     # The ledger caps spending at the bot's capital; the account balance and cash floor cap
@@ -459,7 +459,7 @@ def _trade(client, cfg, summary):
             ok, why = strat.proven(probe)
             if not (ok and live and cfg["budget"] > 0 and proven_orders):
                 why = (why if not ok else "no API key" if not live else "budget is $0" if cfg["budget"] <= 0
-                       else "the $0.01 test order hasn't passed")
+                       else "the $0.01 test orders haven't passed")
                 summary["notes"].append(f"{name}: paper instead of live ({why})")
                 mode = "paper"
         is_live = mode == "live"

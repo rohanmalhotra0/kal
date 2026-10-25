@@ -38,6 +38,7 @@ from . import config
 DASHBOARD_PASSWORD = "KAL_DASHBOARD_PASSWORD"
 LOCAL = ("127.0.0.1", "localhost", "::1")
 SHOW = 10   # opportunities shown per strategy by `scan`
+PROBE_TEXT = "Order probe: buys 1 YES and 1 NO at $0.01, where nobody trades that far off. Neither can fill."
 TAGS = {"ok": "ok  ", "warn": "WARN", "fail": "FAIL"}
 
 
@@ -269,7 +270,7 @@ def cmd_research(args):
 def cmd_selftest(args):
     from . import selftest
     if args.order_probe:
-        say("Order probe: buys 1 YES at $0.01 where nobody sells that low. It can't fill.")
+        say(PROBE_TEXT)
     rows = selftest.run(order_probe=args.order_probe)
     for r in rows:
         say(f"{'ok  ' if r['ok'] else 'FAIL'}  {r['check']}: {r['detail']}")
@@ -601,7 +602,7 @@ def parser():
 
     t = sub.add_parser("selftest", help="check Kalshi's API still looks right")
     t.add_argument("--order-probe", action="store_true",
-                   help="also send one $0.01 order that can't fill (needs a key)")
+                   help="also send two $0.01 orders that can't fill, one YES and one NO (needs a key)")
     t.set_defaults(fn=cmd_selftest)
 
     sub.add_parser("status", help="a few lines on how it's doing").set_defaults(fn=cmd_status)
