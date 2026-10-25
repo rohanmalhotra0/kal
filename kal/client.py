@@ -260,34 +260,30 @@ class Kalshi:
         return self.paginate("/portfolio/orders", "orders", params)
 
     def cancel(self, order_id):
-        r = self._req("DELETE", f"/portfolio/orders/{order_id}")
+        r = self._req("DELETE", f"/portfolio/events/orders/{order_id}")
         if r.status_code >= 400:
             raise KalshiError(f"cancel {order_id} -> {r.status_code}: {r.text[:300]}", r.status_code)
         return r.json() if r.text else {}
 
     def buy(self, ticker, side, count, limit_price, client_order_id=None):
-        """Immediate-or-cancel limit buy; returns the order dict.
+        """Immediate-or-cancel limit buy through Kalshi's V2 order endpoint; returns the order.
 
-        Tries the fixed-point body first. Only if Kalshi rejects that (400) and the price is a
-        whole cent does it try the legacy integer body, so the limit is never rounded up.
-        A rejection creates no order, and the shared client_order_id stops a double fill.
-        Any other failure raises KalshiError with rejected=False: the order MAY exist."""
-        coid = client_order_id or str(uuid.uuid4())
-        base = {"ticker": ticker, "client_order_id": coid, "action": "buy", "side": side,
-                "time_in_force": "immediate_or_cancel"}
-        bodies = [{**base, "count_fp": f"{count:.2f}", f"{side}_price_dollars": f"{limit_price:.4f}"}]
-        cents = limit_price * 100
-        if abs(cents - round(cents)) < 1e-6 and count == int(count):
-            bodies.append({**base, "count": int(count), "type": "limit", f"{side}_price": int(round(cents))})
-        r = None
-        for body in bodies:
-            r = self._req("POST", "/portfolio/orders", body=body)
-            if r.status_code < 300:
-                d = r.json()
-                return d.get("order", d)
-            if r.status_code != 400:
-                break
-        raise KalshiError(f"Order failed ({r.status_code}): {r.text[:300]}", r.status_code)
+        Kalshi retired POST /portfolio/orders (410 deprecated_v1_order_endpoint). V2 has one
+        YES book with bid/ask sides: buying YES at p is a bid at p, buying NO at p is an ask
+        at 1 - p. Count and price are fixed-point strings. Reusing a client_order_id returns
+        the original order instead of placing a second one, so the id is our retry guard.
+        Raises KalshiError: rejected=True means no order exists; otherwise it MAY exist."""
+        if side not in ("yes", "no"):
+            raise ValueError(f"side must be yes or no, not {side!r}")
+        book_side, book_price = ("bid", limit_price) if side == "yes" else ("ask", 1 - limit_price)
+        body = {"ticker": ticker, "client_order_id": client_order_id or str(uuid.uuid4()),
+                "side": book_side, "count": f"{float(count):.2f}", "price": f"{book_price:.4f}",
+                "time_in_force": "immediate_or_cancel", "self_trade_prevention_type": "taker_at_cross"}
+        r = self._req("POST", "/portfolio/events/orders", body=body)
+        if r.status_code >= 300:
+            raise KalshiError(f"Order failed ({r.status_code}): {r.text[:300]}", r.status_code)
+        d = r.json() if r.text else {}
+        return d.get("order", d) if isinstance(d, dict) else {}
 
 
 # ---------- field helpers ----------
@@ -364,8 +360,16 @@ DONE = ("executed", "canceled", "cancelled")
 
 
 def resting(order):
-    """True if the order is still on the book (it should never be, for immediate-or-cancel)."""
-    return order.get("status") not in DONE
+    """True if the order is still on the book (it should never be, for immediate-or-cancel).
+
+    Kalshi's statuses are resting / canceled / executed. A V2 reply may carry only fill and
+    remaining counts, so with no status, contracts still remaining means it's resting."""
+    status = order.get("status")
+    if status:
+        return status not in DONE
+    if "remaining_count_fp" in order or "remaining_count" in order:
+        return num(order, "remaining_count") > 0
+    return False
 
 
 def candle_close(candle, field):

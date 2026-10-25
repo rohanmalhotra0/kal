@@ -65,6 +65,45 @@ class ClientTests(unittest.TestCase):
         k.market = lambda t: {"ticker": t, "status": "finalized", "result": "yes"}
         self.assertEqual(set(k.markets_by_ticker(["A", "B", "A"])), {"A", "B"})
 
+    def _capture(self, reply):
+        k = client.Kalshi()
+        sent = []
+
+        def req(method, endpoint, params=None, body=None):
+            sent.append((method, endpoint, body))
+            import json as _j
+            from types import SimpleNamespace
+            return SimpleNamespace(status_code=201, json=lambda: reply, text=_j.dumps(reply))
+        k._req = req
+        return k, sent
+
+    def test_v2_order_body_maps_yes_and_no_onto_the_yes_book(self):
+        k, sent = self._capture({"order_id": "o1", "fill_count_fp": "5.00", "remaining_count_fp": "0.00"})
+        k.buy("KX-1", "yes", 5, 0.93, client_order_id="c1")
+        k.buy("KX-1", "no", 5, 0.95, client_order_id="c2")
+        (m1, e1, yes), (m2, e2, no) = sent
+        self.assertEqual((m1, e1), ("POST", "/portfolio/events/orders"))
+        self.assertEqual((yes["side"], yes["price"], yes["count"]), ("bid", "0.9300", "5.00"))
+        self.assertEqual((no["side"], no["price"], no["count"]), ("ask", "0.0500", "5.00"))  # NO at 95c = ask 5c
+        self.assertEqual((yes["client_order_id"], yes["time_in_force"]), ("c1", "immediate_or_cancel"))
+        with self.assertRaises(ValueError):
+            k.buy("KX-1", "maybe", 1, 0.5)
+
+    def test_v2_reply_without_status(self):
+        self.assertFalse(client.resting({"order_id": "o", "fill_count": 5, "remaining_count": 0}))
+        self.assertTrue(client.resting({"order_id": "o", "fill_count": 2, "remaining_count": 3}))
+        self.assertTrue(client.resting({"status": "resting"}))
+        self.assertFalse(client.resting({"status": "executed"}))
+        self.assertEqual(client.filled({"fill_count": 4, "remaining_count": 1}, 5), 4)
+
+    def test_rejected_order_raises_as_rejected(self):
+        k, sent = self._capture({"error": {"code": "invalid_price"}})
+        from types import SimpleNamespace
+        k._req = lambda *a, **kw: SimpleNamespace(status_code=400, json=lambda: {}, text="bad price")
+        with self.assertRaises(client.KalshiError) as e:
+            k.buy("KX-1", "yes", 1, 0.5)
+        self.assertTrue(e.exception.rejected)
+
     def test_orderbook_both_formats(self):
         k = client.Kalshi()
         k.get = lambda path, params=None: {"orderbook_fp": {"yes_dollars": [["0.4100", "5.00"], ["0.4200", "9.00"]]}}

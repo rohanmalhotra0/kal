@@ -553,11 +553,12 @@ class OrderProbeTests(unittest.TestCase):
         self.assertEqual([r for r in rows if not r["ok"]], [])
         self.assertEqual(len(posts), 1)
         endpoint, body = posts[0]
-        self.assertEqual(endpoint, "/portfolio/orders")
+        # Kalshi's V2 order endpoint (V1 now answers 410): buying YES is a bid on the YES book.
+        self.assertEqual(endpoint, "/portfolio/events/orders")
         self.assertEqual(body["time_in_force"], "immediate_or_cancel")
-        self.assertEqual((body["action"], body["side"], body["ticker"]), ("buy", "yes", "KXA-1"))
-        self.assertEqual(body["yes_price_dollars"], "0.0100")
-        self.assertEqual(body["count_fp"], "1.00")
+        self.assertEqual((body["side"], body["ticker"]), ("bid", "KXA-1"))
+        self.assertEqual(body["price"], "0.0100")
+        self.assertEqual(body["count"], "1.00")
 
 
 # ---------- report ----------
