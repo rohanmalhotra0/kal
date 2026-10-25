@@ -1,11 +1,8 @@
-# Prints how the real Kalshi API behaves (public data only: no key, no orders).
+# Side branch only (probe/maker), never merged. Public data only: no key, no orders.
 name: api-probe
 
 on:
   workflow_dispatch:
-  push:
-    branches: [main]
-    paths: ["tools/api_probe.py", ".github/workflows/api-probe.yml"]
 
 permissions:
   contents: read
@@ -13,11 +10,22 @@ permissions:
 jobs:
   probe:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 200
+    env:
+      KAL_HOME: ./state
+      PYTHONUNBUFFERED: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install requests
-      - run: python tools/api_probe.py
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Maker backtest, 6 hours before the scheduled end (busiest active series)
+        run: python tools/maker_research.py --series-per-category 8 --markets-per-series 150 --max-minutes 160
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: maker-research
+          path: state/research/*.json
+          retention-days: 30
