@@ -34,6 +34,7 @@ It runs by itself on a $6-a-month server.
 
    It checks everything, then asks to turn the bot on. Say yes.
    Then delete the copy: `sudo rm /tmp/kalshi.pem`
+   Check it any time: `sudo kal doctor` (one list; it ends with "Ready." when all is well).
 8. **Phone alerts.** Install the free **ntfy** app. Subscribe to the topic from step 5.
    Then on the server: `sudo kal summary --send`. No buzz? The name is wrong.
 9. **Watch it.** On your computer: `ssh -L 8787:localhost:8787 root@SERVER_IP`,
