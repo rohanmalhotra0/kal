@@ -17,6 +17,23 @@ Newest first. Each 2-hour check-in adds one entry: what it checked, what it foun
   check of 6,851 markets recorded while open, after tonight's games. Then it merges.
 - Follow-up: markets that close after tonight get their before/after check later.
 
+## 2026-10-25 10:47 UTC — check-in: two new backtests, each attacked by a reviewer
+
+- Checked: CI and market-check green on main. No server yet, so no status report.
+- **Maker test (PR https://github.com/rohanmalhotra0/kal/pull/10):** do resting bids keep
+  the edge that buying at the ask gives away? A reviewer found ways it could fake an edge
+  (a big bid "filled" by one small trade; related series counted as separate tries).
+  Fixed: one-contract bids, a maker's best case, so a range that loses there loses at
+  any size. Real-data run in progress.
+- **Weather test (PR https://github.com/rohanmalhotra0/kal/pull/11):** do the National
+  Weather Service's NBM forecasts beat Kalshi's daily-high prices in 7 cities? A reviewer
+  found two leaks; both are fixed. A forecast run that started after the decision time
+  could be used. The usual volume filter dropped quiet markets, mostly losers, using
+  volume known only after settling. Real-data run in progress.
+- That volume filter is in the shared backtest too (main and #9). Fix after #9 merges.
+- Next: results posted on #10 and #11 by 13:00. #9's before/after check at 21:05.
+  No new PRs until #9 merges.
+
 ## 2026-10-25 07:55 UTC — all 8 PRs merged; research now tests almost nothing
 
 - Merged: https://github.com/rohanmalhotra0/kal/pull/6 (honest research),
