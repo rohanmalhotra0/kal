@@ -79,19 +79,33 @@ def fade_trade(o, hours):
     return group, cost, n * won - cost, n * n * p * (1 - p)
 
 
+def compact(cat, obs, hours, trades):
+    """Add one category's tight longshot trades from `obs` to `trades`
+    ({(category, lo, hi): [(trade, event, series)]}), keeping a few numbers per trade and
+    nothing else. The daily run calls this one series at a time and then drops the rows, so
+    memory stays small however big the price cache grows."""
+    for o in obs:
+        try:
+            b = bucket(float(o.get("yes_bid") or 0))
+        except (TypeError, ValueError, AttributeError):
+            continue
+        t = fade_trade(o, hours) if b else None
+        if t:
+            trades[(cat, *b)].append((t, o.get("event") or o.get("ticker"), o.get("series")))
+    return trades
+
+
 def calibrate(obs_by_category, hours):
     """One row per (category, YES price range) that had trades: what buying NO on every
     tight longshot there paid. Every row is one more try, so z grows with the count."""
     trades = defaultdict(list)
     for cat, obs in obs_by_category.items():
-        for o in obs:
-            try:
-                b = bucket(float(o.get("yes_bid") or 0))
-            except (TypeError, ValueError, AttributeError):
-                continue
-            t = fade_trade(o, hours) if b else None
-            if t:
-                trades[(cat, *b)].append((t, o.get("event") or o.get("ticker"), o.get("series")))
+        compact(cat, obs, hours, trades)
+    return rows_of(trades)
+
+
+def rows_of(trades):
+    """calibrate()'s rows from compact() trades."""
     z = backtest.z_for(len(trades))
     rows = []
     for cat, lo, hi in sorted(trades):
@@ -181,12 +195,21 @@ def _run(client, cfg, quick, now, named, summary):
     # Discovery's own rotation, so most of today's series are already in its price cache.
     picks = list(named) if named else discover.pick_series(liquid, [], {}, day, max_series, now)
 
-    obs = {}
+    # Each series' rows become compact trades at once and are dropped before the next
+    # loads: holding every busy series' rows together could pass the service's memory cap.
+    trades, seen, counts = defaultdict(list), [], defaultdict(int)
+
+    def take(s, obs):
+        cat = str(info[s]["category"]).strip()
+        compact(cat, obs, hours, trades)
+        counts[cat] += len(obs)
+        seen.append(s)
+
     for s in picks:
         if s not in usable:
             continue
         try:
-            obs[s] = backtest.load_observations(client, s, hours, max_markets=max_markets)
+            take(s, backtest.load_observations(client, s, hours, max_markets=max_markets))
         except Exception as e:  # one series failing must never stop the others
             log.warning("longshot: %s failed: %s", s, e, exc_info=True)
             summary["failed"][s] = str(e)[:300]
@@ -194,26 +217,24 @@ def _run(client, cfg, quick, now, named, summary):
         summary["tested"].append(s)
     # Busy series tested on earlier days (by this or by discovery) count too, from the
     # cache: no API calls. A series that failed today still has what it saved before.
-    for s in sorted(usable - set(obs)):
+    for s in sorted(usable - set(seen)):
         try:
-            rows = backtest.load_observations(client, s, hours, max_markets=max_markets, cached_only=True)
+            obs = backtest.load_observations(client, s, hours, max_markets=max_markets, cached_only=True)
         except Exception as e:
             log.warning("longshot: cached %s unreadable: %s", s, e)
             summary["failed"].setdefault(s, str(e)[:300])
             continue
-        if rows:
-            obs[s] = rows
+        if obs:
+            take(s, obs)
+        del obs
 
-    by_cat = defaultdict(list)
-    for s, rows in obs.items():
-        by_cat[str(info[s]["category"]).strip()] += rows
-    summary["categories"] = {c: len(v) for c, v in sorted(by_cat.items())}
-    rows = calibrate(by_cat, hours)
+    summary["categories"] = dict(sorted(counts.items()))
+    rows = rows_of(trades)
     cells = load_cells()
     changes = merge_cells(cells, rows, hours, stamp)
     save_cells(cells)
-    backtest.record("longshot", {"hours_before_close": hours, "series": sorted(obs), "max_spread": fade.MAX_SPREAD},
-                    {"observations": sum(len(v) for v in obs.values()), "rows": rows,
+    backtest.record("longshot", {"hours_before_close": hours, "series": sorted(seen), "max_spread": fade.MAX_SPREAD},
+                    {"observations": sum(counts.values()), "rows": rows,
                      "cells": [r for r in rows if is_edge(r)]})
     summary.update(new_cells=changes["new"], retired=changes["retired"], revived=changes["revived"])
     summary["ok"] = bool(summary["tested"]) or not summary["failed"]

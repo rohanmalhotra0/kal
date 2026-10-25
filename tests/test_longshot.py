@@ -170,6 +170,31 @@ class ResearchTests(TempHome):
         self.assertEqual((cell["trades"], cell["series"]), (200, ["KXHIGHCHI", "KXHIGHNY"]))
         self.assertEqual(c.candle_calls, {"KXHIGHNY": 200, "KXHIGHCHI": 200})  # NY came from the cache
 
+    def test_each_series_rows_are_dropped_before_the_next_loads(self):
+        # Holding every busy series' rows at once took 489 MB on 300 series (round-3 review),
+        # past the service's 400 MB cap. Only compact trades may outlive their series.
+        import weakref
+        from kal.research import backtest
+
+        class Rows(list):
+            pass
+        alive, real = [], backtest.load_observations
+
+        def load(*a, **k):
+            self.assertEqual([r for r in alive if r() is not None], [])
+            rows = Rows(real(*a, **k))
+            alive.append(weakref.ref(rows))
+            return rows
+        c = FakeKalshi()
+        add_series(c, "KXHIGHNY", WEATHER, 120, hit=0.0, seed=1)
+        add_series(c, "KXHIGHCHI", WEATHER, 120, hit=0.0, seed=2)
+        add_series(c, "KXNBA", "Sports", 120, hit=0.075, seed=3)
+        with mock.patch.object(backtest, "load_observations", load):
+            s = longshot.run(c, cfg())
+        self.assertTrue(s["ok"], s)
+        self.assertGreaterEqual(len(alive), 3)
+        self.assertEqual(s["categories"], {WEATHER: 480, "Sports": 240})
+
     def test_quick_mode_tests_a_few_series(self):
         c = FakeKalshi()
         for i in range(6):
