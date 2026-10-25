@@ -247,10 +247,9 @@ Done. The bot is installed but OFF. It will not trade until you turn it on.
 
 Next steps (README.md, "Turn it on"):
  1. Send your key file. On your computer:
-                        scp ~/Downloads/YOUR_KEY_FILE root@THIS_SERVER:/tmp/kalshi.pem
-    Or here:            nano /tmp/kalshi.pem   (paste the key file's text, then Ctrl+O, Enter, Ctrl+X)
- 2. Answer 5 questions: sudo kal setup
-    Then:               sudo rm /tmp/kalshi.pem
+                        scp ~/Downloads/YOUR_KEY_FILE root@THIS_SERVER:$DATA/kalshi.pem
+    Or here:            nano $DATA/kalshi.pem   (paste the key file's text, then Ctrl+O, Enter, Ctrl+X)
+ 2. Answer 5 questions: sudo kal setup   (key file: press Enter, it's already there)
  3. Phone alerts:       install the ntfy app, subscribe to the topic below.
     Test it:            sudo kal summary --send
  4. Dashboard, from your computer:

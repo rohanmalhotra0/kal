@@ -1,5 +1,6 @@
 """kal doctor, the first-hour checklist: python -m unittest tests.test_doctor"""
 import io
+import os
 from contextlib import redirect_stdout
 from unittest import mock
 
@@ -16,6 +17,9 @@ class DoctorTests(TempHome):
     def setUp(self):
         super().setUp()
         config.update({"budget": 300.0})
+        quiet = mock.patch.object(doctor, "KEY_COPIES", ())   # this machine's own /tmp stays out of it
+        quiet.start()
+        self.addCleanup(quiet.stop)
 
     def rows(self, balance=(True, 300.0), client=None):
         return doctor.rows(balance_fn=lambda env: balance, client_fn=lambda env: client or FakeKalshi(),
@@ -63,6 +67,18 @@ class DoctorTests(TempHome):
         self.assertIn("refused", r["detail"])
         gate.record(FakeKalshi(), "demo", False, "another exchange's try")   # not this key + exchange
         self.assertEqual(self.by(self.rows())["test orders"]["level"], "ok")
+
+    def test_a_key_copy_left_in_tmp_is_a_warning(self):
+        import tempfile
+        copy = os.path.join(tempfile.mkdtemp(), "kalshi.pem")
+        with mock.patch.object(doctor, "KEY_COPIES", (copy,)):
+            self.assertNotIn("key copy", self.by(self.rows()))   # nothing there: no row at all
+            with open(copy, "w") as f:
+                f.write("-----BEGIN PRIVATE KEY-----")
+            row = self.by(self.rows())["key copy"]
+        self.assertEqual(row["level"], "warn")
+        self.assertIn(f"sudo rm {copy}", row["detail"])
+        os.remove(copy)
 
     def test_alerts_off_is_a_warning(self):
         with mock.patch.object(doctor.notify, "enabled", return_value=False):

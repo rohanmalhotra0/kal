@@ -199,10 +199,13 @@ def run(input_fn=input, print_fn=print, selftest_fn=None, balance_fn=None, inter
 
     # 2. key file
     pem_path = os.path.join(home, "kalshi.pem")
+    source = {}
 
     def pem_ok(v):
         try:
-            return True, _load_pem(v), ""
+            data = _load_pem(v)
+            source["path"] = os.path.abspath(os.path.expanduser(v))
+            return True, data, ""
         except PermissionError:
             path = shlex.quote(os.path.abspath(os.path.expanduser(v)))
             return False, None, (f"The bot can't read that file. Run: sudo chmod 644 {path}\n"
@@ -214,6 +217,8 @@ def run(input_fn=input, print_fn=print, selftest_fn=None, balance_fn=None, inter
     _write_secret(pem_path, pem)
     _write_secret(id_path, (key_id + "\n").encode())
     say("   Saved. Only you can read it.")
+    if source.get("path") not in (None, os.path.abspath(pem_path)):
+        say(f"   Now delete the copy you gave it, so nothing else can read your key: sudo rm {shlex.quote(source['path'])}")
 
     # 3. practice or real
     env = ask("3. Practice money or real money? (practice / real)",
