@@ -1,6 +1,7 @@
 """Months alone on a server: backups, prune, disk and clock checks, logs, the daily
 summary, and the scheduler's new jobs. python -m unittest tests.test_maintenance"""
 import io
+import itertools
 import json
 import logging
 import logging.handlers
@@ -380,8 +381,29 @@ class ClockTests(Base):
         with mock.patch("kal.maintenance.requests.get", return_value=reply):
             times = iter([1000.0, 1040.0])   # a 40 s round trip: the Date fits anywhere in it
             self.assertEqual(maintenance.clock_ok(clock=lambda: next(times))["level"], "ok")
-            times = iter([1050.0, 1051.0])   # 49 s ahead even at the far end
+            times = itertools.cycle([1050.0, 1051.0])   # 49 s ahead even at the far end, every try
             self.assertEqual(maintenance.clock_ok(clock=lambda: next(times))["level"], "fail")
+
+    def test_a_cached_reply_is_not_a_bad_clock(self):
+        # Real Kalshi: GET /markets comes through CloudFront, cached up to 15 s, and a cached
+        # reply keeps its old Date. "Age" says how old. This one is 9 s old.
+        cached = SimpleNamespace(headers={"Date": formatdate(time.time() - 9, usegmt=True), "Age": "9",
+                                          "X-Cache": "Hit from cloudfront"})
+        with mock.patch("kal.maintenance.requests.get", return_value=cached) as get:
+            r = maintenance.clock_ok()
+        self.assertEqual(r["level"], "ok")
+        self.assertEqual(get.call_count, 1)
+
+    def test_a_stale_reading_is_tried_again(self):
+        stale = SimpleNamespace(headers={"Date": formatdate(time.time() - 12, usegmt=True)})  # no Age
+        fresh = SimpleNamespace(headers={"Date": formatdate(time.time(), usegmt=True)})
+        with mock.patch("kal.maintenance.requests.get", side_effect=[stale, fresh]) as get:
+            r = maintenance.clock_ok()
+        self.assertEqual((r["level"], get.call_count), ("ok", 2))
+
+    def test_a_real_skew_shows_on_every_try(self):
+        r, get = self.check(-45, trip=False)
+        self.assertEqual((r["level"], get.call_count), ("fail", maintenance.CLOCK_TRIES))
 
     def test_no_answer_is_not_a_bad_clock(self):
         with mock.patch("kal.maintenance.requests.get", side_effect=requests.ConnectionError("down")):

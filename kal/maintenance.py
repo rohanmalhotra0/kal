@@ -40,6 +40,7 @@ DISK_TRIP_MB = 200
 DISK_WARN_MB = 1024
 CLOCK_WARN = 5          # seconds off Kalshi's clock before we say so
 CLOCK_TRIP = 30         # seconds off, on two checks in a row, before the bot stops
+CLOCK_TRIES = 3         # readings when the first looks off (a cached reply can look old)
 STRIKE_WINDOW = 1800    # the second bad clock reading must come within this many seconds
 LOCK_WAIT = 300         # how long prune waits for a trade run to finish
 ALIVE = 300             # a heartbeat older than this means the scheduler loop stopped
@@ -387,32 +388,58 @@ def _base(client=None):
     return k.base.rstrip("/")
 
 
-def clock_ok(client=None, trip=True, clock=time.time, timeout=10):
-    """Our clock against Kalshi's, from the Date header of one public request
-    (GET /markets?limit=1). Over 5 s off is a warning. Over 30 s off on two checks in a
-    row trips the bot: one reading can be a fluke, and right after boot the clock can be
-    off for a minute until chrony fixes it."""
-    url = _base(client) + API + "/markets"
+def _cache_age(headers):
+    """Seconds a cache held this reply (the HTTP Age header), else 0. Kalshi's public API
+    sits behind CloudFront: GET /markets is cached up to 15 s, and a cached reply keeps the
+    Date it was stored with. Seen on the real API: Date 7 s old, with "Age: 7"."""
     try:
-        PACER.wait()
-        t0 = clock()
-        r = requests.get(url, params={"limit": 1}, timeout=timeout)
-        t1 = clock()
-    except requests.RequestException as e:
-        return _row("clock", "warn", f"couldn't reach Kalshi to check it ({type(e).__name__})", unknown=True)
-    try:
-        server = parsedate_to_datetime(r.headers["Date"])
-        if server.tzinfo is None:
-            server = server.replace(tzinfo=timezone.utc)
-        server = server.timestamp()
-    except (KeyError, TypeError, ValueError, IndexError, AttributeError):
-        return _row("clock", "warn", "Kalshi's reply had no readable Date header", unknown=True)
+        return min(max(float(headers.get("Age") or 0), 0.0), 3600.0)
+    except (TypeError, ValueError, AttributeError):
+        return 0.0
+
+
+def _clock_reading(url, clock, timeout):
+    """(drift, best guess, when) in seconds from one public request; drift is our clock
+    minus Kalshi's."""
+    PACER.wait()
+    t0 = clock()
+    r = requests.get(url, params={"limit": 1}, timeout=timeout)
+    t1 = clock()
+    server = parsedate_to_datetime(r.headers["Date"])
+    if server.tzinfo is None:
+        server = server.replace(tzinfo=timezone.utc)
+    server = server.timestamp() + _cache_age(r.headers)
     # The header is in whole seconds, stamped somewhere between t0 and t1, so our clock
     # minus Kalshi's lies in [lo, hi]. Judge by the smallest drift that fits: a slow
     # reply must never look like a bad clock.
     lo, hi = t0 - server - 1, t1 - server
-    drift = lo if lo > 0 else hi if hi < 0 else 0.0
-    shown = (lo + hi) / 2   # the best single guess, for people to read
+    return (lo if lo > 0 else hi if hi < 0 else 0.0), (lo + hi) / 2, t1
+
+
+def clock_ok(client=None, trip=True, clock=time.time, timeout=10):
+    """Our clock against Kalshi's, from the Date header of a public request
+    (GET /markets?limit=1), corrected by the cache's Age. Over 5 s off is a warning. Over
+    30 s off on two checks in a row trips the bot: one reading can be a fluke, and right
+    after boot the clock can be off for a minute until chrony fixes it. A reading that
+    looks off is taken up to 3 times, and the closest counts: a cache can only make
+    Kalshi's clock look older, never newer."""
+    url = _base(client) + API + "/markets"
+    readings = []
+    for _ in range(CLOCK_TRIES):
+        try:
+            readings.append(_clock_reading(url, clock, timeout))
+        except requests.RequestException as e:
+            if not readings:
+                return _row("clock", "warn", f"couldn't reach Kalshi to check it ({type(e).__name__})",
+                            unknown=True)
+            break
+        except (KeyError, TypeError, ValueError, IndexError, AttributeError):
+            if not readings:
+                return _row("clock", "warn", "Kalshi's reply had no readable Date header", unknown=True)
+            break
+        if abs(readings[-1][0]) <= CLOCK_WARN:
+            break
+    drift, shown, t1 = min(readings, key=lambda d: abs(d[0]))
     text = f"{abs(shown):.0f} s {'ahead of' if drift > 0 else 'behind'} Kalshi's clock"
     if abs(drift) <= CLOCK_TRIP and trip:
         _clock_bad["ts"] = None

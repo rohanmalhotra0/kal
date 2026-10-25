@@ -64,6 +64,10 @@ tests/            unittest; tests/fakes.py has FakeKalshi, tests/helpers.py has 
   `DELETE /portfolio/events/orders/{id}`. Reads stay on `/portfolio/orders`, `/positions`,
   `/fills`, `/settlements`, `/balance` (all checked to exist).
 - The demo (fake money) exchange is `https://demo-api.kalshi.co`.
+- The public API sits behind CloudFront. `GET /markets` and `/series` are cached up to
+  15 s (`Cache-Control: max-age=15`); a cached reply keeps its old `Date` and says how old
+  in `Age`. Order books and `/events` are never cached, so prices the bot trades on are
+  fresh. The clock check adds `Age` back.
 
 ## Failing closed
 
