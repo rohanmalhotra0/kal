@@ -21,6 +21,7 @@ market, no repeated strikes, one close time. Anything odd and the event is
 skipped. bracket_arb reuses the helpers here.
 """
 import math
+import re
 import time
 
 from ..client import fee, price, ts
@@ -69,6 +70,47 @@ def own_markets(ev):
     return bool(ev.get("event_ticker")) and all(
         m.get("ticker") and m.get("event_ticker") in (None, ev["event_ticker"])
         for m in ev.get("markets") or [])
+
+
+def _wording(m):
+    """A market's YES wording with the numbers taken out. Rungs of one ladder share it
+    ("$110,000 or above" -> "$# or above"); different things don't ("Cal Poly wins by
+    over 4.5" vs "Utah Tech wins by over 13.5"). None if the market has no wording."""
+    text = m.get("yes_sub_title") or m.get("subtitle") or ""
+    text = re.sub(r"\d[\d,]*(\.\d+)?", "#", text).strip().lower()
+    return re.sub(r"\s+", " ", text) or None
+
+
+def _ticker_kind(m, event_ticker):
+    """The letters in a market's ticker after the event part, digits removed:
+    'T' for KXBTCD-..-T110000, but 'CP' vs 'UTU' for a spread's two teams."""
+    tail = m["ticker"][len(event_ticker):] if m["ticker"].startswith(event_ticker) else m["ticker"]
+    return re.sub(r"[\d.]+", "", tail.lstrip("-")).upper()
+
+
+def same_underlying(ev):
+    """True only if every market is clearly the same question at a different number.
+
+    Kalshi puts different things in one event: both teams' spreads, every player's
+    rushing attempts. Same strike_type and same close time don't make those a ladder.
+    Real data showed it: "Cal Poly by 4+" vs "Utah Tech by 13+" looked like a $10 ticket
+    to $500 "locked in", and was really a near-certain loss. So: same wording (numbers
+    removed), same ticker letters, and same custom_strike. Any doubt means no."""
+    markets = ev.get("markets") or []
+    wordings = {_wording(m) for m in markets}
+    if len(wordings) != 1:
+        return False
+    kinds = {_ticker_kind(m, ev["event_ticker"]) for m in markets}
+    if len(kinds) != 1:
+        return False
+    return same_custom_strike(ev)
+
+
+def same_custom_strike(ev):
+    """Kalshi's custom_strike names the thing a market is about (a team, a player).
+    Every market in a ladder or bracket set must name the same thing, or none."""
+    customs = {repr(sorted((m.get("custom_strike") or {}).items())) for m in ev.get("markets") or []}
+    return len(customs) == 1
 
 
 def tradeable(m, ctx):
@@ -155,7 +197,7 @@ def ladder(ev):
         field, other = "cap_strike", "floor_strike"
     else:
         return None  # mixed types, brackets, or custom rules
-    if not own_markets(ev) or not one_close_time(ev):
+    if not own_markets(ev) or not one_close_time(ev) or not same_underlying(ev):
         return None
     rungs = []
     for m in markets:

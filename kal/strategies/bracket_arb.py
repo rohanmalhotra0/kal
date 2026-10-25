@@ -16,8 +16,8 @@ value lands in it, nothing wins and the whole basket is lost. So:
 """
 from ..client import price
 from .base import Leg, Signal, Strategy
-from .ladder_arb import (allocate, locked_basket, one_close_time, own_markets, quote, strike,
-                         thinnest_first, tradeable)
+from .ladder_arb import (allocate, locked_basket, one_close_time, own_markets, quote, same_custom_strike,
+                         strike, thinnest_first, tradeable)
 
 LOW = ("less", "less_or_equal")          # bottom bracket: YES below cap_strike
 HIGH = ("greater", "greater_or_equal")   # top bracket: YES above floor_strike
@@ -29,7 +29,9 @@ def brackets(ev):
     markets = ev.get("markets") or []
     if len(markets) < 2 or ev.get("mutually_exclusive") is not True:
         return None  # if ranges cover each value once, Kalshi must flag them exclusive
-    if not own_markets(ev) or not one_close_time(ev):
+    if not own_markets(ev) or not one_close_time(ev) or not same_custom_strike(ev):
+        # Brackets of two different things (two players) also fail the one-bottom,
+        # one-top, no-overlap checks below; custom_strike catches the rest.
         return None
     bottom, middle, top = [], [], []
     for m in markets:

@@ -540,3 +540,54 @@ class EngineTests(TempHome):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RealDataRegressionTests(unittest.TestCase):
+    """Shapes seen on the real Kalshi API (market-check, Oct 2026)."""
+
+    def _ev(self, event, rungs, close="2030-01-01T00:00:00Z"):
+        return {"event_ticker": event, "mutually_exclusive": False,
+                "markets": [{"ticker": f"{event}-{suffix}", "event_ticker": event, "strike_type": "greater",
+                             "floor_strike": strike, "yes_sub_title": words, "close_time": close,
+                             "status": "active"} for suffix, strike, words in rungs]}
+
+    def test_two_teams_spreads_are_not_a_ladder(self):
+        # "Cal Poly by 4+" and "Utah Tech by 13+" are different questions. Treating them as one
+        # ladder looked like $10.70 locked in to pay $500; really a near-certain loss.
+        ev = self._ev("KXNCAAFSPREAD-26OCT24UTUCP", [("CP4", 4.5, "Cal Poly wins by over 4.5 points"),
+                                                     ("UTU13", 13.5, "Utah Tech wins by over 13.5 points")])
+        self.assertIsNone(ladder_arb.ladder(ev))
+
+    def test_two_players_props_are_not_a_ladder(self):
+        ev = self._ev("KXNFLRSHATT-26OCT25PITNO", [("NOTSHOUGH6-7", 6.5, "Tyler Shough: 7+"),
+                                                   ("PITJWARREN30-11", 10.5, "Jaylen Warren: 11+")])
+        self.assertIsNone(ladder_arb.ladder(ev))
+
+    def test_same_wording_but_different_ticker_letters_is_not_a_ladder(self):
+        ev = self._ev("KXNBATEAMTOTAL-26OCT24MIACHA", [("MIA113", 112.5, "Over 112.5 points scored"),
+                                                       ("CHA114", 113.5, "Over 113.5 points scored")])
+        self.assertIsNone(ladder_arb.ladder(ev))
+
+    def test_a_real_price_ladder_still_counts(self):
+        ev = self._ev("KXBTCD-26OCT2517", [("T110000", 110000, "$110,000 or above"),
+                                           ("T112000", 112000, "$112,000 or above"),
+                                           ("T114000", 114000, "$114,000 or above")])
+        kind, rungs = ladder_arb.ladder(ev)
+        self.assertEqual([s for s, _ in rungs], [110000, 112000, 114000])
+
+    def test_different_custom_strikes_are_not_one_set(self):
+        ev = self._ev("KXEV", [("T1", 1, "1+"), ("T2", 2, "2+")])
+        ev["markets"][0]["custom_strike"] = {"Player": "A"}
+        ev["markets"][1]["custom_strike"] = {"Player": "B"}
+        self.assertIsNone(ladder_arb.ladder(ev))
+
+    def test_too_good_to_be_true_arbitrage_is_refused(self):
+        from kal import config, risk
+        from kal.strategies.base import Leg, Signal
+        cfg = dict(config.DEFAULTS, max_per_arb=30, max_per_trade=30)
+        sig = Signal("ladder_arb", "E", "t", [Leg("A", "yes", 0.01, 500), Leg("B", "no", 0.01, 500)],
+                     payout_min=500.0)
+        self.assertIn("too good to be true", risk.Limits(cfg, 100).refuse(sig))
+        fair = Signal("ladder_arb", "E", "t", [Leg("A", "yes", 0.48, 10), Leg("B", "no", 0.49, 10)],
+                      payout_min=10.0)
+        self.assertIsNone(risk.Limits(cfg, 100).refuse(fair))

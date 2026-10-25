@@ -29,6 +29,12 @@ def run_lock():
         f.close()
 
 
+# Real arbitrage on Kalshi pays cents on the dollar. A "locked-in" return above this is
+# almost surely a misread market (real data once showed $10.70 "locked in" to pay $500),
+# so refuse it rather than trust it.
+MAX_ARB_ROI = 0.25
+
+
 class Limits:
     """Tracks spending within one run so no signal can push past a limit."""
 
@@ -55,6 +61,9 @@ class Limits:
         if sig.guaranteed:
             if sig.cost > cfg["max_per_arb"] + 1e-9:
                 return f"arbitrage cost ${sig.cost:.2f} over max_per_arb"
+            if sig.payout_min / sig.cost - 1 > MAX_ARB_ROI:
+                return (f"too good to be true: ${sig.cost:.2f} 'locked in' to pay ${sig.payout_min:.2f}. "
+                        f"Probably a misread market")
         else:
             if sig.max_loss > cfg["max_per_trade"] + 1e-9:
                 return f"could lose ${sig.max_loss:.2f}, over max_per_trade"

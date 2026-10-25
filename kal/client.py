@@ -166,8 +166,14 @@ class Kalshi:
         return list(found.values())
 
     def candles(self, series, ticker, start_ts, end_ts, period=60):
-        d = self.get(f"/series/{series}/markets/{ticker}/candlesticks",
-                     {"start_ts": int(start_ts), "end_ts": int(end_ts), "period_interval": period})
+        params = {"start_ts": int(start_ts), "end_ts": int(end_ts), "period_interval": period}
+        try:
+            d = self.get(f"/series/{series}/markets/{ticker}/candlesticks", params)
+        except KalshiError as e:
+            if e.status != 404:
+                raise
+            # Older settled markets move to Kalshi's historical store.
+            d = self.get(f"/historical/markets/{ticker}/candlesticks", params)
         return d.get("candlesticks", [])
 
     def orderbook(self, ticker):
