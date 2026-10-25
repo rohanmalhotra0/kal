@@ -234,19 +234,21 @@ def edge_id(series, lo, hi, side=None):
 def merge_edges(edges, series, rows, hours, stamp):
     """Fold one series' calibration rows into the edge list (in place).
     A range that passes is added or refreshed. An active range that now fails with
-    enough data is retired. One retired for losing real or paper money stays retired,
-    even when its file was lost: the db remembers (recall)."""
+    enough data is retired, and so is one with no busy market left to test it: its old
+    numbers can't be checked any more (a later pass may revive it). One retired for
+    losing real or paper money stays retired, even when its file was lost: the db
+    remembers (recall)."""
     changes = {"new": [], "retired": [], "revived": []}
     by_id = {e["id"]: e for e in edges}
-    seen = set()
+    tested = set()
     for r in rows:
         eid = edge_id(series, r["lo"], r["hi"], r.get("side"))
         e = by_id.get(eid)
         if e is not None and e.get("hours_before_close") != hours:
             continue  # tested at another decision time: not comparable
+        tested.add(eid)
         stats = {k: r[k] for k in ("roi", "roi_lo", "trades", "events")}
         if backtest.is_edge(r):
-            seen.add(eid)
             if e is None:
                 e = recalled("favorites", [{"id": eid, "series": series, "side": r.get("side"), "lo": r["lo"],
                                             "hi": r["hi"], "hours_before_close": hours, "first_seen": stamp,
@@ -264,6 +266,12 @@ def merge_edges(edges, series, rows, hours, stamp):
             if e.get("status") in favorites.ACTIVE and r["trades"] >= backtest.MIN_TRADES:
                 e.update(status="retired", retired_by="backtest", note="backtest no longer shows an edge")
                 changes["retired"].append(eid)
+    for e in edges:
+        if (e.get("series") == series and e.get("hours_before_close") == hours
+                and e.get("id") not in tested and e.get("status") in favorites.ACTIVE):
+            e.update(status="retired", retired_by="backtest", last_tested=stamp,
+                     note="no busy markets left to test it: off until a backtest shows it again")
+            changes["retired"].append(e["id"])
     return changes
 
 

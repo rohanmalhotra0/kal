@@ -425,9 +425,10 @@ class CoverageGuardTests(TempHome):
                 "status": "finalized", "result": "no", "volume_fp": "500.00", "can_close_early": True,
                 "occurrence_datetime": iso(close)})
             c.candle_data[tk] = [{"end_period_ts": close - 7 * H, "yes_ask": {"close": "0.3100"},
-                                  "yes_bid": {"close": "0.3000"}}]
+                                  "yes_bid": {"close": "0.3000"}, "volume": "500.00"}]
         ok, lines = tool.check(c, {"S": 25})
         self.assertTrue(ok, lines)
+        self.assertIn("30 busy", lines[0])
         for m in c.settled["S"]:
             del m["occurrence_datetime"]  # what #6 did to real markets: nothing anchors them
         ok, lines = tool.check(c, {"S": 25})
@@ -435,6 +436,24 @@ class CoverageGuardTests(TempHome):
         self.assertIn("LOW  S: 0 priced markets", lines[0])
         c.settled_markets = mock.Mock(side_effect=KalshiError("down", 503))
         self.assertFalse(tool.check(c, {"S": 25})[0])  # an API failure fails it too
+
+    def test_unreadable_candle_volume_fails_the_check(self):
+        # Research tests only busy markets. If Kalshi renamed the volume field, every
+        # market would look quiet and research would test nothing, with prices still read.
+        tool = self.tool()
+        c = FakeKalshi(can_trade=False)
+        for i in range(30):
+            close = M0 + (i + 10) * DAY
+            tk = f"S-{i}"
+            c.settled.setdefault("S", []).append({
+                "ticker": tk, "event_ticker": tk, "open_time": iso(close - 2 * DAY), "close_time": iso(close),
+                "status": "finalized", "result": "no", "volume_fp": "500.00", "can_close_early": False})
+            c.candle_data[tk] = [{"end_period_ts": close - 7 * H, "yes_ask": {"close": "0.3100"},
+                                  "yes_bid": {"close": "0.3000"}, "traded": "500.00"}]
+        ok, lines = tool.check(c, {"S": 25})
+        self.assertFalse(ok)
+        self.assertIn("30 priced markets, 0 busy", lines[0])
+        self.assertIn("LOW  busy markets in all: 0", lines[1])
 
 
 # ---------- 4. one false-promotion budget for every candidate, ever ----------
@@ -767,3 +786,64 @@ class VolumeTests(TempHome):
             self.assertIn(f"\n{n} priced markets, {n} events", text)
             # 2 sides x 12 price ranges x 2 tables (any spread, tight) x (1 category + ALL)
             self.assertIn("for 96 tries", text)
+
+    def candles(self, c, tk, *candles):
+        c.candle_data[tk] = [dict(x) for x in candles]
+
+    def decided(self, c, i):
+        return next(m for m in c.settled["Q"] if m["ticker"] == f"Q-{i}"), M0 + (i + 10) * DAY - 6 * H
+
+    def test_a_price_older_than_12_hours_is_not_used(self):
+        c = FakeKalshi(can_trade=False)
+        self.market(c, 0, True, 900, 300)
+        m, t = self.decided(c, 0)
+        quote = {"yes_ask": {"close": "0.3100"}, "yes_bid": {"close": "0.2900"}, "volume_fp": "300.00"}
+        self.candles(c, "Q-0", dict(quote, end_period_ts=t - 12 * H))
+        self.assertEqual(backtest.snapshot(c, "Q", m, 6), (0.31, 0.29))
+        self.assertEqual(backtest.snapshot(c, "Q", m, 6, with_volume=True), (0.31, 0.29, 300.0))
+        self.candles(c, "Q-0", dict(quote, end_period_ts=t - 12 * H - 1))
+        self.assertIsNone(backtest.snapshot(c, "Q", m, 6))            # the day's window must not let it in
+        self.assertIsNone(backtest.snapshot(c, "Q", m, 6, with_volume=True))
+
+    def test_the_day_is_24_hours_and_both_volume_fields_count(self):
+        c = FakeKalshi(can_trade=False)
+        self.market(c, 0, True, 900, 300)
+        m, t = self.decided(c, 0)
+        quote = {"end_period_ts": t - H, "yes_ask": {"close": "0.3100"}, "yes_bid": {"close": "0.2900"}}
+        self.candles(c, "Q-0", {"end_period_ts": t - 24 * H, "volume_fp": "9999.00"},   # ends a day before: out
+                     {"end_period_ts": t - 23 * H, "volume": 150},                       # historical shape
+                     dict(quote, volume="50.00"))
+        self.assertEqual(backtest.snapshot(c, "Q", m, 6, with_volume=True), (0.31, 0.29, 200.0))
+
+    def test_200_contracts_is_busy_like_the_live_check(self):
+        rows = [{"ticker": "A", "volume": 200}, {"ticker": "B", "volume": 199.99}, {"ticker": "C"}]
+        self.assertEqual([o["ticker"] for o in backtest.busy(rows)], ["A"])
+        self.assertEqual(backtest.BUSY, favorites.MIN_VOLUME_24H)   # the live strategies skip under 200
+
+    def test_a_live_edge_with_no_busy_markets_left_is_retired(self):
+        # An edge found before this change may rest on data that flattered it. If no busy
+        # market is left to re-test it, it must stop, not keep betting on old numbers.
+        c = FakeKalshi(can_trade=False)
+        for i in range(60):
+            self.market(c, i, False, 500, 150)          # quiet the day before; every one lost
+        c.series_list = [{"ticker": "Q", "category": "Weather", "frequency": "daily"}]
+        eid = discover.edge_id("Q", 0.30, 0.40, "yes")
+        other = discover.edge_id("Q", 0.30, 0.40, "no")
+        discover.save_edges([
+            {"id": eid, "series": "Q", "side": "yes", "lo": 0.30, "hi": 0.40, "hours_before_close": 6.0,
+             "status": "live", "roi": 0.2, "roi_lo": 0.10, "trades": 300, "events": 300, "first_seen": "d0"},
+            {"id": other, "series": "Q", "side": "no", "lo": 0.30, "hi": 0.40, "hours_before_close": 12.0,
+             "status": "live", "roi": 0.2, "roi_lo": 0.10, "trades": 300, "events": 300, "first_seen": "d0"}])
+        s = discover.run(c, config.load(), series=["Q"])
+        edges = {e["id"]: e for e in discover.load_edges()}
+        self.assertEqual((edges[eid]["status"], edges[eid]["retired_by"]), ("retired", "backtest"))
+        self.assertIn(eid, s["retired"])
+        self.assertTrue(edges[eid]["last_tested"])
+        self.assertEqual(edges[other]["status"], "live")   # tested at another decision time: not judged here
+        self.assertEqual([e["id"] for e in favorites.active_edges(engine.research_outputs())], [other])
+        # Busy markets that show the edge again bring it back, on paper first.
+        for i in range(60, 120):
+            self.market(c, i, True, 900, 300)
+        discover.run(c, config.load(), series=["Q"])
+        self.assertEqual({e["id"]: e for e in discover.load_edges()}[eid]["status"], "candidate")
+

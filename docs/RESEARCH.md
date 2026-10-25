@@ -50,7 +50,8 @@ status: **testing** (add the PR link), **built**, or **rejected** (say why in on
 - No filter on a market's total volume: that's known only once it settles, and markets
   far from the result go quiet, so it dropped mostly losers (a fair market showed +50%).
   "Busy" means 200+ contracts traded in the day before the decision, the same check
-  the live strategies make. Research for live strategies uses busy markets only.
+  the live strategies make. Research for live strategies uses busy markets only. An edge
+  with no busy market left to re-test it is switched off until a backtest shows it again.
 - The 5% chance of promoting luck is spent over looks and over ideas, for good. The
   20th idea ever judged needs far more proof than the first.
 - Demo keeps its own research (`research-demo/`, `cache-demo/`). Nothing is promoted

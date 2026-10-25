@@ -168,6 +168,15 @@ class _Checks:
                         return False, f"{t}: candle {f} close is ${v}, over $1"
                     closes.append(v)
             if any(v > 0 for v in closes):
+                # Research tests only markets busy in the day before (backtest.busy), summed
+                # from candle volume: without it, every market looks quiet.
+                vols = [c.get(k) for c in candles for k in ("volume_fp", "volume") if c.get(k) not in (None, "")]
+                if not vols:
+                    return False, f"{t}: candles have no volume_fp or volume: research would count every market as quiet"
+                try:
+                    [float(v) for v in vols]
+                except (TypeError, ValueError):
+                    return False, f"{t}: candle volume {vols[0]!r} isn't a number: research would count every market as quiet"
                 last = candle_close(candles[-1], "yes_bid")
                 return True, f"{t}: {len(candles)} candles, last YES bid close ${last:.2f}"
             zeros += 1
