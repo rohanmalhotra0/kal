@@ -230,6 +230,18 @@ class DateLadderTests(unittest.TestCase):
             ev = self._custom(date_event(), key, form, Player="Kade Anderson")
             self.assertEqual(len(self.scan(ev)), 1, (key, form))
 
+    def test_custom_strike_dates_in_kalshis_other_formats(self):
+        # Seen on real events: {"deadline": "2026-10-15"}, {"Date": "2026-10-01T14:00:00.000Z"},
+        # {"Policy": "27Jan01"}.
+        for key, fmt in (("deadline", "%Y-%m-%d"), ("Date", "%Y-%m-%dT14:00:00.000Z"), ("Policy", "%y%b%d")):
+            ev = date_event()
+            for m in ev["markets"]:
+                d = datetime.datetime.strptime(m["yes_sub_title"][len("Before "):], "%b %d, %Y")
+                m["custom_strike"] = {key: d.strftime(fmt)}
+            self.assertEqual(len(self.scan(ev)), 1, key)
+            ev["markets"][2]["custom_strike"][key] = "2031-01-01" if key != "Policy" else "31Jan01"
+            self.assertEqual(self.scan(ev), [], key)   # one disagrees with its wording
+
     def test_custom_strike_naming_another_player_is_not_a_ladder(self):
         ev = self._custom(date_event(), Player="Kade Anderson")
         ev["markets"][1]["custom_strike"]["Player"] = "Aidan Miller"
