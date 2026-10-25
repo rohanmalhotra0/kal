@@ -1,0 +1,9 @@
+[Unit]
+Description=kal safe update (tests must pass before a restart)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/kal/kal.env
+ExecStart=/opt/kal/deploy/kal-update.sh

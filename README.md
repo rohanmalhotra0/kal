@@ -34,6 +34,9 @@ It runs by itself on a $6-a-month server.
 
 **Stop it:** `sudo kal off`. **From your phone:** delete the API key in the Kalshi app.
 
+**Optional, recommended:** let it update itself daily (tests must pass first):
+`sudo systemctl enable --now kal-update.timer`
+
 Before its first real trade, the bot sends one $0.01 test order that can't fill, to
 prove Kalshi accepts its orders. Want to practice with fake money first? See
 [docs/DEPLOY.md](docs/DEPLOY.md), step 7.

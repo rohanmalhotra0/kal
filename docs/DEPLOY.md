@@ -380,11 +380,26 @@ The old books are kept in `/var/lib/kal/backups/before-restore-.../`.
 
 ## Update to new code
 
+By hand:
+
 ```bash
 cd /opt/kal && sudo git pull && sudo bash deploy/install.sh
 ```
 
 This keeps your settings, key and data.
+
+Or let it update itself once a day (recommended):
+
+```bash
+sudo systemctl enable --now kal-update.timer
+```
+
+Each morning (about 09:30 UTC) it fetches the newest code and runs every test first.
+Only if all pass does it restart the bot, and your phone gets "kal updated".
+If any test fails, it stays on the old version and sends "kal update failed its tests"
+(once per bad version). The tests never see your key, topic or data.
+See what it did: `sudo journalctl -u kal-update`. Turn it off:
+`sudo systemctl disable --now kal-update.timer`
 
 ## Don't lose the data folder
 

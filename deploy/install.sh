@@ -27,7 +27,7 @@ command -v apt-get >/dev/null || die "This script is for Ubuntu (it needs apt-ge
 say "Installing system packages"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
-apt-get install -y -qq python3 python3-venv python3-pip git ca-certificates >/dev/null
+apt-get install -y -qq python3 python3-venv python3-pip git curl ca-certificates >/dev/null
 
 python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)' \
   || die "Python 3.11 or newer is needed. Use Ubuntu 24.04."
@@ -142,6 +142,9 @@ fi
 
 say "Installing the service"
 install -m 644 "$APP/deploy/kal.service" /etc/systemd/system/kal.service
+# Daily safe updates: installed, but off until you turn them on (see the end).
+install -m 644 "$APP/deploy/kal-update.service" /etc/systemd/system/kal-update.service
+install -m 644 "$APP/deploy/kal-update.timer" /etc/systemd/system/kal-update.timer
 systemctl daemon-reload
 systemctl enable kal >/dev/null 2>&1
 systemctl restart kal
@@ -153,17 +156,19 @@ cat <<NEXT
 
 Done. The bot is installed but OFF. It will not trade until you turn it on.
 
-Next steps (docs/DEPLOY.md has each one):
- 1. Phone alerts:       install the ntfy app, subscribe to the topic below.
+Next steps (README.md, "Turn it on"):
+ 1. Send your key file. On your computer:
+                        scp ~/Downloads/YOUR_KEY_FILE root@THIS_SERVER:/tmp/kalshi.pem
+ 2. Answer 5 questions: sudo kal setup
+    Then:               sudo rm /tmp/kalshi.pem
+ 3. Phone alerts:       install the ntfy app, subscribe to the topic below.
     Test it:            sudo kal summary --send
- 2. Put your Kalshi key on the server (docs/DEPLOY.md, step 7).
- 3. Practice on demo:   sudo kal set env demo
-                        sudo kal selftest --order-probe
- 4. See the dashboard from your computer:
-                        ssh -L 8787:localhost:8787 ${SUDO_USER:-you}@THIS_SERVER
+ 4. Dashboard, from your computer:
+                        ssh -L 8787:localhost:8787 root@THIS_SERVER
                         then open http://localhost:8787
- 5. Is it healthy?      sudo kal health
-Settings live in $ETC/kal.env. After a change: sudo systemctl restart kal
+ 5. Optional, daily safe updates (tests must pass first):
+                        sudo systemctl enable --now kal-update.timer
+Is it healthy? sudo kal health. Settings: $ETC/kal.env (then: sudo systemctl restart kal)
 NEXT
 if [ -n "${NEW_PASSWORD:-}" ]; then
   echo

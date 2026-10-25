@@ -1,0 +1,10 @@
+[Unit]
+Description=Run the kal safe update once a day
+
+[Timer]
+OnCalendar=*-*-* 09:23:00 UTC
+RandomizedDelaySec=600
+Persistent=true
+
+[Install]
+WantedBy=timers.target
