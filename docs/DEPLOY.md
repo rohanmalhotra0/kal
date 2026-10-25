@@ -191,9 +191,9 @@ Let it run for a day or two. Look at `sudo kal status` and the dashboard (step 9
 Demo markets are quiet, so it may find little. That's fine.
 The point is to see orders and safety stops work.
 
-The order probe sends **one real order**: buy 1 YES at $0.01, only where the
-cheapest seller wants $0.10 or more. Nobody sells that low, so it can't fill.
-It costs nothing.
+The order probe sends **two real orders** that can't fill: buy 1 YES at $0.01, only
+where the cheapest seller wants $0.10 or more, and buy 1 NO at $0.01, only where the
+best YES buyer pays $0.90 or less. Nobody trades that far off, so they cost nothing.
 
 **Then real money:**
 
