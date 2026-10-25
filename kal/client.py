@@ -281,8 +281,12 @@ class Kalshi:
         params = {"limit": 1000, **({"min_ts": int(min_ts)} if min_ts else {})}
         return self.paginate("/portfolio/settlements", "settlements", params, strict=True)
 
-    def fills(self, min_ts=None):
-        params = {"limit": 1000, **({"min_ts": int(min_ts)} if min_ts else {})}
+    def fills(self, min_ts=None, ticker=None):
+        params = {"limit": 1000}
+        if min_ts:
+            params["min_ts"] = int(min_ts)
+        if ticker:
+            params["ticker"] = ticker
         return self.paginate("/portfolio/fills", "fills", params, strict=True)
 
     def orders(self, ticker=None, min_ts=None):
@@ -388,6 +392,17 @@ def filled(order, requested):
     else:
         n = requested if order.get("status") == "executed" else 0
     return max(0.0, min(float(requested), n))
+
+
+def fill_known(order):
+    """True if an order reply says how much it bought: a fill count, initial and remaining
+    counts, or "executed" (all of it). A "canceled" alone could hide a part fill."""
+    def has(field):
+        return f"{field}_fp" in order or field in order
+    if not isinstance(order, dict):
+        return False
+    counts = has("fill_count") or (has("initial_count") and has("remaining_count"))
+    return counts or order.get("status") == "executed"
 
 
 DONE = ("executed", "canceled", "cancelled")

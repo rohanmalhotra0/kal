@@ -13,7 +13,7 @@ import traceback
 import uuid
 
 from . import books, config, db, fees, flow, gate, ledger, paper, risk, sizing
-from .client import Kalshi, KalshiError, UnknownSettlement, fee, filled, is_transient, resting
+from .client import Kalshi, KalshiError, UnknownSettlement, fee, fill_known, filled, is_transient, resting
 from .strategies import load_all
 from .strategies.base import Context
 
@@ -185,6 +185,14 @@ def execute(client, sig, signal_id):
                         f"on Kalshi now")
             config.trip(f"an order on {leg.ticker} stayed on the book (status {order.get('status')!r}); {done}")
             raise Halted(f"{leg.ticker} order rested instead of filling or cancelling")
+        if not fill_known(order):
+            # The reply doesn't say how much filled ("canceled" alone can hide a part fill).
+            # Never read that as nothing: 'unknown' makes the next run look the order up.
+            db.execute("UPDATE orders SET status = 'unknown' WHERE id = ?", oid)
+            if i == 0:
+                raise OrderUnknown(f"{leg.ticker}: Kalshi's reply doesn't say how much filled")
+            raise LegFailed(f"leg {i + 1}/{len(sig.legs)} {leg.ticker}: Kalshi's reply doesn't say how much "
+                            f"filled after earlier legs filled")
         spent += n * leg.price + (fee(n, leg.price) if n else 0)
         if len(sig.legs) == 1:
             break
@@ -405,7 +413,7 @@ def _trade(client, cfg, summary):
         # The limits that scale with capital (daily stop, bets cap, bet size) use what the bot
         # could really lose, so a budget typed bigger than the account can't loosen them.
         at_risk = min(capital, balance + open_cost)
-        reason = risk.daily_loss(cfg, equity, at_risk)
+        reason = risk.daily_loss(cfg, equity, at_risk, pnl=equity - capital + ledger.realized())
         if not reason and cfg["budget"] > 0 and capital < 1:
             reason = f"the ${cfg['budget']:.2f} of capital is used up"
         if reason:

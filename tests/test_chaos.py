@@ -36,6 +36,7 @@ class ChaosKalshi(FakeKalshi):
         self.live_events = {}    # event ticker -> [market tickers]
         self.made = 0
         self.sold = []
+        self.owner_fills = []    # the owner's own sales, as Kalshi's fills show them
 
     # ---- the exchange's state ----
 
@@ -94,10 +95,12 @@ class ChaosKalshi(FakeKalshi):
         self.cancelled.append(order_id)
         return {}
 
-    def fills(self, min_ts=None):
+    def fills(self, min_ts=None, ticker=None):
         return [{"order_id": o["order_id"], "ticker": o["ticker"], "side": o["side"], "action": "buy",
                  "count_fp": f"{o['filled']:.2f}", f"{o['side']}_price_dollars": f"{o['price']:.4f}",
-                 "created_time": "2026-10-25T00:00:00Z"} for o in self.order_list if o["filled"] > 0]
+                 "created_time": "2026-10-25T00:00:00Z"} for o in self.order_list
+                if o["filled"] > 0 and ticker in (None, o["ticker"])] + \
+            [f for f in self.owner_fills if ticker in (None, f["ticker"])]
 
     def sell_some(self):
         """The owner sells one of the bot's positions in the app, at the bid."""
@@ -107,6 +110,10 @@ class ChaosKalshi(FakeKalshi):
         t = self.rng.choice(open_)
         n = self.held.pop(t)
         self.cash += abs(n) * 0.5
+        side = "yes" if n > 0 else "no"
+        self.owner_fills.append({"order_id": f"owner-{len(self.owner_fills)}", "ticker": t, "side": side,
+                                 "action": "sell", "count_fp": f"{abs(n):.2f}", f"{side}_price_dollars": "0.5000",
+                                 "created_time": "2026-10-25T00:00:00Z"})
         return t
 
     # ---- between runs ----

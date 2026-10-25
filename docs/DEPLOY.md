@@ -365,6 +365,9 @@ Only do this if the books (`kal.db`) are broken.
 4. Before it trades again, it adds the trades Kalshi shows since that day
    to the books, so the $300 limit stays true. If it can't read them, it
    stops again and says so.
+5. Some of those trades may be yours, not the bot's. So when they settle,
+   only their losses count against the bot. Their wins stay yours: they
+   never become money the bot may use.
 
 The old books are kept in `/var/lib/kal/backups/before-restore-.../`.
 

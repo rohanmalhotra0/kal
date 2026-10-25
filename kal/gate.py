@@ -17,7 +17,7 @@ import logging
 import time
 
 from . import config, db
-from .client import KalshiError, filled, is_transient, num, resting
+from .client import KalshiError, fill_known, filled, is_transient, num, resting
 
 KEY = "order_probe"
 PROBE_PRICE = 0.01
@@ -111,8 +111,7 @@ def judge(ticker, ask, order, side="yes", bid=None):
                        "the bot thinks. It cost at most $0.02; check it on Kalshi."), True
     if resting(order):
         return False, f"the {what} on {ticker} stayed on the book: immediate-or-cancel was ignored.", True
-    known = "fill_count_fp" in order or "fill_count" in order or status_ in ("canceled", "cancelled", "executed")
-    if not known:
+    if not fill_known(order):   # real money waits until replies say how much filled
         return False, f"{ticker}: can't tell from the {what}'s reply how much filled (keys: {sorted(order)[:12]})", False
     book = f"YES ask was ${ask:.2f}" if side == "yes" else f"YES bid was ${bid or 0:.2f}"
     return True, f"{ticker}: {side.upper()} accepted, 0 filled ({book}, status {status_})", False

@@ -819,7 +819,12 @@ def apply_config(changes, sched):
         raise BadRequest(str(e))
     if new["enabled"] and not now["enabled"]:
         sched.run_now("trade")  # don't make someone who just pressed ON wait 5 minutes
-    return new, []
+    notes = []
+    if now["env"] != "prod" and new["env"] == "prod":
+        back = [n for n in config.practice_live(now) if new["strategies"].get(n, {}).get("mode") == "paper"]
+        if back:
+            notes.append(f"Back on paper for real money: {', '.join(back)}. Live was for demo practice.")
+    return new, notes
 
 
 # ---------- the app ----------

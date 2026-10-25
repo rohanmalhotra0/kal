@@ -6,8 +6,14 @@ from ..client import fee, ts
 
 # Rules that let Kalshi settle at the last traded price or a "fair" price of its choosing
 # (seen on real markets: death clauses on "leader leaves office" events). Then a market
-# can pay anything from $0 to $1, and a "locked-in" basket can lose.
-FAIR_PRICE_WORDS = ("last traded price", "fair price", "fair value")
+# can pay anything from $0 to $1, and a "locked-in" basket can lose. Matched on _plain()
+# text, so a doubled space or a line break ("fair\nprice") can't hide it.
+FAIR_PRICE = re.compile(r"fair (?:market )?(?:price|value)|last traded? price|price of the last trade")
+
+
+def _plain(text):
+    """Lowercase, with each run of spaces and line breaks (no-break spaces too) as one space."""
+    return " ".join((text or "").split()).lower()
 
 
 def plain_payouts(markets):
@@ -20,8 +26,7 @@ def plain_payouts(markets):
             return False
         if m.get("settlement_bounds_type", "default") != "default":
             return False
-        rules = f"{m.get('rules_primary') or ''} {m.get('rules_secondary') or ''}".lower()
-        if any(w in rules for w in FAIR_PRICE_WORDS):
+        if FAIR_PRICE.search(_plain(f"{m.get('rules_primary') or ''} {m.get('rules_secondary') or ''}")):
             return False
     return True
 
@@ -99,9 +104,8 @@ def fair_price_only_if_cancelled(markets):
         if m.get("settlement_bounds_type", "default") != "default":
             return False
         for field in ("rules_primary", "rules_secondary"):   # apart: never one run-on sentence
-            for sentence in _sentences(m.get(field)):
-                if any(w in sentence.lower() for w in FAIR_PRICE_WORDS) and \
-                        not any(c.fullmatch(sentence) for c in CANCELLATION_CLAUSES):
+            for sentence in _sentences(_plain(m.get(field))):
+                if FAIR_PRICE.search(sentence) and not any(c.fullmatch(sentence) for c in CANCELLATION_CLAUSES):
                     return False
     return True
 
