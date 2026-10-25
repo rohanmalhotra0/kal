@@ -269,6 +269,27 @@ class EngineTests(TempHome):
                     pass
 
 
+class RunCacheTests(TempHome):
+    def test_strategies_share_one_events_download(self):
+        config.update({"enabled": True, "budget": 60,
+                       "strategies": {"basket_arb": {"mode": "live"}, "ladder_arb": {"mode": "live"},
+                                      "bracket_arb": {"mode": "paper"}}})
+        c = fake_with_arb()
+        calls = []
+        real = c.events
+        c.events = lambda **p: calls.append(p) or real(**p)
+        engine.run_once(c)
+        self.assertEqual(len(calls), 1)
+
+    def test_order_books_are_never_cached(self):
+        c = FakeKalshi()
+        rc = engine.RunCache(c)
+        c.books["T"] = {"yes": [(0.5, 1)], "no": []}
+        self.assertEqual(rc.best_bid("T"), (0.5, 1))
+        c.books["T"] = {"yes": [(0.6, 1)], "no": []}
+        self.assertEqual(rc.best_bid("T"), (0.6, 1))
+
+
 class LedgerTests(TempHome):
     def setUp(self):
         super().setUp()

@@ -164,7 +164,8 @@ def scan_all(client=None, only=None):
     from .strategies import load_all
     from .strategies.base import Context
     cfg = config.load()
-    client = NoOrders(client or Kalshi(env=cfg["env"]))
+    from .engine import RunCache
+    client = NoOrders(RunCache(client or Kalshi(env=cfg["env"])))  # one events download for all strategies
     money = cfg["budget"] if cfg["budget"] > 0 else cfg["paper_bankroll"]
     research = _research()
     found = {}

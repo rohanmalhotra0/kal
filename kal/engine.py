@@ -22,6 +22,32 @@ LIVE_MODES = ("paper", "live")
 RECONCILE_GRACE = 600   # seconds: an order missing from Kalshi this long after sending never landed
 
 
+class RunCache:
+    """Wraps the client for one run, so identical list calls (all open events, markets,
+    series) hit the API once instead of once per strategy. Order books, balances and
+    orders always go straight through: those must be fresh."""
+
+    CACHED = ("events", "markets", "series")
+
+    def __init__(self, client):
+        self._client = client
+        self._memo = {}
+        self.calls = 0  # API list calls actually made (for tests and the run summary)
+
+    def __getattr__(self, name):
+        attr = getattr(self._client, name)
+        if name not in self.CACHED or not callable(attr):
+            return attr
+
+        def cached(*args, **kwargs):
+            key = (name, args, tuple(sorted(kwargs.items())))
+            if key not in self._memo:
+                self.calls += 1
+                self._memo[key] = attr(*args, **kwargs)
+            return list(self._memo[key])
+        return cached
+
+
 class LegFailed(RuntimeError):
     """A multi-leg basket stopped part way. A person should look at what's held."""
 
@@ -166,6 +192,7 @@ def _still_on():
 
 
 def _run(client, cfg, summary):
+    client = RunCache(client)
     live = client.can_trade
     positions, balance = [], 0.0
     if live:
