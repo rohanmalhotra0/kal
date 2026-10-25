@@ -30,8 +30,8 @@ def side_trades(obs, max_spread):
     for o in obs:
         if max_spread is not None and not (0 < o["yes_bid"] and o["yes_ask"] - o["yes_bid"] <= max_spread + 1e-9):
             continue
-        for side, p, won in (("yes", o["yes_ask"], o["result"] == "yes"),
-                             ("no", round(1 - o["yes_bid"], 4) if o["yes_bid"] > 0 else None, o["result"] == "no")):
+        for side, p, won in (("yes", o["yes_ask"], backtest.paid(o, "yes")),
+                             ("no", round(1 - o["yes_bid"], 4) if o["yes_bid"] > 0 else None, backtest.paid(o, "no"))):
             if p is not None and MIN_PRICE <= p <= MAX_PRICE:
                 out[(side, backtest.bucket_of(p))].append(backtest.trade(o["event"], p, won))
     return out

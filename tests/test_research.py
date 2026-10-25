@@ -137,6 +137,26 @@ class BacktestTests(TempHome):
             m["event_ticker"] = m["ticker"]  # one market per event
         self.assertEqual(backtest.load_observations(c, "S", 6, refresh=True), [])
 
+    def test_cancelled_markets_count_at_what_they_paid(self):
+        # Real Kalshi: a called-off match settled all three outcomes "scalar" at $0.33.
+        # A 93c favorite bought there lost 60c; leaving those out would flatter the edge.
+        c = AllCandles()
+        add_series(c, "S", 3, 0.93, 0.92, 1.0, seed=1)
+        c.settled["S"][0].update({"result": "scalar", "settlement_value_dollars": "0.3300"})
+        c.settled["S"][1].update({"result": "void"})  # unreadable: skipped, never guessed
+        obs = backtest.load_observations(c, "S", 6, refresh=True)
+        self.assertEqual([o["result"] for o in obs], ["scalar", "yes"])
+        cancelled = obs[0]
+        self.assertEqual(cancelled["yes_value"], 0.33)
+        (yes_p, yes_paid), (no_p, no_paid) = backtest.buy_trades(cancelled)
+        self.assertEqual((yes_p, yes_paid), (0.93, 0.33))
+        self.assertAlmostEqual(no_paid, 0.67)
+        pnl = backtest.trade("E", yes_p, yes_paid)[2]
+        self.assertAlmostEqual(pnl, 0.33 - 0.93 - fee_per_contract(0.93))
+        # Mention history never learns a word from a cancelled market.
+        _, hist, _ = backtest.mention_test([dict(cancelled, series="S", word="w")], 0.15)
+        self.assertEqual(hist.get(("S", "w"), [0, 0]), [0, 0])
+
     def test_observations_are_cached_and_recorded(self):
         c = AllCandles()
         add_series(c, "S", 20, 0.93, 0.92, 0.95, seed=1)

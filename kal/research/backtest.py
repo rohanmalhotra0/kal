@@ -19,7 +19,7 @@ import statistics
 from collections import defaultdict
 
 from .. import config, db
-from ..client import Kalshi, candle_close, fee_per_contract, num, settled_result, ts
+from ..client import Kalshi, UnknownSettlement, candle_close, fee_per_contract, num, ts, yes_payout
 from ..strategies.mentions import MIN_HISTORY, mention_side, word_estimate, word_of
 
 BUCKETS = [0, 0.05, 0.10, 0.20, 0.30, 0.40, 0.50, 0.60, 0.70, 0.80, 0.90, 0.95, 1.0]
@@ -126,9 +126,13 @@ def load_observations(client, series, hours_before_close=6, hours_after_open=Non
                 sizes[m.get("event_ticker") or m.get("ticker")] += 1
             for m in settled:
                 tk = m.get("ticker")
-                res = settled_result(m)
-                if not tk or tk in cache or not res or num(m, "volume") < MIN_VOLUME:
+                try:
+                    value = yes_payout(m)  # 1, 0, or in between: cancelled games really pay $0.33
+                except UnknownSettlement:
+                    value = None
+                if not tk or tk in cache or value is None or num(m, "volume") < MIN_VOLUME:
                     continue
+                res = m["result"] if m.get("result") in ("yes", "no") else "scalar"
                 ev = m.get("event_ticker") or tk
                 if sizes[ev] == 1 and m.get("can_close_early") is True:
                     continue  # no sibling shows the scheduled close; its own close may be the outcome
@@ -144,7 +148,7 @@ def load_observations(client, series, hours_before_close=6, hours_after_open=Non
                     "series": series, "event": ev, "ticker": tk,
                     "word": word_of(m), "close": ts(m["close_time"]),
                     "decided": decision_time(m, hours_before_close, hours_after_open, anchors.get(ev)),
-                    "yes_ask": snap[0], "yes_bid": snap[1], "result": res}
+                    "yes_ask": snap[0], "yes_bid": snap[1], "result": res, "yes_value": value}
         finally:
             if new:
                 _write_cache(path, cache)
@@ -198,11 +202,20 @@ def bucket_of(p):
     return None
 
 
+def paid(o, side):
+    """What one contract on `side` paid. Usually 1 or 0; a cancelled market can pay a split
+    (all three outcomes of a called-off match paid $0.33), which counts as a partial loss."""
+    v = o.get("yes_value")
+    if v is None:
+        v = 1.0 if o["result"] == "yes" else 0.0
+    return v if side == "yes" else 1 - v
+
+
 def buy_trades(o):
-    """Both sides of a market as (price paid, won?). The NO ask is 1 - YES bid."""
-    yield o["yes_ask"], o["result"] == "yes"
+    """Both sides of a market as (price paid, payout per contract). The NO ask is 1 - YES bid."""
+    yield o["yes_ask"], paid(o, "yes")
     if o["yes_bid"] > 0:
-        yield round(1 - o["yes_bid"], 4), o["result"] == "no"
+        yield round(1 - o["yes_bid"], 4), paid(o, "no")
 
 
 def calibration(obs, max_spread=None, by_side=False):
@@ -263,6 +276,8 @@ def mention_test(obs, margin):
         now = decided(event)
         while pending and closed(pending[0]) <= now:
             for o in by_event[pending.pop(0)]:
+                if o["result"] not in ("yes", "no"):
+                    continue  # a cancelled market says nothing about the word
                 hit = o["result"] == "yes"
                 hist[(o["series"], o["word"])][0] += hit
                 hist[(o["series"], o["word"])][1] += 1
@@ -276,9 +291,11 @@ def mention_test(obs, margin):
             pick = mention_side(word_estimate(hits, n, bh / bn if bn else 0.5), o["yes_ask"], o["yes_bid"], margin)
             if pick:
                 side, p = pick
-                trades.append(trade(event, p, o["result"] == side))
+                trades.append(trade(event, p, paid(o, side)))
     for e in pending:  # everything has closed by now: final history for live use
         for o in by_event[e]:
+            if o["result"] not in ("yes", "no"):
+                continue
             hit = o["result"] == "yes"
             hist[(o["series"], o["word"])][0] += hit
             hist[(o["series"], o["word"])][1] += 1
