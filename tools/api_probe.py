@@ -324,13 +324,18 @@ for e in events:
 early = collections.defaultdict(collections.Counter)
 gaps = collections.defaultdict(list)
 samples = []
+fetched = collections.Counter()
 for s_, _ in vol.most_common(40):
-    code, d = get("/markets", series_ticker=s_, status="settled", limit=200)
-    if code != 200 or not isinstance(d, dict):
-        continue
+    got = {}
+    for path, params in (("/markets", {"status": "settled"}), ("/historical/markets", {})):
+        code, d = get(path, series_ticker=s_, limit=200, **params)
+        fetched[f"{path} {code}"] += 1
+        if code == 200 and isinstance(d, dict):
+            for m in d.get("markets") or []:
+                got.setdefault(m.get("ticker"), m)
     cat = cat_of.get(s_, "?")
     by_event = collections.defaultdict(list)
-    for m in d.get("markets") or []:
+    for m in got.values():
         by_event[m.get("event_ticker")].append(m)
     for ev, ms in by_event.items():
         flags = {m.get("can_close_early") for m in ms}
@@ -347,6 +352,7 @@ for s_, _ in vol.most_common(40):
                     samples.append({k: m.get(k) for k in ("ticker", "open_time", "close_time",
                                                           "expected_expiration_time", "latest_expiration_time",
                                                           "result")})
+show("settled-market fetches (path, HTTP code)", dict(fetched))
 show("early close by category (40 busiest series, up to 200 settled markets each)",
      {k: dict(v) for k, v in early.items()}, limit=8000)
 show("hours from an early close to expected_expiration_time, by category (min, median, max, n)",
