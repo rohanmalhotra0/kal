@@ -395,6 +395,42 @@ def fee_per_contract(p):
     return FEE_RATE * p * (1 - p)
 
 
+FINAL = ("settled", "finalized")
+
+
+class UnknownSettlement(RuntimeError):
+    """A market is final but we can't tell what it paid. Never guess with real money."""
+
+
+def yes_payout(m):
+    """What one YES contract paid once a market is final: 1.0, 0.0, or in between (scalar or
+    voided markets). One NO paid 1 - that. None if the result isn't final yet.
+
+    Prefers Kalshi's settlement value (`settlement_value_dollars`, seen on real settled
+    markets), checks it agrees with `result`, and raises UnknownSettlement on anything else,
+    so a void or a new result type stops the bot instead of being booked wrong."""
+    if m.get("status") not in FINAL:
+        return None
+    t, res = m.get("ticker", "?"), m.get("result")
+    v = m.get("settlement_value_dollars")
+    if v not in (None, ""):
+        try:
+            value = float(v)
+        except (TypeError, ValueError):
+            raise UnknownSettlement(f"{t}: settlement value {v!r} isn't a number")
+    elif isinstance(m.get("settlement_value"), int) and not isinstance(m.get("settlement_value"), bool):
+        value = m["settlement_value"] / 100  # legacy cents
+    elif res in ("yes", "no"):
+        value = 1.0 if res == "yes" else 0.0
+    else:
+        raise UnknownSettlement(f"{t}: final with result {res!r} and no settlement value")
+    if not 0 <= value <= 1:
+        raise UnknownSettlement(f"{t}: settlement value {value} is outside $0-$1")
+    if (res == "yes" and value != 1.0) or (res == "no" and value != 0.0):
+        raise UnknownSettlement(f"{t}: result {res!r} doesn't match settlement value {value}")
+    return value
+
+
 def settled_result(m):
     """'yes' / 'no' once a market's result is final, else None. "determined" isn't final:
     a result can still be disputed and amended then, and the ledger books it for good."""

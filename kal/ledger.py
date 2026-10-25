@@ -10,7 +10,7 @@ inflate it.
 import time
 
 from . import db
-from .client import fee, price, settled_result
+from .client import fee, price, yes_payout
 
 
 def _open_fills():
@@ -58,15 +58,27 @@ def settle(client):
         by_ticker.setdefault(r["ticker"], []).append(r)
     n = 0
     for ticker, legs in by_ticker.items():
-        res = settled_result(markets.get(ticker, {}))
-        if not res:
+        paid = yes_payout(markets.get(ticker, {}))  # raises UnknownSettlement: the engine trips
+        if paid is None:
             continue
-        revenue = sum(r["count"] for r in legs if r["side"] == res)
+        revenue = sum(r["count"] * (paid if r["side"] == "yes" else 1 - paid) for r in legs)
         cost = sum(r["cost"] for r in legs)
-        db.insert("settlements", ticker=ticker, settled_ts=time.time(), result=res,
+        result = "yes" if paid == 1 else "no" if paid == 0 else f"{paid:.4f}"
+        db.insert("settlements", ticker=ticker, settled_ts=time.time(), result=result,
                   revenue=revenue, cost=cost, pnl=revenue - cost)
         n += 1
     return n
+
+
+def payout_of(result, side):
+    """Per-contract payout for a booked settlement result ("yes", "no", or a YES value)."""
+    if result == "yes":
+        paid = 1.0
+    elif result == "no":
+        paid = 0.0
+    else:
+        paid = float(result)
+    return paid if side == "yes" else 1 - paid
 
 
 def capital(cfg):

@@ -530,11 +530,86 @@ class SettleDateTests(unittest.TestCase):
         self.assertIn("a year", lim.refuse(tiny))
 
 
+class YearlyReturnTests(unittest.TestCase):
+    def test_short_fat_trade_does_not_overflow(self):
+        import time as _t
+        self.assertGreater(risk.yearly_return(1.09, 1 / 24), 1e6)   # 1.09 ** 8760 would overflow
+        self.assertAlmostEqual(risk.yearly_return(1.10, 365), 0.10)
+        self.assertEqual(risk.yearly_return(0, 10), -1.0)
+        cfg = dict(config.DEFAULTS, max_per_trade=30)
+        sig = Signal("x", "E", "t", [Leg("A", "no", 0.45, 10), Leg("B", "no", 0.45, 10)],
+                     payout_min=10.0, closes_at=_t.time() + 600)
+        self.assertIsNone(risk.Limits(cfg, 1000).refuse(sig))  # used to raise OverflowError
+
+    def test_arbs_rank_by_yearly_return(self):
+        import time as _t
+        from kal.strategies import ladder_arb
+        soon = Signal("x", "E1", "t", [Leg("A", "no", 0.45, 10), Leg("B", "no", 0.45, 10)],
+                      payout_min=10.0, closes_at=_t.time() + 2 * 86400)
+        later = Signal("x", "E2", "t", [Leg("C", "no", 0.40, 10), Leg("D", "no", 0.40, 10)],
+                       payout_min=10.0, closes_at=_t.time() + 25 * 86400)
+        self.assertTrue(soon.guaranteed and later.guaranteed)
+        self.assertGreater(later.payout_min - later.cost, soon.payout_min - soon.cost)  # more dollars...
+        self.assertGreater(ladder_arb.yearly(soon), ladder_arb.yearly(later))  # ...but far slower
+
+
 class FinalityTests(unittest.TestCase):
     def test_determined_is_not_final(self):
         self.assertIsNone(client.settled_result({"status": "determined", "result": "yes"}))
         self.assertEqual(client.settled_result({"status": "finalized", "result": "yes"}), "yes")
         self.assertEqual(client.settled_result({"status": "settled", "result": "no"}), "no")
+
+
+class SettlementValueTests(TempHome):
+    def test_payouts(self):
+        f = client.yes_payout
+        self.assertIsNone(f({"status": "active", "result": ""}))
+        self.assertIsNone(f({"status": "determined", "result": "yes"}))
+        self.assertEqual(f({"status": "finalized", "result": "no", "settlement_value_dollars": "0.0000"}), 0.0)
+        self.assertEqual(f({"status": "finalized", "result": "yes", "settlement_value_dollars": "1.0000"}), 1.0)
+        self.assertEqual(f({"status": "settled", "result": "yes"}), 1.0)
+        self.assertEqual(f({"status": "finalized", "result": "", "settlement_value_dollars": "0.4200"}), 0.42)
+        for bad in ({"status": "finalized", "result": "void"},
+                    {"status": "finalized", "result": "yes", "settlement_value_dollars": "0.0000"},
+                    {"status": "finalized", "result": "", "settlement_value_dollars": "1.7"},
+                    {"status": "finalized", "result": "", "settlement_value_dollars": "lots"}):
+            with self.assertRaises(client.UnknownSettlement, msg=bad):
+                f(bad)
+
+    def _fill(self, ticker, side, n, p):
+        db.insert("orders", ticker=ticker, side=side, count=n, price=p, filled=n, status="executed")
+
+    def test_partial_payout_is_booked_both_sides(self):
+        from kal import ledger
+        self._fill("S", "yes", 10, 0.30)
+        self._fill("T", "no", 10, 0.30)
+        c = FakeKalshi()
+        c.market_info["S"] = {"status": "finalized", "result": "", "settlement_value_dollars": "0.4200"}
+        c.market_info["T"] = {"status": "finalized", "result": "", "settlement_value_dollars": "0.4200"}
+        self.assertEqual(ledger.settle(c), 2)
+        rows = {r["ticker"]: r for r in db.query("SELECT * FROM settlements")}
+        self.assertAlmostEqual(rows["S"]["revenue"], 4.2)
+        self.assertAlmostEqual(rows["T"]["revenue"], 5.8)
+        self.assertEqual(ledger.open_cost(), 0)
+
+    def test_unknown_settlement_trips_the_bot(self):
+        config.update({"enabled": True, "budget": 50})
+        self._fill("V", "no", 10, 0.9)
+        c = FakeKalshi()
+        c.market_info["V"] = {"ticker": "V", "status": "finalized", "result": "void"}
+        engine.run_once(c)
+        self.assertIn("doesn't understand", config.load()["disabled_reason"])
+        self.assertEqual(c.orders, [])
+
+    def test_unknown_paper_settlement_never_counts(self):
+        from kal.strategies.base import Leg, Signal
+        sig = Signal("favorites", "E", "t", [Leg("P", "yes", 0.5, 4)])
+        paper.record(sig, 1)
+        c = FakeKalshi()
+        c.market_info["P"] = {"status": "finalized", "result": "void"}
+        paper.settle(c)
+        row = db.query("SELECT * FROM paper")[0]
+        self.assertEqual((row["settled"], row["result"], row["pnl"]), (1, "unknown", None))
 
 
 class PaperDuplicateTests(TempHome):

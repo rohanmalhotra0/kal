@@ -1,5 +1,6 @@
 """Safety checks that sit between strategies and real money."""
 import fcntl
+import math
 import os
 import time
 from collections import defaultdict
@@ -36,6 +37,14 @@ def run_lock():
 MAX_ARB_ROI = 0.25
 
 
+def yearly_return(ratio, days):
+    """Compounded yearly return of turning $1 into $ratio over `days`. Capped so a short,
+    fat trade can't overflow a float (1.09 ** 8760 does) and crash the run."""
+    if ratio <= 0 or days <= 0:
+        return -1.0
+    return math.exp(min(math.log(ratio) * 365 / days, 50.0)) - 1
+
+
 class Limits:
     """Tracks spending within one run so no signal can push past a limit."""
 
@@ -70,7 +79,7 @@ class Limits:
             days = max((sig.closes_at - time.time()) / 86400, 1 / 24)
             if days > cfg["max_arb_days"]:
                 return f"locks money up for {days:.0f} days (max {cfg['max_arb_days']})"
-            apr = (sig.payout_min / sig.cost) ** (365 / days) - 1
+            apr = yearly_return(sig.payout_min / sig.cost, days)
             if apr < cfg["min_arb_apr"]:
                 return f"pays {apr:.0%} a year, under the {cfg['min_arb_apr']:.0%} minimum"
         else:

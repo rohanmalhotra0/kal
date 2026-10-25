@@ -8,6 +8,7 @@ happens because people overpay for longshots.
 """
 from ..client import fee, price, ts
 from .base import Leg, Signal, Strategy
+from .ladder_arb import yearly
 
 MIN_PROFIT = 0.05   # dollars per basket, after fees
 MIN_ROI = 0.01
@@ -78,7 +79,7 @@ class BasketArb(Strategy):
                 sig = to_signal(ev["event_ticker"], ev.get("title", ""), basket)
                 sig.closes_at = latest_close(markets)
                 found.append(sig)
-        return sorted(found, key=lambda s: -s.exp_profit)
+        return sorted(found, key=lambda s: -yearly(s))  # money back soonest, per dollar, first
 
     def recheck(self, ctx, sig):
         legs = [(leg.ticker, *ctx.client.best_bid(leg.ticker, "yes")) for leg in sig.legs]

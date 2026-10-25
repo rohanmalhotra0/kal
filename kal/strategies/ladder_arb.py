@@ -25,6 +25,7 @@ import re
 import time
 
 from ..client import fee, price, ts
+from ..risk import yearly_return
 from .base import Leg, Signal, Strategy
 
 MIN_PROFIT = 0.05      # dollars per signal, after fees
@@ -178,7 +179,7 @@ def allocate(ctx, candidates):
     for quotes, make in candidates:
         basket = locked_basket(quotes, min(cap, left), partial)
         if basket:
-            ranked.append((basket["profit"], quotes, make))
+            ranked.append((yearly(make(basket)), quotes, make))
     for _, quotes, make in sorted(ranked, key=lambda r: -r[0]):
         tickers = {q[0] for q in quotes}
         basket = locked_basket(quotes, min(cap, left), partial)  # resized to what's left
@@ -187,7 +188,16 @@ def allocate(ctx, candidates):
         used |= tickers
         left -= basket["cost"]
         out.append(make(basket))
-    return sorted(out, key=lambda s: -s.exp_profit)
+    return sorted(out, key=lambda s: -yearly(s))
+
+
+def yearly(sig):
+    """Rank locked-in trades by yearly return, not dollars: with $300, 40c locked up for six
+    months is worse than 20c back by Friday."""
+    if not sig.closes_at or sig.cost <= 0:
+        return -1.0
+    days = max((sig.closes_at - time.time()) / 86400, 1 / 24)
+    return yearly_return(sig.payout_min / sig.cost, days)
 
 
 # ---------- the ladder ----------

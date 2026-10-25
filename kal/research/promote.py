@@ -19,7 +19,8 @@ import time
 from collections import defaultdict
 
 from .. import db
-from ..client import fee, settled_result
+from .. import ledger
+from ..client import UnknownSettlement, fee, yes_payout
 from . import backtest, discover
 
 MIN_PAPER_TRADES = 30   # distinct markets, not rows: re-buying one market adds nothing
@@ -56,14 +57,17 @@ def live_trades(strategy, client=None):
         WHERE o.strategy = ? AND o.filled > 0 ORDER BY o.ts, o.id""", strategy)
     if not rows:
         return []
-    results = {r["ticker"]: r["result"] for r in
-               db.query("SELECT ticker, result FROM settlements WHERE result IN ('yes', 'no')")}
+    results = {r["ticker"]: r["result"] for r in db.query("SELECT ticker, result FROM settlements")}
     unknown = {r["ticker"] for r in rows} - set(results)
     if unknown and client is not None:
         try:
             for tk, m in client.markets_by_ticker(unknown).items():
-                if settled_result(m):
-                    results[tk] = settled_result(m)
+                try:
+                    paid = yes_payout(m)
+                except UnknownSettlement:
+                    continue
+                if paid is not None:
+                    results[tk] = "yes" if paid == 1 else "no" if paid == 0 else f"{paid:.4f}"
         except Exception as e:
             log.warning("promote: couldn't look up live results: %s", e)
     out = []
@@ -71,10 +75,14 @@ def live_trades(strategy, client=None):
         res = results.get(r["ticker"])
         if not res:
             continue
+        try:
+            per = ledger.payout_of(res, r["side"])
+        except (TypeError, ValueError):
+            continue
         n, p = r["filled"], r["price"]
         cost = n * p + fee(n, p)
         out.append({"ts": r["ts"], "event": r["event"] or r["ticker"], "ticker": r["ticker"], "cost": cost,
-                    "pnl": n * (res == r["side"]) - cost, "var": n * n * p * (1 - p),
+                    "pnl": n * per - cost, "var": n * n * p * (1 - p),
                     "meta": _meta(r["meta"]), "live": True})
     return out
 

@@ -1,8 +1,11 @@
 """Paper trading: same signals, simulated fills, real settlement results."""
+import logging
 import time
 
 from . import db
-from .client import settled_result
+from .client import UnknownSettlement, yes_payout
+
+log = logging.getLogger(__name__)
 
 
 def record(sig, signal_id):
@@ -27,12 +30,22 @@ def settle(client):
     markets = client.markets_by_ticker({r["ticker"] for r in rows})
     n = 0
     for r in rows:
-        res = settled_result(markets.get(r["ticker"], {}))
-        if res:
-            pnl = r["count"] * (1 if res == r["side"] else 0) - r["cost"]
-            db.execute("UPDATE paper SET settled = 1, result = ?, pnl = ?, settled_ts = ? WHERE id = ?",
-                       res, pnl, time.time(), r["id"])
-            n += 1
+        try:
+            paid = yes_payout(markets.get(r["ticker"], {}))
+        except UnknownSettlement as e:
+            # Paper isn't money: close it out without a result, so it never counts toward
+            # promotion, rather than guess.
+            log.warning("paper: %s", e)
+            db.execute("UPDATE paper SET settled = 1, result = 'unknown', pnl = NULL, settled_ts = ? WHERE id = ?",
+                       time.time(), r["id"])
+            continue
+        if paid is None:
+            continue
+        per = paid if r["side"] == "yes" else 1 - paid
+        result = "yes" if paid == 1 else "no" if paid == 0 else f"{paid:.4f}"
+        db.execute("UPDATE paper SET settled = 1, result = ?, pnl = ?, settled_ts = ? WHERE id = ?",
+                   result, r["count"] * per - r["cost"], time.time(), r["id"])
+        n += 1
     return n
 
 

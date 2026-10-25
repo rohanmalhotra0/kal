@@ -13,7 +13,7 @@ import traceback
 import uuid
 
 from . import config, db, ledger, paper, risk, sizing
-from .client import Kalshi, KalshiError, fee, filled, is_transient, resting
+from .client import Kalshi, KalshiError, UnknownSettlement, fee, filled, is_transient, resting
 from .strategies import load_all
 from .strategies.base import Context
 
@@ -243,7 +243,13 @@ def _run(client, cfg, summary):
     positions, balance = [], 0.0
     if live:
         summary["reconciled"] = reconcile(client)
-    summary["settled"] = ledger.settle(client)
+    try:
+        summary["settled"] = ledger.settle(client)
+    except UnknownSettlement as e:
+        reason = f"a market settled in a way the bot doesn't understand: {e}. Check it on Kalshi."
+        config.trip(reason)
+        summary["notes"].append(f"STOPPED: {reason}")
+        return
     summary["paper_settled"] = paper.settle(client)
     capital = ledger.capital(cfg)
     if live:
