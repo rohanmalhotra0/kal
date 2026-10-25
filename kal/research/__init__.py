@@ -13,13 +13,14 @@ import traceback
 
 from .. import config, db
 from ..client import Kalshi
-from . import discover, promote
+from . import discover, longshot, promote
 
 log = logging.getLogger(__name__)
 
 
 def run_all(client=None, quick=False):
-    """Discover, then promote. quick=True tests only a few series (for CI and smoke tests)."""
+    """Discover (favorite ranges, then longshot cells), then promote. quick=True tests only a
+    few series (for CI and smoke tests)."""
     cfg = config.load()
     t0 = time.time()
     # Research can take an hour on a cold cache; a second copy would just double the API load.
@@ -37,8 +38,9 @@ def run_all(client=None, quick=False):
         except Exception as e:
             summary.update(ok=False, error=f"discovery failed: {e}"[:500])
             log.error("research discovery failed: %s", traceback.format_exc())
+        summary["longshot"] = longshot.run(client, cfg, quick=quick)  # never raises
         try:
-            summary["changes"] = promote.apply(cfg, client)
+            summary["changes"] = promote.apply(cfg, client) + longshot.apply_longshot(cfg, client)
         except Exception as e:
             summary.update(ok=False, promote_error=str(e)[:500])
             log.error("research promote failed: %s", traceback.format_exc())
