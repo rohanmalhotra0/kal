@@ -2,6 +2,19 @@
 
 Newest first. Each 2-hour check-in adds one entry: what it checked, what it found, links.
 
+## 2026-10-25 04:50 UTC — check-in: fee guard, deep backtest done
+
+- Checked: CI and market-check green on main (the clock fix worked). No server yet, so
+  no status report. The 02:47 check-in was missed: the session hit its usage limit.
+- **Fix (PR https://github.com/rohanmalhotra0/kal/pull/1):** trade only where the fee
+  math is an upper bound. Correction to the 01:35 entry: the fee estimate is safe only for
+  Kalshi's quadratic fee types with multiplier 0-1 (Kalshi has used a flat fee before).
+  Today every series qualifies, so no trade is lost.
+- **Deep backtest v3 (26,676 real markets, 5,028 events, sports, economics, weather):**
+  no price range has a real edge for a taker 6 h before close. Best: 95c+ with spreads of
+  2c or less, +0.4% to +1% (worst case -2% to -3%). YES under 10c loses 35-95%. Favorites
+  and longshot fading stay on paper, as designed.
+
 ## 2026-10-25 02:20 UTC — real-API facts and safety fixes
 
 - **Cancelled games really happen:** a called-off 3-way eSoccer match settled every outcome
