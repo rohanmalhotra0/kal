@@ -155,6 +155,33 @@ class EngineTests(TempHome):
         self.assertEqual(len(c.orders), 2)  # stopped after the leg that didn't fill
         self.assertIn("half-built", config.load()["disabled_reason"])
 
+    def test_maintenance_skips_quietly(self):
+        c = fake_with_arb()
+        c.trading_active = False
+        for _ in range(5):
+            s = engine.run_once(c)
+        self.assertIn("closed", s["skipped"])
+        self.assertEqual(c.orders, [])
+        self.assertTrue(config.load()["enabled"])
+
+    def test_kalshi_outage_never_trips(self):
+        from kal.client import KalshiError
+        c = fake_with_arb()
+        c.balance = lambda: (_ for _ in ()).throw(KalshiError("503 Service Unavailable", 503))
+        for _ in range(10):
+            s = engine.run_once(c)
+        self.assertTrue(s.get("transient"))
+        self.assertTrue(config.load()["enabled"])
+        self.assertEqual(db.get("consecutive_errors", 0), 0)
+
+    def test_network_errors_never_trip(self):
+        import requests
+        c = fake_with_arb()
+        c.balance = lambda: (_ for _ in ()).throw(requests.ConnectionError("no route"))
+        for _ in range(10):
+            engine.run_once(c)
+        self.assertTrue(config.load()["enabled"])
+
     def test_three_failures_trip_the_bot(self):
         c = fake_with_arb()
         c.events = lambda **p: (_ for _ in ()).throw(RuntimeError("boom"))

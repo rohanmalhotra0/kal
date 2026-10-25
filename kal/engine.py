@@ -13,7 +13,7 @@ import traceback
 import uuid
 
 from . import config, db, ledger, paper, risk, sizing
-from .client import Kalshi, KalshiError, fee, filled, resting
+from .client import Kalshi, KalshiError, fee, filled, is_transient, resting
 from .strategies import load_all
 from .strategies.base import Context
 
@@ -173,8 +173,15 @@ def run_once(client=None):
                 _count_error(cfg, e)
         except Exception as e:
             summary.update(ok=False, error=str(e))
-            log.error("run failed: %s", traceback.format_exc())
-            _count_error(cfg, e)
+            if is_transient(e):
+                # Kalshi down, maintenance, network blip: try again next run. Not a reason to
+                # stop, since nothing can be bought while it lasts.
+                summary["transient"] = True
+                log.warning("run skipped, Kalshi unreachable: %s", e)
+                db.put("last_transient_error", {"ts": time.time(), "error": str(e)[:300]})
+            else:
+                log.error("run failed: %s", traceback.format_exc())
+                _count_error(cfg, e)
         db.insert("runs", kind="trade", ok=int(summary["ok"]), duration=time.time() - t0,
                   message=json.dumps(summary)[:4000])
         if summary.get("live_trades"):
@@ -207,6 +214,10 @@ def _still_on():
 
 def _run(client, cfg, summary):
     client = RunCache(client)
+    status = client.exchange_status() if hasattr(client, "exchange_status") else {}
+    if status and not status.get("trading_active", True):
+        summary["skipped"] = "Kalshi is closed for trading right now (maintenance or off hours)"
+        return
     live = client.can_trade
     positions, balance = [], 0.0
     if live:

@@ -32,6 +32,18 @@ class KalshiError(RuntimeError):
         return self.status is not None and 400 <= self.status < 500
 
 
+def is_transient(e):
+    """True for failures that are Kalshi's or the network's, not ours: timeouts, dropped
+    connections, 5xx, rate limits. They can't lose money (an order that fails to send
+    either never happened or gets reconciled), so they shouldn't trip the bot the way a
+    bug would. Kalshi's weekly maintenance looks exactly like this."""
+    if isinstance(e, requests.RequestException):
+        return True
+    if isinstance(e, KalshiError) and e.status is not None:
+        return e.status >= 500 or e.status == 429
+    return False
+
+
 class _Pacer:
     """One request pace shared by every client in the process (trade + research threads),
     so together they stay under Kalshi's ~20 requests/second basic tier."""
@@ -133,6 +145,11 @@ class Kalshi:
             params["cursor"] = d["cursor"]
 
     # ---------- market data (public) ----------
+
+    def exchange_status(self):
+        """{"trading_active": bool, "exchange_active": bool, ...}. Kalshi closes for
+        scheduled maintenance; trading then would only fail."""
+        return self.get("/exchange/status")
 
     def markets(self, limit=None, **params):
         return self.paginate("/markets", "markets", {"limit": 1000, **params}, limit)

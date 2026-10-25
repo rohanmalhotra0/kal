@@ -49,6 +49,11 @@ class FakeKalshi:
         levels = self.orderbook(ticker)[side]
         return levels[0] if levels else (0.0, 0.0)
 
+    trading_active = True
+
+    def exchange_status(self):
+        return {"exchange_active": True, "trading_active": self.trading_active}
+
     def balance(self):
         return self._balance
 
