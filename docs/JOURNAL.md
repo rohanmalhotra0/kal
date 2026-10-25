@@ -2,6 +2,16 @@
 
 Newest first. Each 2-hour check-in adds one entry: what it checked, what it found, links.
 
+## 2026-10-25 19:05 UTC — date ladders merged, paper only
+
+- Merged PR #21 (`date_ladder_arb`, idea #6) as f793218. CI green on its last commit. 745 tests pass.
+- A third review found more wordings that flip the question ("nothing is released",
+  "refrains from", "the night before", "vetoed"). Word lists can't make rules safe for money.
+- So real money now needs the event in `date_ladder_arb.VERIFIED`: its rules pinned word for
+  word, added by PR after a person reads them. It starts empty, so nothing trades live.
+- Next: the owner's `sudo kal doctor` output from the server.
+  https://github.com/rohanmalhotra0/kal/pull/21
+
 ## 2026-10-25 18:47 UTC — check-in: all green; date ladders answered the coordinator's 5 checks
 
 - Checked: CI green on main b3e2fff. market-check green on 0e04a90:
@@ -20,7 +30,7 @@ Newest first. Each 2-hour check-in adds one entry: what it checked, what it foun
 
 ## 2026-10-25 18:40 UTC — server up, installer fixed, all finished PRs merged, date ladders built
 
-- **Server:** the owner made the droplet (2 GB, NYC1, Ubuntu 24.04, $12 a month). He is doing
+- **Server:** the owner made the droplet (2 GB, NYC1, Ubuntu 24.04, $12 a month). The owner is doing
   install and setup in its Web Console. No status report yet.
 - **Installer, tested on a fresh Ubuntu 24.04** (side branch `probe/install`):
   - main's install worked, and `kal doctor` showed only "no key yet";
