@@ -70,10 +70,24 @@ class Mentions(Strategy):
             for m in markets:
                 if not m.get("ticker") or m["ticker"] in ctx.held or not in_series(m, s) or not is_open(m):
                     continue
-                sig = self._signal(ctx, words, s, m, price(m, "yes_ask"), price(m, "yes_bid"))
-                if sig:
-                    found.append(sig)
+                # The listing is a cheap first filter; the order book sets the real price and
+                # size, so paper results (which decide promotion) match what live could get.
+                if self._signal(ctx, words, s, m, price(m, "yes_ask"), price(m, "yes_bid")):
+                    sig = self._from_book(ctx, words, s, m)
+                    if sig:
+                        found.append(sig)
         return sorted(found, key=lambda x: -x.exp_profit)
+
+    def _from_book(self, ctx, words, s, m):
+        book = ctx.client.orderbook(m["ticker"])
+        yes_bid = max(book.get("yes") or [(0.0, 0.0)])
+        no_bid = max(book.get("no") or [(0.0, 0.0)])
+        yes_ask = round(1 - no_bid[0], 4) if no_bid[0] else 0.0
+        pick = self._signal(ctx, words, s, m, yes_ask, yes_bid[0])
+        if not pick:
+            return None
+        depth = no_bid[1] if pick.legs[0].side == "yes" else yes_bid[1]
+        return self._signal(ctx, words, s, m, yes_ask, yes_bid[0], depth)
 
     def recheck(self, ctx, sig):
         """Re-price from the order book right before a live order."""
@@ -82,12 +96,7 @@ class Mentions(Strategy):
         s = next((s for s in words.get("series") or [] if m and in_series(m, s)), None)
         if not s or not is_open(m):
             return None
-        book = ctx.client.orderbook(leg.ticker)
-        yes_bid = max(book.get("yes") or [(0.0, 0.0)])
-        no_bid = max(book.get("no") or [(0.0, 0.0)])
-        yes_ask = round(1 - no_bid[0], 4) if no_bid[0] else 0.0
-        depth = no_bid[1] if leg.side == "yes" else yes_bid[1]
-        return self._signal(ctx, words, s, m, yes_ask, yes_bid[0], depth)
+        return self._from_book(ctx, words, s, m)
 
     def _signal(self, ctx, words, s, m, yes_ask, yes_bid, depth=None):
         word = word_of(m)

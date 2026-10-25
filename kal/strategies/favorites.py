@@ -65,6 +65,19 @@ def closes_within(m, now, hours):
     return now < close <= now + hours * 3600
 
 
+TIME_BAND = 1.0  # hours: the edge was measured at one time before close, so trade near it
+
+
+def near_tested_time(m, now, hours):
+    """True if the market closes about `hours` from now: the moment the backtest measured.
+    A 92c contract 5 minutes before close is a different bet from one 6 hours out."""
+    try:
+        left = (ts(m["close_time"]) - now) / 3600
+    except (KeyError, TypeError, ValueError, AttributeError):
+        return False
+    return max(0.0, hours - TIME_BAND) < left <= hours
+
+
 def quote(client, ticker, side):
     """(ask, contracts at the ask, best bid) for one side, or None.
     The book only has bids: the YES ask is 1 - best NO bid, and the other way round."""
@@ -119,7 +132,7 @@ class Favorites(Strategy):
             if not tight(ask, bid):
                 continue
             for e in edges:
-                if e["lo"] <= ask < e["hi"] and closes_within(m, now, e["hours_before_close"]):
+                if e["lo"] <= ask < e["hi"] and near_tested_time(m, now, e["hours_before_close"]):
                     picks.append((side, e))
         if len({side for side, _ in picks}) != 1:
             return None  # nothing matched, or two edges disagree about this market: stay out
@@ -158,7 +171,7 @@ class Favorites(Strategy):
             return None
         leg = sig.legs[0]
         m = ctx.client.market(leg.ticker)
-        if not is_open(m) or not closes_within(m, int(time.time()), e["hours_before_close"]):
+        if not is_open(m) or not near_tested_time(m, int(time.time()), e["hours_before_close"]):
             return None
         return self._signal(ctx, {**m, "ticker": leg.ticker, "event_ticker": sig.event, "title": sig.title},
                             leg.side, e)

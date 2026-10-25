@@ -34,8 +34,12 @@ log = logging.getLogger(__name__)
 
 # ---------- prices at decision time ----------
 
-def decision_time(m, hours_before_close=6, hours_after_open=None):
-    """Unix time we'd have decided at, or None if the market has no such moment."""
+def decision_time(m, hours_before_close=6, hours_after_open=None, anchor=None):
+    """Unix time we'd have decided at, or None if the market wasn't open then.
+
+    `anchor` is the event's scheduled close (the latest close among its markets). Using
+    each market's own close_time would leak the outcome: a mention market closes early
+    when the word is said, so its "6 hours before close" would sit right before the YES."""
     try:
         open_t, close_t = ts(m["open_time"]), ts(m["close_time"])
     except (KeyError, TypeError, ValueError, AttributeError):
@@ -43,14 +47,28 @@ def decision_time(m, hours_before_close=6, hours_after_open=None):
     if hours_after_open is not None:
         t = open_t + hours_after_open * 3600
     else:
-        t = close_t - hours_before_close * 3600
+        t = (anchor if anchor is not None else close_t) - hours_before_close * 3600
     return int(t) if open_t < t < close_t else None
 
 
-def snapshot(client, series, m, hours_before_close=6, hours_after_open=None):
+def event_anchors(markets):
+    """{event: scheduled close} = the latest close_time among the event's settled markets.
+    Siblings that ran to schedule reveal it even when some markets closed early."""
+    out = {}
+    for m in markets:
+        try:
+            t = ts(m["close_time"])
+        except (KeyError, TypeError, ValueError, AttributeError):
+            continue
+        ev = m.get("event_ticker") or m.get("ticker")
+        out[ev] = max(out.get(ev, t), t)
+    return out
+
+
+def snapshot(client, series, m, hours_before_close=6, hours_after_open=None, anchor=None):
     """(yes_ask, yes_bid) from the last candle that ENDED by the decision time.
     Later candles are dropped even if the API sends them: that's the no-look-ahead rule."""
-    t = decision_time(m, hours_before_close, hours_after_open)
+    t = decision_time(m, hours_before_close, hours_after_open, anchor)
     if t is None:
         return None
     start = t - LOOKBACK_HOURS * 3600
@@ -73,7 +91,8 @@ def cache_path(series, hours_before_close=6, hours_after_open=None):
     d = os.path.join(config.home(), "cache")
     os.makedirs(d, exist_ok=True)
     safe = re.sub(r"[^A-Za-z0-9_.-]", "_", series)
-    return os.path.join(d, f"{safe}_{_when(hours_before_close, hours_after_open)}.json")
+    # v2: decision time anchored to the event's scheduled close (older caches leaked outcomes)
+    return os.path.join(d, f"{safe}_{_when(hours_before_close, hours_after_open)}_v2.json")
 
 
 def _read_cache(path):
@@ -100,13 +119,21 @@ def load_observations(client, series, hours_before_close=6, hours_after_open=Non
     if not cached_only:
         new, errors, last_error = 0, 0, None
         try:
-            for m in client.settled_markets(series, max_markets):
+            settled = list(client.settled_markets(series, max_markets))
+            anchors = event_anchors(settled)
+            sizes = defaultdict(int)
+            for m in settled:
+                sizes[m.get("event_ticker") or m.get("ticker")] += 1
+            for m in settled:
                 tk = m.get("ticker")
                 res = settled_result(m)
                 if not tk or tk in cache or not res or num(m, "volume") < MIN_VOLUME:
                     continue
+                ev = m.get("event_ticker") or tk
+                if sizes[ev] == 1 and m.get("can_close_early") is True:
+                    continue  # no sibling shows the scheduled close; its own close may be the outcome
                 try:
-                    snap = snapshot(client, series, m, hours_before_close, hours_after_open)
+                    snap = snapshot(client, series, m, hours_before_close, hours_after_open, anchors.get(ev))
                 except Exception as e:  # one market's candles failing shouldn't sink the series
                     errors, last_error = errors + 1, e
                     if errors >= 10 and errors > new:
@@ -114,8 +141,9 @@ def load_observations(client, series, hours_before_close=6, hours_after_open=Non
                     continue
                 new += 1
                 cache[tk] = None if not snap else {
-                    "series": series, "event": m.get("event_ticker") or tk, "ticker": tk,
+                    "series": series, "event": ev, "ticker": tk,
                     "word": word_of(m), "close": ts(m["close_time"]),
+                    "decided": decision_time(m, hours_before_close, hours_after_open, anchors.get(ev)),
                     "yes_ask": snap[0], "yes_bid": snap[1], "result": res}
         finally:
             if new:
@@ -145,14 +173,16 @@ def roi_stats(trades, z):
         e = by_event[t[0]]
         e[0] += t[1]
         e[1] += t[2]
-        e[2] += t[3] if len(t) > 3 else 0.0
+        # Add standard deviations, not variances: assume trades in one event win or lose
+        # together (nested ladder rungs do), so the noise floor isn't understated.
+        e[2] += (t[3] if len(t) > 3 else 0.0) ** 0.5
     cost = sum(c for c, _, _ in by_event.values())
     g = len(by_event)
     if g < 2 or cost <= 0:
         return None, None
     roi = sum(p for _, p, _ in by_event.values()) / cost
     var = sum((p - roi * c) ** 2 for c, p, _ in by_event.values()) / cost ** 2 * g / (g - 1)
-    floor = sum(v for _, _, v in by_event.values()) / cost ** 2
+    floor = sum(sd * sd for _, _, sd in by_event.values()) / cost ** 2
     return roi, roi - z * max(var, floor) ** 0.5
 
 
@@ -202,15 +232,34 @@ def is_edge(row):
 
 
 def mention_test(obs, margin):
-    """Walk forward through time: price each word from earlier events only, trade
-    when history and the market disagree by `margin`, then learn the result."""
+    """Walk forward through time: price each word from events that had already closed by
+    the decision time, trade when history and the market disagree by `margin`, and only
+    learn an event's results once it has closed."""
     hist = defaultdict(lambda: [0, 0])    # (series, word) -> [hits, n]
     base = defaultdict(lambda: [0, 0])    # series -> [hits, n]
     trades = []
     by_event = defaultdict(list)
     for o in obs:
         by_event[o["event"]].append(o)
-    for event in sorted(by_event, key=lambda e: (min(o["close"] for o in by_event[e]), e)):
+
+    def decided(e):
+        # Without a recorded decision time, decide just before the first close, so an
+        # event can never learn from itself.
+        return min(o.get("decided") or o["close"] - 1 for o in by_event[e])
+
+    def closed(e):
+        return max(o["close"] for o in by_event[e])
+
+    pending = sorted(by_event, key=lambda e: (closed(e), e))  # not yet learned, by close
+    for event in sorted(by_event, key=lambda e: (decided(e), e)):
+        now = decided(event)
+        while pending and closed(pending[0]) <= now:
+            for o in by_event[pending.pop(0)]:
+                hit = o["result"] == "yes"
+                hist[(o["series"], o["word"])][0] += hit
+                hist[(o["series"], o["word"])][1] += 1
+                base[o["series"]][0] += hit
+                base[o["series"]][1] += 1
         for o in by_event[event]:
             hits, n = hist[(o["series"], o["word"])]
             bh, bn = base[o["series"]]
@@ -220,7 +269,8 @@ def mention_test(obs, margin):
             if pick:
                 side, p = pick
                 trades.append(trade(event, p, o["result"] == side))
-        for o in by_event[event]:  # only now does the result become "history"
+    for e in pending:  # everything has closed by now: final history for live use
+        for o in by_event[e]:
             hit = o["result"] == "yes"
             hist[(o["series"], o["word"])][0] += hit
             hist[(o["series"], o["word"])][1] += 1

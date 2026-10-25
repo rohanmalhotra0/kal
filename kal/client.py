@@ -310,7 +310,8 @@ def fee_per_contract(p):
 
 
 def settled_result(m):
-    """'yes' / 'no' once a market has settled, else None."""
-    if m.get("status") in ("settled", "finalized", "determined") and m.get("result") in ("yes", "no"):
+    """'yes' / 'no' once a market's result is final, else None. "determined" isn't final:
+    a result can still be disputed and amended then, and the ledger books it for good."""
+    if m.get("status") in ("settled", "finalized") and m.get("result") in ("yes", "no"):
         return m["result"]
     return None

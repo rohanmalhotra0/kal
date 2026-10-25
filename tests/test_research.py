@@ -92,13 +92,58 @@ class BacktestTests(TempHome):
         self.assertEqual(len(trades), 10 - mentions.MIN_HISTORY)  # no trades before enough history
         self.assertEqual(hist[("S", "tariff")], [10, 10])
 
+    def test_overlapping_events_dont_leak_results(self):
+        # B is decided at 14:00 (6h before its 20:00 close). A closes at 15:00: after B's
+        # decision, so A's results must not shape B's price.
+        H = 3600
+        base = [{"series": "S", "event": f"old{i}", "word": "tariff", "close": i * H, "decided": i * H - 6 * H,
+                 "yes_ask": 0.5, "yes_bid": 0.48, "result": "no"} for i in range(3)]
+        a = {"series": "S", "event": "A", "word": "tariff", "close": 15 * H, "decided": 9 * H,
+             "yes_ask": 0.5, "yes_bid": 0.48, "result": "yes"}
+        b = {"series": "S", "event": "B", "word": "tariff", "close": 20 * H, "decided": 14 * H,
+             "yes_ask": 0.5, "yes_bid": 0.48, "result": "yes"}
+        seen = {}
+        real = backtest.word_estimate
+
+        def spy(hits, n, base_rate):
+            seen.setdefault(n, hits)
+            return real(hits, n, base_rate)
+        backtest.word_estimate = spy
+        try:
+            backtest.mention_test(base + [a, b], 0.15)
+        finally:
+            backtest.word_estimate = real
+        self.assertNotIn(4, seen)  # B never saw A's result (it would be the 4th)
+
+    def test_early_close_uses_the_events_scheduled_close(self):
+        H = 3600
+        sched = T0 + 100 * H
+        said = {"ticker": "EV-SAID", "event_ticker": "EV", "open_time": iso(sched - 30 * H),
+                "close_time": iso(sched - 20 * H), "status": "settled", "result": "yes", "volume_fp": "500"}
+        not_said = {"ticker": "EV-NOT", "event_ticker": "EV", "open_time": iso(sched - 30 * H),
+                    "close_time": iso(sched), "status": "settled", "result": "no", "volume_fp": "500"}
+        anchors = backtest.event_anchors([said, not_said])
+        self.assertEqual(anchors["EV"], sched)
+        # Decided 6h before the scheduled close: the early YES had already closed then,
+        # so neither "6h before its own close" (a peek at the outcome) nor a skewed sample.
+        self.assertIsNone(backtest.decision_time(said, 6, anchor=anchors["EV"]))
+        self.assertEqual(backtest.decision_time(not_said, 6, anchor=anchors["EV"]), sched - 6 * H)
+
+    def test_single_market_that_can_close_early_is_skipped(self):
+        c = AllCandles()
+        add_series(c, "S", 5, 0.93, 0.92, 0.95, seed=1)
+        for m in c.settled["S"]:
+            m["can_close_early"] = True
+            m["event_ticker"] = m["ticker"]  # one market per event
+        self.assertEqual(backtest.load_observations(c, "S", 6, refresh=True), [])
+
     def test_observations_are_cached_and_recorded(self):
         c = AllCandles()
         add_series(c, "S", 20, 0.93, 0.92, 0.95, seed=1)
         obs = backtest.load_observations(c, "S", 6)
         self.assertEqual(len(obs), 20)
         self.assertEqual(c.candle_calls, 20)
-        self.assertTrue(os.path.exists(os.path.join(self.home, "cache", "S_close6.json")))
+        self.assertTrue(os.path.exists(os.path.join(self.home, "cache", "S_close6_v2.json")))
         self.assertEqual(len(backtest.load_observations(c, "S", 6)), 20)
         self.assertEqual(c.candle_calls, 20)  # second time: all from cache
         res = backtest.run(["S"], client=c)
@@ -228,7 +273,8 @@ class PromoteTests(TempHome):
             paper_trade("favorites", i, 0.90, True, {"edge": self.EDGE, "paper_only": True})
         self.assertEqual(promote.apply(dict(config.DEFAULTS)), [])
         self.assertEqual(self.status(), "candidate")  # 20 is too few
-        for i in range(20, 40):
+        # Each daily look needs more confidence, so it takes a long, clean record.
+        for i in range(20, 120):
             paper_trade("favorites", i, 0.90, True, {"edge": self.EDGE, "paper_only": True})
         notes = promote.apply(dict(config.DEFAULTS, auto_promote=False))
         self.assertIn("Auto promote is off", notes[0])
@@ -236,6 +282,32 @@ class PromoteTests(TempHome):
         notes = promote.apply(dict(config.DEFAULTS))
         self.assertIn("Set favorites to live", notes[0])  # the default mode is paper
         self.assertEqual(self.status(), "live")
+
+    def test_copies_of_one_market_dont_count(self):
+        save_edges((self.EDGE, "candidate"))
+        for i in range(200):  # the same market bought over and over: one trade, one event
+            sid = db.insert("signals", ts=T0 + i, strategy="favorites", event="E1",
+                            meta={"edge": self.EDGE}, status="accepted")
+            db.insert("paper", ts=T0 + i, signal_id=sid, strategy="favorites", event="E1", ticker="T1",
+                      side="yes", count=1, price=0.9, cost=0.91, settled=1, result="yes", pnl=0.09,
+                      settled_ts=T0 + i)
+        promote.apply(dict(config.DEFAULTS))
+        self.assertEqual(self.status(), "candidate")
+
+    def test_few_events_dont_promote(self):
+        save_edges((self.EDGE, "candidate"))
+        for i in range(120):  # 120 markets, but only 6 events: they move together
+            sid = db.insert("signals", ts=T0 + i, strategy="favorites", event=f"E{i % 6}",
+                            meta={"edge": self.EDGE}, status="accepted")
+            db.insert("paper", ts=T0 + i, signal_id=sid, strategy="favorites", event=f"E{i % 6}",
+                      ticker=f"T{i}", side="yes", count=1, price=0.9, cost=0.91, settled=1, result="yes",
+                      pnl=0.09, settled_ts=T0 + i)
+        promote.apply(dict(config.DEFAULTS))
+        self.assertEqual(self.status(), "candidate")
+
+    def test_z_grows_with_each_look(self):
+        self.assertLess(promote.z_look(1), promote.z_look(2))
+        self.assertLess(promote.z_look(2), promote.z_look(30))
 
     def test_paper_losses_keep_candidate_on_paper(self):
         save_edges((self.EDGE, "candidate"))
@@ -293,7 +365,7 @@ class PromoteTests(TempHome):
         self.assertFalse(discover.load_words()["promoted"])
 
 
-def open_market(ticker="FAV-X-1", event="FAV-X", yes_ask=0.93, yes_bid=0.92, hours=3, vol=500, **kw):
+def open_market(ticker="FAV-X-1", event="FAV-X", yes_ask=0.93, yes_bid=0.92, hours=5.5, vol=500, **kw):
     return {"ticker": ticker, "event_ticker": event, "title": "Test", "status": "active",
             "yes_ask_dollars": f"{yes_ask:.4f}", "yes_bid_dollars": f"{yes_bid:.4f}",
             "no_ask_dollars": f"{1 - yes_bid:.4f}", "no_bid_dollars": f"{1 - yes_ask:.4f}",
@@ -321,6 +393,7 @@ class FavoritesTests(TempHome):
         self.c.market_list = [
             self.good,
             open_market("FAV-Y-1", "FAV-Y", hours=10),            # closes too late
+            open_market("FAV-U-1", "FAV-U", hours=0.5),           # too close to the bell: not what was tested
             open_market("FAV-Z-1", "FAV-Z", yes_bid=0.88),          # spread too wide
             open_market("FAV-W-1", "FAV-W", vol=50),                # too thin
             open_market("OTHER-A-1", "OTHER-A"),                    # another series
@@ -418,6 +491,8 @@ class MentionsTests(TempHome):
             open_market("KXSAY-1-BIDE", "KXSAY-1", 0.52, 0.50, yes_sub_title="Biden"),
             open_market("KXSAY-1-NEW", "KXSAY-1", 0.10, 0.08, yes_sub_title="New"),  # too little history
         ]
+        for m in self.c.market_list:
+            book_for(self.c, m)
 
     def test_buys_both_ways_capped_at_five_dollars(self):
         sigs = mentions.STRATEGY.scan(ctx_for(self.c, {"words": self.WORDS}))

@@ -293,6 +293,9 @@ def _run(client, cfg, summary):
             if reason:
                 continue
             if not sig_live:
+                if any(leg.ticker in held_paper for leg in sig.legs):
+                    db.execute("UPDATE signals SET status = 'skipped: already held on paper' WHERE id = ?", sid)
+                    continue  # a copy would count as a second win or loss and fool promotion
                 paper.record(sig, sid)
                 limits.spend(sig)
                 summary["paper_trades"] += 1

@@ -13,6 +13,8 @@ ledger's settlements table (or the client, for markets it hasn't booked yet).
 """
 import json
 import logging
+import math
+import statistics
 import time
 from collections import defaultdict
 
@@ -20,7 +22,9 @@ from .. import db
 from ..client import fee, settled_result
 from . import backtest, discover
 
-MIN_PAPER_TRADES = 30
+MIN_PAPER_TRADES = 30   # distinct markets, not rows: re-buying one market adds nothing
+MIN_EVENTS = 20         # trades in one event win or lose together, so we need many events
+ALPHA = 0.05
 WINDOW = 30          # judge a live edge on this many of its latest settled trades
 MIN_TO_JUDGE = 10    # fewer than this is too few to call it a loser
 
@@ -39,7 +43,8 @@ def paper_trades(strategy):
     rows = db.query("""SELECT p.id, p.ts, p.event, p.ticker, p.count, p.price, p.cost, p.pnl, s.meta
         FROM paper p LEFT JOIN signals s ON s.id = p.signal_id
         WHERE p.strategy = ? AND p.settled = 1 AND p.pnl IS NOT NULL ORDER BY p.ts, p.id""", strategy)
-    return [{"ts": r["ts"], "event": r["event"] or r["ticker"], "cost": r["cost"], "pnl": r["pnl"],
+    return [{"ts": r["ts"], "event": r["event"] or r["ticker"], "ticker": r["ticker"],
+             "cost": r["cost"], "pnl": r["pnl"],
              "var": r["count"] ** 2 * r["price"] * (1 - r["price"]), "meta": _meta(r["meta"]), "live": False}
             for r in rows]
 
@@ -68,7 +73,7 @@ def live_trades(strategy, client=None):
             continue
         n, p = r["filled"], r["price"]
         cost = n * p + fee(n, p)
-        out.append({"ts": r["ts"], "event": r["event"] or r["ticker"], "cost": cost,
+        out.append({"ts": r["ts"], "event": r["event"] or r["ticker"], "ticker": r["ticker"], "cost": cost,
                     "pnl": n * (res == r["side"]) - cost, "var": n * n * p * (1 - p),
                     "meta": _meta(r["meta"]), "live": True})
     return out
@@ -76,8 +81,19 @@ def live_trades(strategy, client=None):
 
 def _stats(trades, z):
     roi, lo = backtest.roi_stats([(t["event"], t["cost"], t["pnl"], t["var"]) for t in trades], z)
-    return {"trades": len(trades), "paper_trades": sum(not t["live"] for t in trades),
+    paper = [t for t in trades if not t["live"]]
+    return {"trades": len(trades),
+            "paper_trades": len({t.get("ticker") or (t["event"], i) for i, t in enumerate(paper)}),
+            "events": len({t["event"] for t in paper}),
             "pnl": round(sum(t["pnl"] for t in trades), 2), "roi": roi, "roi_lo": lo}
+
+
+def z_look(look, tries=1):
+    """z for the `look`-th time we test the same idea, split across `tries` ideas.
+    Spending alpha * 6 / (pi^2 * k^2) on look k keeps the total false-promotion chance
+    under alpha however many days we re-check (a union bound), unlike a fixed z daily."""
+    alpha = ALPHA / max(1, tries) * 6 / (math.pi ** 2 * max(1, look) ** 2)
+    return statistics.NormalDist().inv_cdf(1 - alpha)
 
 
 def _losing(trades):
@@ -96,7 +112,8 @@ def _go_live(cfg, strategy):
 
 
 def _ready(stats):
-    return stats["paper_trades"] >= MIN_PAPER_TRADES and stats["roi_lo"] is not None and stats["roi_lo"] > 0
+    return (stats["paper_trades"] >= MIN_PAPER_TRADES and stats["events"] >= MIN_EVENTS
+            and stats["roi_lo"] is not None and stats["roi_lo"] > 0)
 
 
 def apply(cfg, client=None):
@@ -115,13 +132,14 @@ def _edges(cfg, client):
     # Every candidate checked now is a separate try, so each needs more confidence.
     tries = [e for e in edges if e.get("status") == "candidate"
              and sum(not t["live"] for t in by_edge[e["id"]]) >= MIN_PAPER_TRADES]
-    z = backtest.z_for(len(tries))
     notes, stamp = [], discover._iso(time.time())
     for e in edges:
         trades = by_edge.get(e["id"], [])
         if not trades:
             continue
-        stats = _stats(trades, z)
+        if e.get("status") == "candidate" and e in tries:
+            e["looks"] = int(e.get("looks", 0)) + 1
+        stats = _stats(trades, z_look(e.get("looks", 1), len(tries)))
         e["results"] = stats
         if e.get("status") == "candidate" and _ready(stats):
             if cfg.get("auto_promote"):
@@ -146,7 +164,9 @@ def _mentions(cfg, client):
     if not words:
         return []
     trades = paper_trades("mentions") + live_trades("mentions", client)
-    stats = _stats(trades, backtest.z_for(1))
+    if not words.get("promoted") and sum(not t["live"] for t in trades) >= MIN_PAPER_TRADES:
+        words["looks"] = int(words.get("looks", 0)) + 1
+    stats = _stats(trades, z_look(words.get("looks", 1)))
     words["results"] = stats
     notes, stamp = [], discover._iso(time.time())
     backtest_lo = words.get("roi_lo")

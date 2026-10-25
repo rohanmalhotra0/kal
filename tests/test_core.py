@@ -375,6 +375,25 @@ class LedgerTests(TempHome):
         self.assertLessEqual(spent, 10)
 
 
+class FinalityTests(unittest.TestCase):
+    def test_determined_is_not_final(self):
+        self.assertIsNone(client.settled_result({"status": "determined", "result": "yes"}))
+        self.assertEqual(client.settled_result({"status": "finalized", "result": "yes"}), "yes")
+        self.assertEqual(client.settled_result({"status": "settled", "result": "no"}), "no")
+
+
+class PaperDuplicateTests(TempHome):
+    def test_same_market_is_paper_bought_once(self):
+        config.update({"enabled": True, "budget": 0,
+                       "strategies": {k: {"mode": "off"} for k in config.DEFAULTS["strategies"]}})
+        config.update({"strategies": {"basket_arb": {"mode": "paper"}}})
+        c = fake_with_arb(can_trade=False)
+        engine.run_once(c)
+        engine.run_once(c)
+        engine.run_once(c)
+        self.assertEqual(len(paper.open_rows()), 4)  # one basket, not three
+
+
 class LimitsTests(unittest.TestCase):
     def test_directional_caps(self):
         cfg = dict(config.DEFAULTS, max_per_trade=10, max_per_event=15)
