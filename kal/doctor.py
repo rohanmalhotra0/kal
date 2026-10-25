@@ -8,6 +8,7 @@ from .maintenance import _row, _safe
 from .setup import dollars, kalshi_balance
 
 SPARE = 5.0   # dollars of account cash past the bot's own before it's worth a word (interest)
+KEY_COPIES = ("/tmp/kalshi.pem",)   # where the old setup steps had people put the key file
 
 
 def _key(cfg, balance_fn):
@@ -57,6 +58,13 @@ def _alerts():
     return _row("alerts", "warn", "phone alerts are off: you won't hear if it stops itself. Run: sudo kal setup")
 
 
+def _key_copies():
+    """A warning for each copy of the key left where other users can read it, else nothing."""
+    import os
+    return [_row("key copy", "warn", f"a copy of your Kalshi key is still at {p}. Delete it: sudo rm {p}")
+            for p in KEY_COPIES if os.path.exists(p)]
+
+
 def _client(env):
     from .client import Kalshi
     return Kalshi.from_env(config.home(), env)
@@ -72,5 +80,6 @@ def rows(balance_fn=None, client_fn=None, health_fn=None):
     if balance is not None:
         out.append(_safe("money", _money, cfg, balance))
         out.append(_safe("test orders", _test_orders, cfg, client_fn or _client))
+    out += _key_copies()
     out += [_safe("strategies", _strategies, cfg), _safe("alerts", _alerts)]
     return out + (health_fn or maintenance.checks)()
