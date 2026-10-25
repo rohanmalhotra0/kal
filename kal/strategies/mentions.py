@@ -12,7 +12,7 @@ import logging
 
 from ..client import fee_per_contract, price
 from .base import Leg, Signal, Strategy
-from .favorites import in_series, is_open
+from .favorites import in_series, is_open, market_group
 
 PRIOR_WEIGHT = 3      # past events' worth of pull toward the series average
 MIN_HISTORY = 3       # need this many past events for a word before trading it
@@ -121,9 +121,13 @@ class Mentions(Strategy):
         if count - leg.cost <= 0:
             return None  # even a win wouldn't cover the cost
         win = est if side == "yes" else 1 - est
+        meta = {"paper_only": not words.get("promoted")}
+        group = market_group(m, s)
+        if group:
+            meta["group"] = group  # words said on one day in one series count once in promotion
         sig = Signal(self.name, m.get("event_ticker") or m["ticker"], m.get("title") or m["ticker"], [leg],
                      note=f"{side.upper()} on '{word}': said {hits}/{n} times, history says {est:.0%}",
-                     meta={"paper_only": not words.get("promoted")})
+                     meta=meta)
         sig.exp_profit = count * win - sig.cost
         return sig
 

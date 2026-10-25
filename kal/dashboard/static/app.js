@@ -764,7 +764,7 @@ function practiceText(e, d) {
   if (v && isNum(v.roi_lo) && p.settled) out.push(el("div", { class: "desc" }, `Worst case so far: ${roiPct(v.roi_lo)}`));
   const need = d.need || {};
   if (e.status === "candidate" && e.side && isNum(need.markets)) {
-    const goal = isNum(need.events) ? `${need.markets} finished markets in ${need.events} events`
+    const goal = isNum(need.events) ? `${need.markets} finished markets in ${need.events} groups (one series on one day)`
       : `${need.markets} finished markets`;
     const now = isNum(need.events) ? `${p.markets || 0} in ${p.events || 0}` : `${p.markets || 0}`;
     out.push(el("div", { class: "desc" }, `For real money it needs ${goal}, and a profit. So far: ${now}.`));
@@ -834,7 +834,7 @@ function drawBacktests() {
   }
   if (isNum(d.max_series)) $("bt-series-help").textContent = `Put commas between them. Up to ${d.max_series}.`;
   if (isNum(d.min_trades) && isNum(d.min_events)) {
-    $("edge-words").textContent = `The worst case is above 0, over ${d.min_trades} or more trades in ${d.min_events} or more events.`;
+    $("edge-words").textContent = `The worst case is above 0, over ${d.min_trades} or more trades in ${d.min_events} or more groups (one series on one day).`;
   }
 
   const run = d.running;

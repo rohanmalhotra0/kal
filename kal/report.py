@@ -139,8 +139,15 @@ def _read_json(path):
         return None
 
 
+def _research_folder():
+    """The exchange in use's research files: research/, or research-demo/ on demo
+    (kal.research.backtest.folder)."""
+    env = config.load().get("env", "prod")
+    return os.path.join(config.home(), "research" if env == "prod" else f"research-{env}")
+
+
 def _research():
-    d = os.path.join(config.home(), "research")
+    d = _research_folder()
     out = {"edges": {}, "top_edges": [], "mentions": None, "last_run": None}
     raw = _read_json(os.path.join(d, "edges.json"))
     if isinstance(raw, dict):
@@ -294,7 +301,7 @@ def _when(iso):
 
 def _promoted(start, end):
     """Edges (and the mention words) promoted from paper between start and end."""
-    d = os.path.join(config.home(), "research")
+    d = _research_folder()
     raw = _read_json(os.path.join(d, "edges.json"))
     if isinstance(raw, dict):
         raw = raw.get("edges", list(raw.values()))

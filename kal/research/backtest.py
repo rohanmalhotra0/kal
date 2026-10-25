@@ -7,9 +7,13 @@
    only, and trade when history and the market disagree.
 
 Prices come from hourly candles that ended at or before the decision time, so a test
-can never peek at the future. Settled markets don't change, so each market's price
-snapshot is cached under $KAL_HOME/cache/ and a re-run only fetches new markets.
-Every backtest is recorded in the db "backtests" table.
+can never peek at the future. A trade is priced as the bot places it: a full-size
+order, with Kalshi's fee rounded up to the cent. Trades in one series that close on one
+UTC day count as one "event": hourly events ride one price path, so 24 of them a day
+are not 24 tries. Settled markets don't change, so each market's price snapshot is
+cached under $KAL_HOME/cache/ (cache-demo/ for the demo exchange) and a re-run only
+fetches new markets; each series keeps its newest few thousand. Every backtest is
+recorded in the db "backtests" table.
 """
 import json
 import logging
@@ -19,17 +23,29 @@ import statistics
 from collections import defaultdict
 
 from .. import config, db
-from ..client import Kalshi, UnknownSettlement, candle_close, fee_per_contract, num, ts, yes_payout
-from ..strategies.mentions import MIN_HISTORY, mention_side, word_estimate, word_of
+from ..client import Kalshi, UnknownSettlement, candle_close, fee, num, ts, yes_payout
+from ..strategies import favorites
+from ..strategies.mentions import MAX_PER_TRADE, MIN_HISTORY, mention_side, word_estimate, word_of
 
 BUCKETS = [0, 0.05, 0.10, 0.20, 0.30, 0.40, 0.50, 0.60, 0.70, 0.80, 0.90, 0.95, 1.0]
 MIN_VOLUME = 100            # settled markets almost nobody traded tell us little
-MIN_TRADES, MIN_EVENTS = 30, 10
+MIN_TRADES, MIN_EVENTS = 30, 10   # events: series-days (see group)
 MARGINS = [0.10, 0.15, 0.20, 0.25]
 ALPHA = 0.05                # 95% confidence, before the Bonferroni split
 LOOKBACK_HOURS = 12         # an older price is too stale to call "the price at decision time"
+CACHE_MAX = 3000            # markets kept per series: as many as any backtest here asks for
 
 log = logging.getLogger(__name__)
+
+
+def folder(name, env=None):
+    """$KAL_HOME/<name> for the real exchange, <name>-<env> for another. Demo practice
+    keeps its own research and prices, the way it keeps its own db (kal-demo.db): demo's
+    thin books must never become the real exchange's history or edges."""
+    env = env or config.load().get("env", "prod")
+    d = os.path.join(config.home(), name if env == "prod" else f"{name}-{env}")
+    os.makedirs(d, exist_ok=True)
+    return d
 
 
 # ---------- prices at decision time ----------
@@ -37,9 +53,9 @@ log = logging.getLogger(__name__)
 def decision_time(m, hours_before_close=6, hours_after_open=None, anchor=None):
     """Unix time we'd have decided at, or None if the market wasn't open then.
 
-    `anchor` is the event's scheduled close (the latest close among its markets). Using
-    each market's own close_time would leak the outcome: a mention market closes early
-    when the word is said, so its "6 hours before close" would sit right before the YES."""
+    `anchor` is the event's scheduled close (see event_anchors). Using each market's own
+    close_time would leak the outcome: a mention market closes early when the word is
+    said, so its "6 hours before close" would sit right before the YES."""
     try:
         open_t, close_t = ts(m["open_time"]), ts(m["close_time"])
     except (KeyError, TypeError, ValueError, AttributeError):
@@ -52,10 +68,19 @@ def decision_time(m, hours_before_close=6, hours_after_open=None, anchor=None):
 
 
 def event_anchors(markets):
-    """{event: scheduled close} = the latest close_time among the event's settled markets.
-    Siblings that ran to schedule reveal it even when some markets closed early."""
+    """{event: scheduled close} = the latest close_time among the event's markets that
+    can't close early. Those closed on schedule, so they show it even when their siblings
+    closed early on the news.
+
+    An event whose markets can all close early is left out (and so never tested): its
+    latest close may be the news itself. In "Will X happen by day 1/2/3?" every market
+    closes on the same headline, and deciding 6 hours before that is peeking. It's left
+    out whatever it settled, so the events that stay are a fair sample. Kalshi sends
+    can_close_early on every market; one without it counts as can't."""
     out = {}
     for m in markets:
+        if m.get("can_close_early") is True:
+            continue
         try:
             t = ts(m["close_time"])
         except (KeyError, TypeError, ValueError, AttributeError):
@@ -88,11 +113,10 @@ def _when(hours_before_close, hours_after_open):
 
 
 def cache_path(series, hours_before_close=6, hours_after_open=None):
-    d = os.path.join(config.home(), "cache")
-    os.makedirs(d, exist_ok=True)
     safe = re.sub(r"[^A-Za-z0-9_.-]", "_", series)
-    # v2: decision time anchored to the event's scheduled close (older caches leaked outcomes)
-    return os.path.join(d, f"{safe}_{_when(hours_before_close, hours_after_open)}_v2.json")
+    # v3: only markets that can't close early set the decision time (v2's could be the
+    # news itself, when every market of an event closed on it)
+    return os.path.join(folder("cache"), f"{safe}_{_when(hours_before_close, hours_after_open)}_v3.json")
 
 
 def _read_cache(path):
@@ -103,11 +127,32 @@ def _read_cache(path):
         return {}  # missing or corrupt: rebuild it
 
 
-def _write_cache(path, markets):
+def _priced(o):
+    """A cached market with a price at decision time (the rest only say when they closed)."""
+    return isinstance(o, dict) and "yes_ask" in o
+
+
+def _write_cache(path, markets, keep=CACHE_MAX, listed=()):
+    """Write then rename. Keeps at most `keep` markets: first the ones Kalshi lists now (so
+    none is fetched twice), then the newest. Without a cap an hourly series adds about 500
+    markets a day, forever, and research loads them all. Returns what was kept."""
+    if len(markets) > keep:
+        def newest(tk):
+            o = markets[tk]
+            return tk in listed, (o.get("close") or 0) if isinstance(o, dict) else 0, tk
+        markets = {tk: markets[tk] for tk in sorted(markets, key=newest, reverse=True)[:keep]}
     tmp = path + ".tmp"
     with open(tmp, "w") as f:
         json.dump({"version": 1, "markets": markets}, f)
     os.replace(tmp, path)
+    return markets
+
+
+def _close(m):
+    try:
+        return ts(m["close_time"])
+    except (KeyError, TypeError, ValueError, AttributeError):
+        return None
 
 
 def load_observations(client, series, hours_before_close=6, hours_after_open=None, max_markets=1500,
@@ -117,15 +162,13 @@ def load_observations(client, series, hours_before_close=6, hours_after_open=Non
     path = cache_path(series, hours_before_close, hours_after_open)
     cache = {} if refresh else _read_cache(path)
     if not cached_only:
-        new, errors, last_error = 0, 0, None
+        new, errors, last_error, listed = 0, 0, None, set()
         try:
             settled = list(client.settled_markets(series, max_markets))
             anchors = event_anchors(settled)
-            sizes = defaultdict(int)
-            for m in settled:
-                sizes[m.get("event_ticker") or m.get("ticker")] += 1
             for m in settled:
                 tk = m.get("ticker")
+                listed.add(tk)
                 try:
                     value = yes_payout(m)  # 1, 0, or in between: cancelled games really pay $0.33
                 except UnknownSettlement:
@@ -134,44 +177,63 @@ def load_observations(client, series, hours_before_close=6, hours_after_open=Non
                     continue
                 res = m["result"] if m.get("result") in ("yes", "no") else "scalar"
                 ev = m.get("event_ticker") or tk
-                if sizes[ev] == 1 and m.get("can_close_early") is True:
-                    continue  # no sibling shows the scheduled close; its own close may be the outcome
+                anchor = anchors.get(ev)
+                if anchor is None and hours_after_open is None:
+                    continue  # nothing shows the scheduled close: its closes may be the outcome
                 try:
-                    snap = snapshot(client, series, m, hours_before_close, hours_after_open, anchors.get(ev))
+                    snap = snapshot(client, series, m, hours_before_close, hours_after_open, anchor)
                 except Exception as e:  # one market's candles failing shouldn't sink the series
                     errors, last_error = errors + 1, e
                     if errors >= 10 and errors > new:
                         raise RuntimeError(f"candles keep failing: {e}") from e
                     continue
                 new += 1
-                cache[tk] = None if not snap else {
+                # Unpriced markets stay too (just their close), so they aren't fetched again.
+                cache[tk] = {"close": _close(m) or 0} if not snap else {
                     "series": series, "event": ev, "ticker": tk,
-                    "word": word_of(m), "close": ts(m["close_time"]),
-                    "decided": decision_time(m, hours_before_close, hours_after_open, anchors.get(ev)),
+                    "word": word_of(m), "close": ts(m["close_time"]), "anchor": anchor,
+                    "decided": decision_time(m, hours_before_close, hours_after_open, anchor),
                     "yes_ask": snap[0], "yes_bid": snap[1], "result": res, "yes_value": value}
         finally:
-            if new:
-                _write_cache(path, cache)
+            if new:  # Kalshi lists up to max_markets recent ones plus as many from /historical
+                cache = _write_cache(path, cache, max(CACHE_MAX, 2 * max_markets), listed)
+                old = path[:-len("_v3.json")] + "_v2.json"
+                if os.path.exists(old):
+                    os.remove(old)  # the old format, never read again: free the disk
         if errors:
             log.warning("%s: %d markets skipped (candles failed): %s", series, errors, last_error)
-    return sorted((o for o in cache.values() if o), key=lambda o: (o["close"], o["ticker"]))
+    return sorted((o for o in cache.values() if _priced(o)), key=lambda o: (o["close"], o["ticker"]))
 
 
 # ---------- statistics ----------
 
-def trade(event, p, won, count=1):
-    """(event, cost, pnl, fair_var) for buying `count` contracts at `p`, fees included.
-    fair_var is the P&L variance if the price were exactly right."""
-    cost = count * (p + fee_per_contract(p))
-    return event, cost, count * float(won) - cost, count * count * p * (1 - p)
+def trade(event, p, won, count=None, dollars=favorites.FULL_BET):
+    """(event, cost, pnl, fair_var) for one bet at `p`, priced the way the bot places it:
+    a full-size order (`dollars` worth, unless `count` says) with Kalshi's fee rounded up
+    to the cent. A small order pays more fee per contract, and at 95c+ that's a big share
+    of the edge. fair_var is the P&L variance if the price were exactly right."""
+    n = count or favorites.full_size(p, dollars)
+    cost = n * p + fee(n, p)
+    return event, cost, n * float(won) - cost, n * n * p * (1 - p)
+
+
+def group(o):
+    """The "event" a backtest row counts under: its series and the UTC day its event was
+    scheduled to close (favorites.group_of). Trades in one series that close on one day
+    win or lose together: an hourly series' day is one price path, not 24 tries. Falls
+    back to the event for a row that doesn't say."""
+    try:
+        return favorites.group_of(o["series"], o.get("anchor") or o["close"])
+    except (KeyError, TypeError, ValueError, OverflowError, OSError):
+        return o["event"]
 
 
 def roi_stats(trades, z):
     """(roi, cautious lower bound) for (event, cost, pnl[, fair_var]) trades.
 
-    Trades in the same event count as one unit, since they tend to win or lose
-    together. The spread used is never smaller than a fairly priced market's own
-    noise, so a lucky streak (say 30 wins in a row at 93c) can't look like proof."""
+    Trades in the same event (here, usually a series-day) count as one unit, since they
+    tend to win or lose together. The spread used is never smaller than a fairly priced
+    market's own noise, so a lucky streak (say 30 wins in a row at 93c) can't look like proof."""
     by_event = defaultdict(lambda: [0.0, 0.0, 0.0])
     for t in trades:
         e = by_event[t[0]]
@@ -220,7 +282,8 @@ def buy_trades(o):
 
 def calibration(obs, max_spread=None, by_side=False):
     """For each price range: if you bought every contract there, did you make money?
-    max_spread keeps only markets as tight as the live strategy would trade.
+    max_spread keeps only markets as tight as the live strategy would trade. "events"
+    counts series-days (see group), and the spread of the result is measured over them.
 
     by_side splits YES buys from NO buys. Real Kalshi data shows they differ a lot at the
     same price (YES favorites lost while NO favorites made money), so an edge found by
@@ -233,7 +296,7 @@ def calibration(obs, max_spread=None, by_side=False):
             continue
         for side, (p, won) in zip(("yes", "no"), buy_trades(o)):
             if 0.01 <= p <= 0.99:
-                trades[(side if by_side else None, bucket_of(p))].append(trade(o["event"], p, won))
+                trades[(side if by_side else None, bucket_of(p))].append(trade(group(o), p, won))
     rows = []
     for side, b in sorted(trades, key=lambda k: (k[0] or "", k[1])):
         t = trades[(side, b)]
@@ -291,7 +354,7 @@ def mention_test(obs, margin):
             pick = mention_side(word_estimate(hits, n, bh / bn if bn else 0.5), o["yes_ask"], o["yes_bid"], margin)
             if pick:
                 side, p = pick
-                trades.append(trade(event, p, paid(o, side)))
+                trades.append(trade(group(o), p, paid(o, side), dollars=MAX_PER_TRADE))
     for e in pending:  # everything has closed by now: final history for live use
         for o in by_event[e]:
             if o["result"] not in ("yes", "no"):
@@ -306,7 +369,8 @@ def mention_test(obs, margin):
 
 def mention_backtest(obs):
     """Try every margin; report the best one that had enough trades to judge.
-    roi_lo is None when no margin had enough trades: that's "not proven", not "zero"."""
+    roi_lo is None when no margin had enough trades: that's "not proven", not "zero".
+    "events" counts series-days, as in calibration."""
     z = z_for(len(MARGINS))
     results, hist, base = [], {}, {}
     for margin in MARGINS:

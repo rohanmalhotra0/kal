@@ -1,10 +1,16 @@
 """Move edges between candidate, live and retired, using what really happened.
 
-candidate -> live   at least 30 settled paper trades, and a cautious lower bound on the
-                    ROI of its trades (event-clustered, as in the backtest) is above zero.
-                    Only when cfg["auto_promote"] is on.
+candidate -> live   at least 30 settled paper trades on 20+ series-days, and a cautious
+                    lower bound on the ROI of its trades (clustered by series-day, as in
+                    the backtest) is above zero. Only when cfg["auto_promote"] is on, and
+                    only on the real exchange: demo fills on thin books prove nothing.
 live -> retired     its last 30 settled trades (live and paper together) lost money.
                     This runs even with auto_promote off: stopping a loser is never risky.
+
+The bar rises with every look at one idea, and with every idea ever judged (z_look):
+one 5% budget for false promotions, spent over looks and ideas, for good. Each idea's
+looks, rank and status live in the db as well as in research/*.json (discover.memory),
+so a rebuild from backups can't reset them.
 
 The mention strategy has one switch, words.json "promoted", with the same rules.
 Paper rows are matched to edges through the signal that made them:
@@ -18,13 +24,14 @@ import statistics
 import time
 from collections import defaultdict
 
-from .. import db
+from .. import config, db
 from .. import ledger
 from ..client import UnknownSettlement, fee, yes_payout
+from ..strategies import favorites
 from . import backtest, discover
 
 MIN_PAPER_TRADES = 30   # distinct markets, not rows: re-buying one market adds nothing
-MIN_EVENTS = 20         # trades in one event win or lose together, so we need many events
+MIN_EVENTS = 20         # series-days: trades in one series closing on one day win or lose together
 ALPHA = 0.05
 WINDOW = 30          # judge a live edge on this many of its latest settled trades
 MIN_TO_JUDGE = 10    # fewer than this is too few to call it a loser
@@ -87,21 +94,68 @@ def live_trades(strategy, client=None):
     return out
 
 
+def _group(t):
+    """The series and close day a trade counts under, from its signal (meta "group").
+    Older signals didn't say: then the event's series and the day it was bought."""
+    if t["meta"].get("group"):
+        return str(t["meta"]["group"])
+    try:
+        return favorites.group_of(str(t["event"]).split("-")[0], float(t["ts"]))
+    except (KeyError, TypeError, ValueError, OverflowError, OSError):
+        return str(t["event"])
+
+
+def _clusters(trades):
+    """A label per trade. Trades that share an event or a series-day share a label: they
+    win or lose together (an hourly series' day rides one price path), so they count once."""
+    parent = {}
+
+    def root(k):
+        parent.setdefault(k, k)
+        while parent[k] != k:
+            parent[k] = parent[parent[k]]
+            k = parent[k]
+        return k
+    for t in trades:
+        parent[root(("event", t["event"]))] = root(("group", _group(t)))
+    return [root(("event", t["event"])) for t in trades]
+
+
 def _stats(trades, z):
-    roi, lo = backtest.roi_stats([(t["event"], t["cost"], t["pnl"], t["var"]) for t in trades], z)
-    paper = [t for t in trades if not t["live"]]
+    labels = _clusters(trades)
+    roi, lo = backtest.roi_stats([(g, t["cost"], t["pnl"], t["var"]) for g, t in zip(labels, trades)], z)
+    paper = [(g, t) for g, t in zip(labels, trades) if not t["live"]]
     return {"trades": len(trades),
-            "paper_trades": len({t.get("ticker") or (t["event"], i) for i, t in enumerate(paper)}),
-            "events": len({t["event"] for t in paper}),
+            "paper_trades": len({t.get("ticker") or (t["event"], i) for i, (_, t) in enumerate(paper)}),
+            "events": len({g for g, _ in paper}),
             "pnl": round(sum(t["pnl"] for t in trades), 2), "roi": roi, "roi_lo": lo}
 
 
-def z_look(look, tries=1):
-    """z for the `look`-th time we test the same idea, split across `tries` ideas.
-    Spending alpha * 6 / (pi^2 * k^2) on look k keeps the total false-promotion chance
-    under alpha however many days we re-check (a union bound), unlike a fixed z daily."""
-    alpha = ALPHA / max(1, tries) * 6 / (math.pi ** 2 * max(1, look) ** 2)
+def z_look(look, tries=1, rank=None):
+    """z for the `look`-th time we test the same idea. Spending alpha * 6 / (pi^2 * k^2) on
+    look k keeps the total false-promotion chance under alpha however many days we
+    re-check (a union bound), unlike a fixed z daily.
+
+    `rank` i (this is the i-th idea ever judged, see _rank) spends alpha across ideas over
+    time the same way: 6 / (pi^2 * i^2) of it. Otherwise ideas that show up one at a time
+    would each get all of it: 20 dud ideas in a year, a 64% chance one goes live by luck.
+    The `tries` ideas judged together split it too; the stricter of the two counts."""
+    share = 1 / max(1, tries)
+    if rank:
+        share = min(share, 6 / (math.pi ** 2 * max(1, rank) ** 2))
+    alpha = ALPHA * share * 6 / (math.pi ** 2 * max(1, look) ** 2)
     return statistics.NormalDist().inv_cdf(1 - alpha)
+
+
+def _rank(key):
+    """This idea's place among every idea ever judged (1, 2, 3, ...), kept in the db. Given
+    at its first look and never changed, so no idea gets a fresh share of the budget."""
+    mem = discover.memory()
+    rank = discover._int((mem.get(key) or {}).get("rank"))
+    if not rank:
+        rank = 1 + max((discover._int(m.get("rank")) for m in mem.values() if isinstance(m, dict)), default=0)
+        discover.remember(key, rank=rank)
+    return rank
 
 
 def _losing(trades):
@@ -119,8 +173,11 @@ def _go_live(cfg, strategy):
     return f"Set {strategy} to live to use real money."
 
 
-def _ready(stats):
-    return (stats["paper_trades"] >= MIN_PAPER_TRADES and stats["events"] >= MIN_EVENTS
+def _ready(stats, env=None):
+    """Proof enough for real money. Never on the demo exchange: practice fills on its thin
+    books say nothing about the real one."""
+    env = env or config.load().get("env", "prod")
+    return (env == "prod" and stats["paper_trades"] >= MIN_PAPER_TRADES and stats["events"] >= MIN_EVENTS
             and stats["roi_lo"] is not None and stats["roi_lo"] > 0)
 
 
@@ -137,7 +194,7 @@ def _edges(cfg, client):
     for t in paper_trades("favorites") + live_trades("favorites", client):
         if t["meta"].get("edge"):
             by_edge[t["meta"]["edge"]].append(t)
-    # Every candidate checked now is a separate try, so each needs more confidence.
+    # Every candidate checked is a separate try, now or ever, so each needs more confidence.
     tries = [e for e in edges if e.get("status") == "candidate"
              and sum(not t["live"] for t in by_edge[e["id"]]) >= MIN_PAPER_TRADES]
     notes, stamp = [], discover._iso(time.time())
@@ -147,9 +204,10 @@ def _edges(cfg, client):
             continue
         if e.get("status") == "candidate" and e in tries:
             e["looks"] = int(e.get("looks", 0)) + 1
-        stats = _stats(trades, z_look(e.get("looks", 1), len(tries)))
+            e["rank"] = _rank(f"favorites:{e['id']}")
+        stats = _stats(trades, z_look(e.get("looks", 1), len(tries), e.get("rank")))
         e["results"] = stats
-        if e.get("status") == "candidate" and _ready(stats):
+        if e.get("status") == "candidate" and _ready(stats, cfg.get("env")):
             if cfg.get("auto_promote"):
                 e.update(status="live", promoted_at=stamp,
                          note=f"won on paper: {stats['paper_trades']} trades, worst case {stats['roi_lo']:+.1%}")
@@ -174,12 +232,13 @@ def _mentions(cfg, client):
     trades = paper_trades("mentions") + live_trades("mentions", client)
     if not words.get("promoted") and sum(not t["live"] for t in trades) >= MIN_PAPER_TRADES:
         words["looks"] = int(words.get("looks", 0)) + 1
-    stats = _stats(trades, z_look(words.get("looks", 1)))
+        words["rank"] = _rank("mentions")
+    stats = _stats(trades, z_look(words.get("looks", 1), rank=words.get("rank")))
     words["results"] = stats
     notes, stamp = [], discover._iso(time.time())
     backtest_lo = words.get("roi_lo")
     if not words.get("promoted"):
-        if _ready(stats) and backtest_lo is not None and backtest_lo > 0:
+        if _ready(stats, cfg.get("env")) and backtest_lo is not None and backtest_lo > 0:
             if cfg.get("auto_promote"):
                 words.update(promoted=True, promoted_at=stamp,
                              note=f"won on paper: {stats['paper_trades']} trades, worst case {stats['roi_lo']:+.1%}")

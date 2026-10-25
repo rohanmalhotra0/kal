@@ -77,9 +77,13 @@ class Halted(RuntimeError):
 
 
 def research_outputs():
-    """Everything kal.research saved, keyed by file name (e.g. 'edges')."""
+    """Everything kal.research saved for the exchange in use, keyed by file name (e.g.
+    'edges'). Demo keeps its own (research-demo/, like kal-demo.db), so a range proven on
+    demo's thin books never trades real money (kal.research.backtest.folder)."""
+    env = db.current_env()   # the run's own exchange (db.pinned), like its books
+    folder = os.path.join(config.home(), "research" if env == "prod" else f"research-{env}")
     out = {}
-    for path in glob.glob(os.path.join(config.home(), "research", "*.json")):
+    for path in glob.glob(os.path.join(folder, "*.json")):
         try:
             with open(path) as f:
                 out[os.path.splitext(os.path.basename(path))[0]] = json.load(f)

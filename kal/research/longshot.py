@@ -38,11 +38,12 @@ log = logging.getLogger(__name__)
 # ---------- the file ----------
 
 def load_cells():
-    return fade.cells_of({"longshot": discover._load(FILE, [])})
+    return discover.recalled(fade.NAME, fade.cells_of({"longshot": discover._load(FILE, [])}))
 
 
 def save_cells(cells):
     discover._save(FILE, sorted(cells, key=lambda c: c["id"]))
+    discover.remember_all(fade.NAME, cells)
 
 
 def cell_id(category, lo, hi):
@@ -138,12 +139,13 @@ def merge_cells(cells, rows, hours, stamp):
         stats = {k: r[k] for k in ("roi", "roi_lo", "trades", "events", "groups", "series")}
         if is_edge(r):
             if c is None:
-                c = {"id": cid, "category": r["category"], "lo": r["lo"], "hi": r["hi"],
-                     "hours_before_close": hours, "first_seen": stamp, "status": "candidate",
-                     "note": "new: trading on paper first"}
+                c = discover.recalled(fade.NAME, [{"id": cid, "category": r["category"], "lo": r["lo"], "hi": r["hi"],
+                                                   "hours_before_close": hours, "first_seen": stamp,
+                                                   "status": "candidate", "note": "new: trading on paper first"}])[0]
                 cells.append(c)
                 by_id[cid] = c
-                changes["new"].append(cid)
+                if c["status"] == "candidate":
+                    changes["new"].append(cid)
             elif c.get("status") == "retired" and c.get("retired_by") == "backtest":
                 c.update(status="candidate", note="passed the backtest again: back on paper", retired_by="")
                 changes["revived"].append(cid)
@@ -278,7 +280,8 @@ def apply_longshot(cfg, client=None):
             continue
         if c["id"] in tries:
             c["looks"] = int(c.get("looks", 0)) + 1
-        stats = promote._stats(trades, promote.z_look(c.get("looks", 1), len(tries)))
+            c["rank"] = promote._rank(f"{fade.NAME}:{c['id']}")
+        stats = promote._stats(trades, promote.z_look(c.get("looks", 1), len(tries), c.get("rank")))
         c["results"] = stats
         label = _label(c)
         if c.get("status") == "candidate" and promote._ready(stats):

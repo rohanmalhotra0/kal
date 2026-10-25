@@ -10,11 +10,14 @@ A job that crashes is logged and recorded, and never kills the scheduler: a dead
 scheduler looks exactly like a quiet market, so nobody would notice it had stopped.
 For the same reason the loop touches a heartbeat file, which `kal health` reads.
 Each job runs in its own worker thread, so an hour of research never delays trading.
+Research also runs in its own process (in_child): its memory goes back when it ends,
+and if it grows too big, the kernel stops it, not trading.
 At most one copy of each job runs at a time.
 """
 import importlib
 import json
 import logging
+import multiprocessing
 import signal
 import threading
 import time
@@ -33,6 +36,8 @@ MAINTENANCE_HOUR = 9          # UTC (4-5 AM in New York): backup and prune while
 SUMMARY_HOUR = 13             # UTC (8-9 AM in New York): yesterday's summary to the phone
 MIN_TRADE_EVERY = 60          # faster than this just burns API rate limit
 MIN_RESEARCH_EVERY = 3600
+RESEARCH_RETRY = 600          # a research run a restart cut off starts again this soon after
+RESEARCH_PACE = 0.3           # seconds between research's API calls: what trading leaves of Kalshi's 20 a second
 TICK = 15                     # seconds between due-checks
 BEAT_EVERY = 60               # seconds between heartbeat touches
 STOP_WAIT = 300               # how long stop() waits for a trade run to finish
@@ -62,6 +67,72 @@ def run_research():
     if research is None:
         return {"ok": True, "skipped": "research is not installed"}
     return research.run_all()
+
+
+def _child(conn, job):
+    """In the research process: ask the kernel to stop this process first if memory runs
+    out (raising your own score needs no rights), then run the job and send back what it
+    returned, or why it crashed."""
+    try:
+        with open("/proc/self/oom_score_adj", "w") as f:
+            f.write("1000")
+    except OSError:
+        pass  # not Linux: it still runs, just without going first
+    try:
+        from . import logs
+        logs.setup()  # its lines go to kal's log too
+    except Exception:
+        pass
+    try:
+        out = {"result": json.loads(json.dumps(job(), default=str))}
+    except Exception as e:
+        log.error("research crashed: %s", traceback.format_exc())
+        out = {"crashed": str(e)[:300] or e.__class__.__name__}
+    try:
+        conn.send(out)
+    finally:
+        conn.close()
+
+
+def in_child(job):
+    """Run job() in a new process and return what it returned. Raises RuntimeError if it
+    crashed or the process died, so the scheduler records it like any crash.
+
+    Spawned, not forked: this process has threads, and a fork copies their locks mid-use.
+    Its memory all goes back when it ends. Out of memory, the kernel stops it first, and
+    deploy/kal.service (OOMPolicy=continue) keeps the rest of kal running."""
+    ctx = multiprocessing.get_context("spawn")
+    recv, send = ctx.Pipe(duplex=False)
+    p = ctx.Process(target=_child, args=(send, job), name="kal-research", daemon=True)
+    p.start()
+    send.close()  # so recv() ends if the child dies without answering
+    try:
+        out = recv.recv()
+    except EOFError:
+        out = {}
+    finally:
+        recv.close()
+    p.join()
+    if "result" in out:
+        return out["result"]
+    if "crashed" in out:
+        raise RuntimeError(out["crashed"])
+    if p.exitcode == -signal.SIGKILL:
+        raise RuntimeError("research was stopped, likely for using too much memory. Trading goes on.")
+    raise RuntimeError(f"research stopped (exit code {p.exitcode})")
+
+
+def _research_slowly():
+    """Research, paced to leave trading its share of Kalshi's rate limit. In its own process
+    it no longer shares the trade loop's pacer (kal.client.PACER), so it slows itself."""
+    from . import client
+    client.PACER.gap = max(client.PACER.gap, RESEARCH_PACE)
+    return run_research()
+
+
+def run_research_apart():
+    """Research in its own process (in_child), at its own slower pace."""
+    return in_child(_research_slowly)
 
 
 def run_report():
@@ -96,7 +167,7 @@ def run_summary():
     return {"ok": True}
 
 
-DEFAULT_JOBS = {"trade": run_trade, "research": run_research, "report": run_report,
+DEFAULT_JOBS = {"trade": run_trade, "research": run_research_apart, "report": run_report,
                 "health": run_health, "maintenance": run_maintenance, "summary": run_summary}
 
 
@@ -179,16 +250,24 @@ class Scheduler:
     # ---------- schedule ----------
 
     def _load(self):
-        """Last-run times from the db. Research also counts runs started from the CLI or cron."""
+        """Last-run times from the db. Research also counts runs started from the CLI or cron.
+
+        A research run that started but never finished (a restart killed it) is tried again
+        soon. Waiting a day would start it at the same hour, and it could land in the daily
+        update's restart every time: no promotions, and a losing edge never retired."""
         if self._loaded:
             return
         self._loaded = True
         try:
             saved = db.get("scheduler", {}) or {}
             self.last.update({k: float(v) for k, v in saved.items() if k in self.jobs})
-            research = db.get("last_research") or {}
-            if research.get("ts"):
-                self.last["research"] = max(self.last.get("research", 0), float(research["ts"]))
+            done = float((db.get("last_research") or {}).get("ts") or 0)
+            started = self.last.get("research", 0)
+            if started > done and "research" in self.jobs:
+                every = self.intervals(self._config()).get("research", DAY)
+                self.last["research"] = min(started, self.clock() - every + RESEARCH_RETRY)
+            elif done:
+                self.last["research"] = max(started, done)
         except Exception:
             log.error("could not load the schedule: %s", traceback.format_exc())
 

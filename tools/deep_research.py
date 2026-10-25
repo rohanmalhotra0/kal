@@ -17,7 +17,6 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from kal import config  # noqa: E402
 from kal.client import Kalshi  # noqa: E402
 from kal.research import backtest  # noqa: E402
 
@@ -118,8 +117,9 @@ def main():
         show(f"{name}: every market ({len(obs)} markets)", rows)
         show(f"{name}: tight spread only (<= 2c)", tight)
         summary["categories"][name] = {"markets": len(obs), "all": rows, "tight": tight}
-    os.makedirs(os.path.join(config.home(), "research"), exist_ok=True)
-    path = os.path.join(config.home(), "research", f"deep_{int(args.hours)}h.json")
+    from kal.research.discover import research_dir   # this exchange's folder (research-demo/ on demo)
+    os.makedirs(research_dir(), exist_ok=True)
+    path = os.path.join(research_dir(), f"deep_{int(args.hours)}h.json")
     with open(path, "w") as f:
         json.dump(summary, f, indent=1)
     print(f"\nSaved {path}")

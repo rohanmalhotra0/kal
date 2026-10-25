@@ -463,6 +463,16 @@ class ResearchApiTests(Base):
                   pnl=(5 * bool(won) - cost) if done else None, settled_ts=time.time() if done else None)
         return cost
 
+    def test_practice_counts_groups_the_way_promotion_does(self):
+        # Two hourly events in one series on one day win or lose together: promotion counts
+        # them once (research.promote), so the progress shown must too.
+        from kal.dashboard import app as dash
+        self.paper("S1:0.90-0.95", "KXBTC-1-A", "KXBTC-1", won=True)
+        self.paper("S1:0.90-0.95", "KXBTC-2-A", "KXBTC-2", won=True)
+        self.paper("S1:0.90-0.95", "KXETH-1-A", "KXETH-1", won=False)
+        p = dash.edge_results()["S1:0.90-0.95"]["paper"]
+        self.assertEqual((p["markets"], p["events"]), (3, 2))
+
     def test_edges_with_their_practice_and_real_results(self):
         write_research(self.home, "edges", [
             self.edge("S1:0.90-0.95", "candidate", 0.01, side="yes",

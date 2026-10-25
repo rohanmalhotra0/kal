@@ -5,12 +5,17 @@ gets tested. A few slots go to re-testing series whose edges haven't been checke
 a week. New edges start as "candidate": favorites trades them on paper only, and
 kal.research.promote moves them to "live" once paper trading agrees.
 
-Files in $KAL_HOME/research/ (the engine loads them into ctx.research):
+Files in $KAL_HOME/research/ (research-demo/ on the demo exchange; the engine loads
+them into ctx.research):
   edges.json  a list of {id: "SERIES:lo-hi", series, lo, hi, hours_before_close, roi,
               roi_lo, trades, events, first_seen, last_tested, status, note}
-              status: "candidate" | "live" | "retired"
+              status: "candidate" | "live" | "retired". events: series-days.
   words.json  {series, margin, roi, roi_lo, trades, events, words, base, by_series,
               promoted, updated}
+
+Those files aren't in the backups, but the db is. So each idea's status, looks and
+rank are kept in the db too (memory()): after a rebuild, a loser retired for losing
+money stays retired.
 
 Testing hundreds of series will find some "edges" by pure luck, however strict each
 test is. That's why nothing found here trades real money until paper trading confirms it.
@@ -24,7 +29,7 @@ import time
 from datetime import datetime, timezone
 
 from ..client import num
-from .. import config
+from .. import db
 from ..strategies import favorites
 from . import backtest
 
@@ -40,9 +45,8 @@ log = logging.getLogger(__name__)
 # ---------- files ----------
 
 def research_dir():
-    d = os.path.join(config.home(), "research")
-    os.makedirs(d, exist_ok=True)
-    return d
+    """$KAL_HOME/research, or research-demo/ on the demo exchange (backtest.folder)."""
+    return backtest.folder("research")
 
 
 def _load(name, default):
@@ -62,20 +66,88 @@ def _save(name, data):
 
 
 def load_edges():
-    return favorites.edges_of({"edges": _load("edges.json", [])})
+    return recalled("favorites", favorites.edges_of({"edges": _load("edges.json", [])}))
 
 
 def save_edges(edges):
     _save("edges.json", sorted(edges, key=lambda e: e["id"]))
+    remember_all("favorites", edges)
 
 
 def load_words():
     w = _load("words.json", {})
-    return w if isinstance(w, dict) else {}
+    return recall(w, memory().get("mentions")) if isinstance(w, dict) else {}
 
 
 def save_words(words):
     _save("words.json", words)
+    remember("mentions", **_kept(memory().get("mentions"), words))
+
+
+# ---------- what each idea went through, kept in the db ----------
+
+MEMORY = "research_memory"   # db key: {"<strategy>:<id>" or "mentions": {status, retired_by, looks, rank}}
+
+
+def memory():
+    m = db.get(MEMORY)
+    return m if isinstance(m, dict) else {}
+
+
+def remember(key, **fields):
+    mem = memory()
+    mem[key] = {**(mem.get(key) or {}), **fields}
+    db.put(MEMORY, mem)
+
+
+def remember_all(strategy, ideas):
+    """Keep each idea's status, looks and rank in the db, as "<strategy>:<id>" (_kept)."""
+    mem = memory()
+    for i in ideas:
+        key = f"{strategy}:{i['id']}"
+        mem[key] = _kept(mem.get(key), i)
+    db.put(MEMORY, mem)
+
+
+def recalled(strategy, ideas):
+    """The ideas, each with what the db remembers about it put back (recall)."""
+    mem = memory()
+    return [recall(i, mem.get(f"{strategy}:{i.get('id')}")) for i in ideas]
+
+
+def _int(v):
+    try:
+        return int(v or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _kept(old, idea):
+    """The db record of an idea after a save. A retirement for losing money is never
+    undone, and looks (paper checks so far) and rank (kal.research.promote) never go down."""
+    out = dict(old or {})
+    out["status"] = idea.get("status")
+    if out.get("retired_by") != "results":
+        out["retired_by"] = idea.get("retired_by") or ""
+    for k in ("looks", "rank"):
+        n = max(_int(out.get(k)), _int(idea.get(k)))
+        if n:
+            out[k] = n
+    return out
+
+
+def recall(idea, mem):
+    """Put back what the db remembers about an idea, in place: retired for losing money
+    stays retired even if its file was lost or replaced, and looks and rank carry on."""
+    if not isinstance(mem, dict):
+        return idea
+    if mem.get("retired_by") == "results" and idea.get("retired_by") != "results":
+        idea.update(status="retired", retired_by="results", note="lost money before: stays retired")
+    for k in ("looks", "rank"):
+        n = max(_int(idea.get(k)), _int(mem.get(k)))
+        if n:
+            idea[k] = n
+    return idea
 
 
 def _iso(t):
@@ -162,7 +234,8 @@ def edge_id(series, lo, hi, side=None):
 def merge_edges(edges, series, rows, hours, stamp):
     """Fold one series' calibration rows into the edge list (in place).
     A range that passes is added or refreshed. An active range that now fails with
-    enough data is retired. One retired for losing real or paper money stays retired."""
+    enough data is retired. One retired for losing real or paper money stays retired,
+    even when its file was lost: the db remembers (recall)."""
     changes = {"new": [], "retired": [], "revived": []}
     by_id = {e["id"]: e for e in edges}
     seen = set()
@@ -175,12 +248,13 @@ def merge_edges(edges, series, rows, hours, stamp):
         if backtest.is_edge(r):
             seen.add(eid)
             if e is None:
-                e = {"id": eid, "series": series, "side": r.get("side"), "lo": r["lo"], "hi": r["hi"],
-                     "hours_before_close": hours, "first_seen": stamp, "status": "candidate",
-                     "note": "new: trading on paper first"}
+                e = recalled("favorites", [{"id": eid, "series": series, "side": r.get("side"), "lo": r["lo"],
+                                            "hi": r["hi"], "hours_before_close": hours, "first_seen": stamp,
+                                            "status": "candidate", "note": "new: trading on paper first"}])[0]
                 edges.append(e)
                 by_id[eid] = e
-                changes["new"].append(eid)
+                if e["status"] == "candidate":
+                    changes["new"].append(eid)
             elif e.get("status") == "retired" and e.get("retired_by") == "backtest":
                 e.update(status="candidate", note="passed the backtest again: back on paper", retired_by="")
                 changes["revived"].append(eid)

@@ -291,6 +291,25 @@ def paper_trade(i, won, cell=PCELL, group=None, p=0.90, count=5):
               pnl=count * won - cost, settled_ts=T0 + i)
 
 
+class MemoryTests(TempHome):
+    def test_a_cell_retired_for_losing_stays_retired_without_its_file(self):
+        # A rebuild from backups keeps the db but not research/*.json. The next research
+        # run must not bring back a cell that lost money as a fresh candidate.
+        import os
+        from kal.research import discover
+        longshot.save_cells([{"id": CELL, "category": WEATHER, "lo": 0.05, "hi": 0.10,
+                              "hours_before_close": 6, "status": "retired", "retired_by": "results",
+                              "looks": 3, "rank": 2}])
+        os.remove(os.path.join(discover.research_dir(), longshot.FILE))
+        cells = longshot.load_cells()
+        row = {"category": WEATHER, "lo": 0.05, "hi": 0.10, "trades": 500, "events": 120, "groups": 120,
+               "roi": 0.05, "roi_lo": 0.01, "win_rate": 0.99, "series": ["KXHIGHNY"]}
+        changes = longshot.merge_cells(cells, [row], 6, "2026-10-25")
+        self.assertEqual(changes["new"], [])
+        self.assertEqual(cells[0]["status"], "retired")
+        self.assertEqual((cells[0]["looks"], cells[0]["rank"]), (3, 2))   # never reset
+
+
 class PromoteTests(TempHome):
     def cell(self):
         return longshot.load_cells()[0]

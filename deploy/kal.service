@@ -29,8 +29,11 @@ KillSignal=SIGTERM
 TimeoutStopSec=330
 
 # A 1 GB server: cap kal's memory, so it can never starve SSH or the system.
-# Past the cap it is stopped and started again, like a crash.
+# Past the cap the kernel stops one process. Research runs in its own process and asks
+# to go first; OOMPolicy=continue keeps the rest (trading) running. If the main process
+# is the one stopped, it is started again, like a crash.
 MemoryMax=400M
+OOMPolicy=continue
 
 # Lock it down: it only needs to write its own state folder.
 NoNewPrivileges=true
