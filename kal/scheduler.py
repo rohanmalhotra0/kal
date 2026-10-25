@@ -1,4 +1,6 @@
-"""Background jobs: trade every few minutes, research every day, report every hour.
+"""Background jobs: trade every few minutes, research every day, report every hour,
+check disk and clock every 10 minutes, back up and prune once a day, and send the
+morning summary to the phone.
 
 The dashboard runs a Scheduler in a thread; a server with no dashboard calls
 serve_forever(). Config is re-read every tick, so a change made on the dashboard
@@ -6,6 +8,7 @@ serve_forever(). Config is re-read every tick, so a change made on the dashboard
 
 A job that crashes is logged and recorded, and never kills the scheduler: a dead
 scheduler looks exactly like a quiet market, so nobody would notice it had stopped.
+For the same reason the loop touches a heartbeat file, which `kal health` reads.
 Each job runs in its own worker thread, so an hour of research never delays trading.
 At most one copy of each job runs at a time.
 """
@@ -16,16 +19,22 @@ import signal
 import threading
 import time
 import traceback
+from datetime import datetime, timedelta, timezone
 
 from . import config, db, engine, risk
 
 log = logging.getLogger(__name__)
 
-JOBS = ("trade", "research", "report")
+JOBS = ("trade", "research", "report", "health", "maintenance", "summary")
 REPORT_EVERY = 3600
+HEALTH_EVERY = 600            # disk and clock
+DAY = 86400
+MAINTENANCE_HOUR = 9          # UTC (4-5 AM in New York): backup and prune while little trades
+SUMMARY_HOUR = 13             # UTC (8-9 AM in New York): yesterday's summary to the phone
 MIN_TRADE_EVERY = 60          # faster than this just burns API rate limit
 MIN_RESEARCH_EVERY = 3600
 TICK = 15                     # seconds between due-checks
+BEAT_EVERY = 60               # seconds between heartbeat touches
 STOP_WAIT = 300               # how long stop() waits for a trade run to finish
 
 
@@ -62,7 +71,33 @@ def run_report():
     return report.maybe_push()
 
 
-DEFAULT_JOBS = {"trade": run_trade, "research": run_research, "report": run_report}
+def run_health():
+    """Disk, clock and trading. Trips the bot on a hard failure."""
+    from . import maintenance
+    return maintenance.health()
+
+
+def run_maintenance():
+    """Backup, then prune old rows."""
+    from . import maintenance
+    return maintenance.daily()
+
+
+def run_summary():
+    """Yesterday in a few lines, to the phone."""
+    from . import maintenance, notify, report
+    if not notify.enabled():
+        return {"ok": True, "skipped": "phone alerts are not set up"}
+    maintenance.note_trips()   # so a stop since the last health check is counted
+    title, text, priority = report.daily()
+    log.info("daily summary: %s | %s", title, text.replace("\n", " | "))
+    if not notify.send(title, text, priority=priority, tags=("bar_chart",)):
+        return {"ok": False, "error": "the summary did not send"}
+    return {"ok": True}
+
+
+DEFAULT_JOBS = {"trade": run_trade, "research": run_research, "report": run_report,
+                "health": run_health, "maintenance": run_maintenance, "summary": run_summary}
 
 
 def _number(v, default):
@@ -80,7 +115,28 @@ def intervals(cfg):
     research = _number(cfg.get("research_interval_hours"), d["research_interval_hours"]) * 3600
     return {"trade": max(MIN_TRADE_EVERY, trade),
             "research": max(MIN_RESEARCH_EVERY, research),
-            "report": REPORT_EVERY}
+            "report": REPORT_EVERY, "health": HEALTH_EVERY, "maintenance": DAY, "summary": DAY}
+
+
+def _hour(v, default):
+    if isinstance(v, bool) or not isinstance(v, (int, float)) or v != int(v) or not 0 <= v <= 23:
+        return default
+    return int(v)
+
+
+def daily_hours(cfg):
+    """The UTC hour each once-a-day job runs at. The summary can be moved with
+    `kal set summary_hour_utc 14`; anything odd falls back to the default."""
+    return {"maintenance": MAINTENANCE_HOUR, "summary": _hour(cfg.get("summary_hour_utc"), SUMMARY_HOUR)}
+
+
+def last_slot(now, hour):
+    """The latest moment at or before `now` when the UTC clock read hour:00."""
+    t = datetime.fromtimestamp(now, timezone.utc)
+    slot = t.replace(hour=hour, minute=0, second=0, microsecond=0)
+    if slot > t:
+        slot -= timedelta(days=1)
+    return slot.timestamp()
 
 
 def describe(result):
@@ -101,12 +157,14 @@ def describe(result):
 
 
 class Scheduler:
-    def __init__(self, jobs=None, clock=time.time, tick=TICK, intervals=intervals, threaded=True):
-        """jobs, clock, intervals and threaded are there so tests can drive it by hand."""
+    def __init__(self, jobs=None, clock=time.time, tick=TICK, intervals=intervals, threaded=True,
+                 hours=daily_hours):
+        """jobs, clock, intervals, hours and threaded are there so tests can drive it by hand."""
         self.jobs = dict(jobs or DEFAULT_JOBS)
         self.clock = clock
         self.tick_seconds = tick
         self.intervals = intervals
+        self.hours = hours
         self.threaded = threaded
         self.last = {}            # job -> when it last started (persisted, so a restart keeps the schedule)
         self.status = {}          # job -> {"started", "finished", "ok", "text"}
@@ -115,6 +173,8 @@ class Scheduler:
         self._stop = threading.Event()
         self._thread = None
         self._loaded = False
+        self._beat_at = 0.0
+        self._beat_failed = False
 
     # ---------- schedule ----------
 
@@ -149,13 +209,28 @@ class Scheduler:
         w = self._workers.get(kind)
         return bool(w and w.is_alive())
 
+    def _hours(self, cfg):
+        try:
+            return dict(self.hours(cfg) or {})
+        except Exception:
+            log.error("could not work out the daily job hours: %s", traceback.format_exc())
+            return {}
+
     def due(self, now=None, cfg=None):
-        """Jobs whose time has come and aren't already running."""
+        """Jobs whose time has come and aren't already running. A once-a-day job is due when
+        it hasn't run since its UTC hour last came round, so a server that was down at that
+        hour catches up once, not once per missed day."""
         self._load()
         now = self.clock() if now is None else now
-        every = self.intervals(cfg or self._config())
-        return [k for k in self.jobs
-                if not self.running(k) and now - self.last.get(k, 0) >= every.get(k, REPORT_EVERY)]
+        cfg = cfg or self._config()
+        every, at = self.intervals(cfg), self._hours(cfg)
+
+        def is_due(k):
+            last = self.last.get(k, 0)
+            if k in at:
+                return last < last_slot(now, at[k])
+            return now - last >= every.get(k, REPORT_EVERY)
+        return [k for k in self.jobs if not self.running(k) and is_due(k)]
 
     def tick(self):
         """Start every job that is due. Returns the ones started."""
@@ -215,14 +290,21 @@ class Scheduler:
     def state(self):
         """For the dashboard: when each job last ran, how it went, and when it runs next."""
         self._load()
-        every = self.intervals(self._config())
+        cfg = self._config()
+        every, at = self.intervals(cfg), self._hours(cfg)
+        now = self.clock()
         with self._lock:
             out = {}
             for k in self.jobs:
                 last = self.last.get(k)
-                out[k] = {"every": every.get(k, REPORT_EVERY), "last": last,
-                          "next": (last + every.get(k, REPORT_EVERY)) if last else self.clock(),
-                          **self.status.get(k, {}), "running": self.running(k)}
+                if k in at:
+                    slot = last_slot(now, at[k])
+                    gap, nxt = DAY, (slot + DAY) if last and last >= slot else now
+                else:
+                    gap = every.get(k, REPORT_EVERY)
+                    nxt = (last + gap) if last else now
+                out[k] = {"every": gap, "last": last, "next": nxt, **self.status.get(k, {}),
+                          "running": self.running(k)}
             out["alive"] = bool(self._thread and self._thread.is_alive())
             return out
 
@@ -234,7 +316,24 @@ class Scheduler:
                 self.tick()
             except Exception:
                 log.error("scheduler tick failed: %s", traceback.format_exc())
+            self._beat()
             self._stop.wait(self.tick_seconds)
+
+    def _beat(self):
+        """Touch the heartbeat file about once a minute. Never raises: a full disk must not
+        stop the loop, and it logs only the first failure in a row."""
+        now = time.time()
+        if now - self._beat_at < BEAT_EVERY:
+            return
+        self._beat_at = now
+        try:
+            from . import maintenance
+            maintenance.beat()
+            self._beat_failed = False
+        except Exception as e:
+            if not self._beat_failed:
+                log.warning("could not touch the heartbeat file: %s", e)
+            self._beat_failed = True
 
     def start(self):
         """Run the loop in a background thread (the dashboard does this)."""
@@ -253,6 +352,12 @@ class Scheduler:
         trade = self._workers.get("trade")
         if trade and trade.is_alive():
             trade.join(timeout=wait)
+        if self._beat_at:   # we wrote the heartbeat: a clean stop takes it away
+            try:
+                from . import maintenance
+                maintenance.unbeat()
+            except Exception:
+                log.warning("could not remove the heartbeat file", exc_info=True)
 
     def serve_forever(self):
         """Headless mode, for a server with no dashboard. Runs until Ctrl-C or SIGTERM."""

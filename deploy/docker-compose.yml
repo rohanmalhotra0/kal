@@ -1,6 +1,7 @@
 # Run from the repo root:
 #   docker compose -f deploy/docker-compose.yml up -d --build
 # Settings go in deploy/.env (never commit it). See docs/DEPLOY.md.
+# The clock comes from the server: install chrony there (sudo apt install chrony).
 services:
   kal:
     build:
@@ -13,6 +14,14 @@ services:
       - "127.0.0.1:8787:8787"   # only this server. Use an SSH tunnel to see it.
     restart: unless-stopped
     stop_grace_period: 330s     # let a trade run finish its basket before stopping
+    mem_limit: 400m             # a 1 GB server: never starve SSH
+    healthcheck:
+      # Is the timer still ticking, and is there disk space? (Local only: no network.)
+      test: ["CMD", "python", "-m", "kal", "health", "--alive"]
+      interval: 2m
+      timeout: 30s
+      start_period: 2m
+      retries: 3
     logging:
       driver: json-file
       options:

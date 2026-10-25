@@ -2,8 +2,9 @@
 # Code: /opt/kal. Python: /opt/kal-venv. State: /var/lib/kal. Settings: /etc/kal/kal.env.
 [Unit]
 Description=kal Kalshi trading bot (dashboard + scheduler)
-After=network-online.target
+After=network-online.target time-sync.target
 Wants=network-online.target
+# Never give up restarting it.
 StartLimitIntervalSec=0
 
 [Service]
@@ -17,23 +18,45 @@ Environment=PYTHONDONTWRITEBYTECODE=1
 EnvironmentFile=-/etc/kal/kal.env
 # 127.0.0.1 only: reach the dashboard with ssh -L 8787:localhost:8787
 ExecStart=/opt/kal-venv/bin/python -m kal app --host 127.0.0.1 --port 8787
+# If it stops for any reason, start it again 5 seconds later. Every time.
+# If it keeps crashing, wait longer each time, up to 5 minutes (systemd 254+).
 Restart=always
-RestartSec=10
+RestartSec=5
+RestartSteps=6
+RestartMaxDelaySec=300
 # On stop, a trade run in progress gets up to 5 minutes to finish its basket.
 KillSignal=SIGTERM
 TimeoutStopSec=330
+
+# A 1 GB server: cap kal's memory, so it can never starve SSH or the system.
+# Past the cap it is stopped and started again, like a crash.
+MemoryMax=400M
 
 # Lock it down: it only needs to write its own state folder.
 NoNewPrivileges=true
 PrivateTmp=true
 PrivateDevices=true
 ProtectSystem=strict
+ReadWritePaths=/var/lib/kal
 ProtectHome=true
+ProtectClock=true
+ProtectHostname=true
 ProtectKernelTunables=true
 ProtectKernelModules=true
+ProtectKernelLogs=true
 ProtectControlGroups=true
+ProtectProc=invisible
 RestrictSUIDSGID=true
-ReadWritePaths=/var/lib/kal
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+LockPersonality=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+# A blocked call fails instead of killing the process (which could cut a basket in half).
+SystemCallErrorNumber=EPERM
 UMask=0077
 
 [Install]

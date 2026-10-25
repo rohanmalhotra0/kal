@@ -10,12 +10,15 @@ The order probe (only with a key, only when asked) sends one real order: an
 immediate-or-cancel buy of 1 YES at $0.01 in a market whose YES ask is $0.10 or
 more. Nobody is selling that low, so it can't fill. If Kalshi accepts the order and
 fills 0, our order format works, at zero risk.
+
+The clock check compares this machine's clock with Kalshi's: Kalshi refuses signed
+requests with a wrong timestamp, so a bad clock would make orders fail.
 """
 import logging
 import time
 
 from . import config
-from .client import Kalshi, KalshiError, candle_close, filled, num, price, ts, price_strict
+from .client import Kalshi, KalshiError, candle_close, filled, num, price_strict, ts
 
 PROBE_PRICE = 0.01
 PROBE_MIN_ASK = 0.10      # the probe only goes where the cheapest seller asks this much
@@ -184,6 +187,14 @@ class _Checks:
         good = sum(1 for s in ss if isinstance(s, dict) and s.get("ticker"))
         return good > 0, f"{len(ss)} series, {good} with a ticker"
 
+    def clock_check(self):
+        """Our clock against Kalshi's (one public request). Never trips: it's a test."""
+        if not isinstance(getattr(self.c, "base", None), str):
+            return True, "skipped: not talking to the real API"
+        from . import maintenance
+        r = maintenance.clock_ok(self.c, trip=False)
+        return r["ok"], r["detail"]
+
     # ---------- account (needs a key) ----------
 
     def balance_check(self):
@@ -327,6 +338,7 @@ def run(client=None, order_probe=False):
     check("order book", checks.orderbook_check)
     check("candlesticks", checks.candles_check)
     check("series", checks.series_check)
+    check("clock", checks.clock_check)
     try:
         can_trade = bool(client.can_trade)
     except Exception:

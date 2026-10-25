@@ -8,8 +8,15 @@
   selftest [--order-probe]  check Kalshi's API still looks right
   status                  a few lines on how it's doing
   report [--push] [--json]  the full report (and put it on the status branch)
+  health [--alive]        disk, clock, timer, backups, last runs, last error
+  backup                  back up the books now
+  restore [DAY] [--yes]   list backups, or put one back
+  logs [-n 50]            the last lines of the log file
+  summary [--send]        yesterday's phone summary (--send tests phone alerts)
+  setup                   the guided setup: five plain questions
   on [--budget X]         turn the bot on
   off                     turn the bot off
+  set KEY VALUE           change one setting
 
 Modules other people own (dashboard, scheduler, research) are imported only by the
 command that needs them, so a broken dashboard can't stop `off` from working.
@@ -22,6 +29,7 @@ import math
 import os
 import signal
 import sys
+import time
 from contextlib import contextmanager
 
 from . import config
@@ -29,11 +37,29 @@ from . import config
 DASHBOARD_PASSWORD = "KAL_DASHBOARD_PASSWORD"
 LOCAL = ("127.0.0.1", "localhost", "::1")
 SHOW = 10   # opportunities shown per strategy by `scan`
+TAGS = {"ok": "ok  ", "warn": "WARN", "fail": "FAIL"}
 
 
 def say(*lines):
     for line in lines:
         print(line)
+
+
+def _cmd(rest):
+    """How to type a kal command here. The server's `kal` wrapper sets KAL_CMD="sudo kal",
+    so the hints match what the owner really types. (Display only: it changes nothing.)"""
+    return f"{os.environ.get('KAL_CMD') or 'python -m kal'} {rest}"
+
+
+def _positive(text):
+    """argparse type: a whole number, 1 or more."""
+    try:
+        v = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{text!r} is not a whole number")
+    if v < 1:
+        raise argparse.ArgumentTypeError("must be 1 or more")
+    return v
 
 
 def _money(text):
@@ -50,6 +76,12 @@ def _money(text):
 def _logging(level=logging.WARNING):
     if not logging.getLogger().handlers:
         logging.basicConfig(level=level, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+
+
+def _log_to_file():
+    """The long-running commands also log to $KAL_HOME/logs/kal.log (see `logs`)."""
+    from . import logs
+    logs.setup(config.home())
 
 
 # ---------- app / daemon ----------
@@ -72,6 +104,7 @@ def cmd_app(args):
             f"To listen on {host}, set {DASHBOARD_PASSWORD} first.",
             "Or keep the default (127.0.0.1) and use an SSH tunnel.")
         return 2
+    _log_to_file()
     from kal.dashboard.app import main
     params = inspect.signature(main).parameters
     takes_any = any(p.kind is p.VAR_KEYWORD for p in params.values())
@@ -83,6 +116,7 @@ def cmd_app(args):
 
 
 def cmd_daemon(args):
+    _log_to_file()
     from kal.scheduler import Scheduler
     Scheduler().serve_forever()
     return 0
@@ -263,6 +297,132 @@ def cmd_report(args):
     return 0
 
 
+# ---------- upkeep: health / backup / restore / logs / summary ----------
+
+def _short(text, n=120):
+    """Error text cut to one readable line."""
+    text = " ".join(str(text).split())
+    return text if len(text) <= n else text[:n - 3] + "..."
+
+
+def _say_clean(*lines):
+    """Like say(), with secrets blanked: people paste this output when they ask for help."""
+    from .logs import scrub
+    say(*(scrub(line) for line in lines))
+
+
+def _show(rows):
+    for r in rows:
+        _say_clean(f"{TAGS.get(r['level'], '?   ')}  {r['check']}: {r['detail']}")
+
+
+def cmd_health(args):
+    """Read-only: it never trips the bot. The scheduler's own check does that."""
+    from . import maintenance
+    if args.alive:
+        rows = maintenance.alive()
+        _show(rows)
+        return 1 if any(r["level"] == "fail" for r in rows) else 0
+    rows = maintenance.checks()
+    _show(rows)
+    say("")
+    try:
+        now = time.time()
+        for kind, run in maintenance.last_runs().items():
+            _say_clean(f"Last {kind} run: " + (f"{maintenance.ago(now - run['ts'])} ago, "
+                                               f"{'ok' if run['ok'] else 'FAILED: ' + _short(run['text'])}"
+                                               if run else "never"))
+        err = maintenance.last_error()
+        _say_clean("Last error: " + (f"{maintenance.ago(now - err['ts'])} ago, {err['kind']}: {_short(err['text'])}"
+                                     if err else "none"))
+    except Exception as e:
+        say(f"Couldn't read the runs: {e}")
+    fails = sum(r["level"] == "fail" for r in rows)
+    warns = sum(r["level"] == "warn" for r in rows)
+    say("", "All good." if not fails + warns else f"{fails} problem(s), {warns} warning(s). See above.")
+    return 1 if fails else 0
+
+
+def cmd_backup(args):
+    from . import maintenance
+    try:
+        b = maintenance.backup()
+    except Exception as e:
+        say(f"Backup FAILED: {e}")
+        return 1
+    if not b["files"]:
+        say("Nothing to back up yet.")
+        return 0
+    say(f"Backed up {', '.join(b['files'])} to {b['dir']}.",
+        f"Keeping {len(b['days'])} day(s): {b['days'][0]} to {b['days'][-1]}.")
+    return 0
+
+
+def cmd_restore(args):
+    from . import maintenance
+    if not args.day:
+        have = maintenance.backups()
+        if not have:
+            say(f"No backups yet. Make one: {_cmd('backup')}")
+            return 1
+        say("Backups, newest first:")
+        for day, files in have:
+            say(f"  {day}: {', '.join(files)}")
+        say("", f"To put one back: {_cmd('restore ' + have[0][0])}")
+        return 0
+    if not args.yes:
+        say(f"This puts back the books from {args.day}.",
+            "Trades after that day will be missing from them.",
+            "The bot will stop until you press Reset.",
+            f"To do it, run: {_cmd('restore ' + args.day + ' --yes')}")
+        return 2
+    try:
+        r = maintenance.restore(args.day)
+    except Exception as e:
+        say(f"Not restored: {e}")
+        return 1
+    say(f"Restored {os.path.basename(r['db'])} from {args.day}.")
+    if r["saved"]:
+        say(f"The books from before are kept in {r['saved']}.")
+    say("The bot is stopped. Next:",
+        f" 1. On Kalshi, look at your trades since {args.day}. They are not in these books.",
+        " 2. Lower the budget by what they lost. Count any still open as lost.",
+        f"    For example, $50: {_cmd('set budget 250')}",
+        f" 3. Then: {_cmd('on --clear-trip')}")
+    return 0
+
+
+def cmd_logs(args):
+    from . import logs
+    lines = logs.tail(args.lines)
+    if not lines:
+        say(f"No log yet at {logs.path()}.", "It starts when the bot runs (app or daemon).")
+        return 0
+    for line in lines:
+        print(line)
+    return 0
+
+
+def cmd_summary(args):
+    from . import notify, report
+    title, text, priority = report.daily()
+    say(title, "", text)
+    if not args.send:
+        return 0
+    if not notify.enabled():
+        say("", f"Not sent: no alert topic yet. Run {_cmd('setup')}, or set KAL_NTFY_TOPIC.")
+        return 1
+    sent = notify.send(title, text, priority=priority, tags=("bar_chart",))
+    say("", "Sent. Look at your phone." if sent else "Sending FAILED. Check the topic and the internet.")
+    return 0 if sent else 1
+
+
+def cmd_setup(args):
+    """The guided setup (kal.setup): five plain questions."""
+    from . import setup
+    return setup.run()
+
+
 # ---------- on / off ----------
 
 def _where(cfg):
@@ -273,7 +433,7 @@ def cmd_on(args):
     stored = config.load()
     if stored["disabled_reason"] and not args.clear_trip:
         say(f"It is stopped: {stored['disabled_reason']}",
-            "Find out why first. Then run: python -m kal on --clear-trip")
+            f"Find out why first. Then run: {_cmd('on --clear-trip')}")
         return 1
     changes = {"enabled": True}
     if args.budget is not None:
@@ -322,7 +482,7 @@ def cmd_set(args):
         change = {k: change}
     cfg = config.load()
     if path[0] == "env" and cfg["enabled"]:
-        say("Turn the bot off first: python -m kal off")
+        say(f"Turn the bot off first: {_cmd('off')}")
         return 2
     try:
         new = config.update(change)
@@ -369,6 +529,28 @@ def parser():
     rp.add_argument("--push", action="store_true", help="also put it on the status branch")
     rp.add_argument("--json", action="store_true", help="print JSON")
     rp.set_defaults(fn=cmd_report)
+
+    h = sub.add_parser("health", help="disk, clock, timer, backups, last runs, last error")
+    h.add_argument("--alive", action="store_true",
+                   help="only check the timer is running and there is disk space (no network)")
+    h.set_defaults(fn=cmd_health)
+
+    sub.add_parser("backup", help="back up the books now").set_defaults(fn=cmd_backup)
+
+    rs = sub.add_parser("restore", help="list backups, or put one back")
+    rs.add_argument("day", nargs="?", help="the backup's date, like 2026-10-24 (leave out to list them)")
+    rs.add_argument("--yes", action="store_true", help="really do it")
+    rs.set_defaults(fn=cmd_restore)
+
+    lg = sub.add_parser("logs", help="the last 50 lines of the log")
+    lg.add_argument("-n", "--lines", type=_positive, default=50, help="how many lines (default 50)")
+    lg.set_defaults(fn=cmd_logs)
+
+    sm = sub.add_parser("summary", help="yesterday's phone summary")
+    sm.add_argument("--send", action="store_true", help="also send it to your phone (tests alerts)")
+    sm.set_defaults(fn=cmd_summary)
+
+    sub.add_parser("setup", help="set it up: five plain questions").set_defaults(fn=cmd_setup)
 
     on = sub.add_parser("on", help="turn the bot on")
     on.add_argument("--budget", type=_money, default=None, help="dollars it may use (and at most lose)")

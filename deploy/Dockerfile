@@ -23,9 +23,10 @@ USER kal
 VOLUME ["/data"]
 EXPOSE 8787
 
-# Is the dashboard answering? (Any reply counts, even "password needed".)
-HEALTHCHECK --interval=60s --timeout=5s --start-period=30s --retries=3 \
-  CMD python -c "import socket; socket.create_connection(('127.0.0.1', 8787), 3)"
+# Is the scheduler still ticking, and is there disk space? (Local only: no network.)
+# docker-compose.yml has the same check.
+HEALTHCHECK --interval=2m --timeout=30s --start-period=2m --retries=3 \
+  CMD ["python", "-m", "kal", "health", "--alive"]
 
 # 0.0.0.0 is needed inside a container. kal refuses to start this way unless
 # KAL_DASHBOARD_PASSWORD is set, and docker-compose.yml only opens the port to

@@ -2,11 +2,11 @@
 
 build() collects it from config and the db. maybe_push() puts it on the repo's
 "status" branch, so the 2-hourly check-in (and the owner, on a phone) can read it
-without logging in to the server.
+without logging in to the server. daily() is the morning phone summary.
 
-Nothing secret goes in: no API key ID, no PEM, no tokens, no password. Config keys
-are copied from an allowlist, and as a last guard the final text is scrubbed of
-every secret value this process knows about.
+Nothing secret goes in: no API key ID, no PEM, no tokens, no password, no alert
+topic. Config keys are copied from an allowlist, and as a last guard the final text
+is scrubbed of every secret value this process knows about.
 """
 import base64
 import json
@@ -20,17 +20,17 @@ import requests
 
 from . import config, db, ledger, paper
 from .client import fee
+from .logs import scrub   # one scrubber for the report, the log file and alerts
 
 GITHUB_API = "https://api.github.com"
 BRANCH = "status"
 RUNS = 20
-SECRET_ENV = ("KALSHI_API_KEY_ID", "KALSHI_PRIVATE_KEY", "KAL_GITHUB_TOKEN", "KAL_DASHBOARD_PASSWORD")
 CONFIG_KEYS = ("enabled", "env", "budget", "reinvest_profits", "cash_floor", "max_per_trade",
                "max_per_arb", "max_per_event", "daily_loss_limit", "max_consecutive_errors",
                "kelly_fraction", "trade_interval_min", "research_interval_hours", "auto_promote",
                "paper_bankroll", "disabled_reason")
-PEM = re.compile(r"-----BEGIN [A-Z ]+-----.*?(-----END [A-Z ]+-----|$)", re.S)
 REPO = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+HEALTH_FRESH = 3600   # a saved health check older than this is too old to warn from
 
 log = logging.getLogger(__name__)
 
@@ -51,8 +51,9 @@ def _day_start(now):
 
 
 def _has_key():
-    """Whether a key is set up. Says yes or no, never what the key is."""
-    if not os.environ.get("KALSHI_API_KEY_ID"):
+    """Whether a key is set up (in env vars, or the files `kal setup` writes). Says yes or
+    no, never what the key is."""
+    if not (os.environ.get("KALSHI_API_KEY_ID") or os.path.exists(os.path.join(config.home(), "kalshi_key_id"))):
         return False
     path = os.environ.get("KALSHI_PRIVATE_KEY_PATH") or os.path.join(config.home(), "kalshi.pem")
     return bool(os.environ.get("KALSHI_PRIVATE_KEY")) or os.path.exists(path)
@@ -213,14 +214,46 @@ def _health(cfg, now):
     return out
 
 
+def _ops(now):
+    """Server upkeep, from what the health and maintenance jobs saved. No network here."""
+    from . import maintenance
+    out = {"checked": None, "disk_free_mb": None, "clock": None, "last_backup": None,
+           "timer_seconds_ago": None, "problems": []}
+    h = db.get("health")
+    if isinstance(h, dict) and isinstance(h.get("checks"), list):
+        try:
+            ts = float(h.get("ts") or 0)
+        except (TypeError, ValueError):
+            ts = 0.0
+        out["checked"] = _iso(ts)
+        for r in h["checks"]:
+            if not isinstance(r, dict):
+                continue
+            if r.get("check") == "disk" and isinstance(r.get("free_mb"), (int, float)):
+                out["disk_free_mb"] = r["free_mb"]
+            if r.get("check") == "clock":
+                out["clock"] = str(r.get("detail", ""))[:200]
+            if now - ts < HEALTH_FRESH and r.get("level") in ("warn", "fail") and not r.get("unknown"):
+                out["problems"].append(f"Server {r.get('check')}: {r.get('detail')}")
+    have = maintenance.backups()
+    if have:
+        out["last_backup"] = have[0][0]
+        if now - maintenance.day_start(have[0][0]) > (maintenance.BACKUP_STALE_DAYS + 1) * 86400:
+            out["problems"].append(f"No backup since {have[0][0]}.")
+    age = maintenance.heartbeat_age(now)
+    out["timer_seconds_ago"] = None if age is None else round(age)
+    return out
+
+
 def build(now=None):
     """The whole report, as plain JSON-ready data."""
     now = time.time() if now is None else now
     cfg = config.load()
+    ops = _ops(now)
     rep = {
         "generated": _iso(now),
         "code": _version(),
-        "health": _health(cfg, now),
+        "health": _health(cfg, now) + ops.pop("problems"),
         "tripped": cfg.get("disabled_reason") or "",
         "config": _config(cfg),
         "equity": _equity(),
@@ -232,9 +265,84 @@ def build(now=None):
         "strategies": _strategies(cfg, now),
         "research": _research(),
         "consecutive_errors": db.get("consecutive_errors", 0) or 0,
+        "ops": ops,
         "runs": _runs(),
     }
     return _clean(rep)
+
+
+# ---------- the morning phone summary ----------
+
+def _signed(v):
+    v = round(float(v or 0), 2) + 0.0   # + 0.0 turns -0.0 into 0.0
+    return f"+${v:,.2f}" if v >= 0 else f"-${-v:,.2f}"
+
+
+def _bets(n):
+    return f"{n} settled bet" + ("" if n == 1 else "s")
+
+
+def _when(iso):
+    """A research file's ISO time as a timestamp, or None."""
+    try:
+        t = datetime.fromisoformat(str(iso).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return (t if t.tzinfo else t.replace(tzinfo=timezone.utc)).timestamp()
+
+
+def _promoted(start, end):
+    """Edges (and the mention words) promoted from paper between start and end."""
+    d = os.path.join(config.home(), "research")
+    raw = _read_json(os.path.join(d, "edges.json"))
+    if isinstance(raw, dict):
+        raw = raw.get("edges", list(raw.values()))
+    out = []
+    for e in raw if isinstance(raw, list) else []:
+        t = _when(e.get("promoted_at")) if isinstance(e, dict) else None
+        if t is not None and start <= t < end:
+            out.append(str(e.get("id", "?")))
+    words = _read_json(os.path.join(d, "words.json"))
+    t = _when(words.get("promoted_at")) if isinstance(words, dict) else None
+    if t is not None and start <= t < end:
+        out.append("mention words")
+    return out
+
+
+def daily(now=None):
+    """Yesterday (UTC) in a few short lines, for the phone. Returns (title, text, priority):
+    "high" when the bot is stopped, else "low" (no buzz)."""
+    from . import maintenance
+    now = time.time() if now is None else now
+    end = _day_start(now)
+    start = end - 86400
+    cfg = config.load()
+    live = db.query("SELECT COALESCE(SUM(pnl), 0) AS p, COUNT(*) AS n FROM settlements "
+                    "WHERE settled_ts >= ? AND settled_ts < ?", start, end)[0]
+    pap = db.query("SELECT COALESCE(SUM(pnl), 0) AS p, COUNT(*) AS n FROM paper "
+                   "WHERE settled = 1 AND settled_ts >= ? AND settled_ts < ?", start, end)[0]
+    held = ledger.open_positions()
+    paper_open = db.query("SELECT COUNT(DISTINCT ticker) AS n FROM paper WHERE settled = 0")[0]["n"]
+    stops = maintenance.trips(start, end)
+    promoted = _promoted(start, end)
+    demo = cfg.get("env") == "demo"
+    reason = cfg.get("disabled_reason") or ""
+    money = "Demo money" if demo else "Real money"
+    lines = [f"STOPPED: {reason}", "Open the dashboard, find out why, then press Reset.", ""] if reason else []
+    lines += [
+        f"Yesterday ({datetime.fromtimestamp(start, timezone.utc):%a %b %d}, UTC):",
+        f"{money}: {_signed(live['p'])} from {_bets(live['n'])}",
+        f"Paper: {_signed(pap['p'])} from {_bets(pap['n'])}",
+        f"Capital now: {_money(ledger.capital(cfg))} (budget {_money(cfg.get('budget'))})",
+        f"Open bets: {len(held)} real ({_money(sum(r['cost'] for r in held))}), {paper_open} paper",
+        "Safety stops: " + (f"{len(stops)} ({'; '.join(s['reason'][:100] for s in stops[:2])})"
+                            if stops else "none"),
+        "Ideas promoted: " + (f"{len(promoted)} ({', '.join(promoted[:3])})" if promoted else "none"),
+        "Bot now: " + ("STOPPED" if reason else "ON" if cfg.get("enabled") else "OFF")
+        + (" (demo)" if demo else ""),
+    ]
+    title = f"kal{' demo' if demo else ''} yesterday: {_signed(live['p'])}"
+    return scrub(title), scrub("\n".join(lines)), "high" if reason else "low"
 
 
 # ---------- showing it ----------
@@ -259,6 +367,13 @@ def markdown(rep, short=False):
              + f". Paper {_money(today['paper_settled_pnl'])} settled.",
              (f"- Equity: {_money(eq['equity'])} (Kalshi balance {_money(eq['balance'])}). "
               f"Paper: {_money(eq['paper_equity'])}." if eq else "- Equity: no runs yet.")]
+    ops = rep.get("ops") or {}
+    if ops.get("disk_free_mb") is not None or ops.get("last_backup"):
+        bits = [f"{ops['disk_free_mb']:,.0f} MB disk free"] if ops.get("disk_free_mb") is not None else []
+        if ops.get("clock"):
+            bits.append(f"clock {ops['clock']}")
+        bits.append(f"last backup {ops.get('last_backup') or 'none yet'}")
+        lines.append("- Server: " + ". ".join(bits) + ".")
     if rep["health"]:
         lines += ["", "## Needs a look", ""] + [f"- {h}" for h in rep["health"]]
     else:
@@ -291,17 +406,6 @@ def markdown(rep, short=False):
             if run["kind"] == "trade" else "ok")
         lines.append(f"- {run['ts']} {run['kind']} {'ok' if run['ok'] else 'FAILED'}: {what}")
     return scrub("\n".join(lines) + "\n")
-
-
-def scrub(text):
-    """Remove any PEM block and the value of every secret env var. Belt and braces."""
-    text = PEM.sub("[removed key]", text)
-    for var in SECRET_ENV:
-        v = os.environ.get(var)
-        if v and len(v) >= 6:
-            text = text.replace(v, "[removed]")
-            text = text.replace(json.dumps(v)[1:-1], "[removed]")  # as it looks inside JSON
-    return text
 
 
 def _clean(obj):
@@ -354,6 +458,10 @@ class _GitHub:
             raise PushError(f"GitHub said {r.status_code} to {method} {path}: {r.text[:200]}")
         return r
 
+    def is_private(self):
+        """True only if GitHub says the repo is private."""
+        return self.call("GET", "").json().get("private") is True
+
     def branch_exists(self):
         return self.call("GET", f"/git/ref/heads/{BRANCH}", ok=(200, 404)).status_code == 200
 
@@ -388,11 +496,14 @@ def maybe_push(rep=None):
         return False
     if not REPO.match(repo):
         raise PushError("KAL_GITHUB_REPO must look like owner/repo")
-    rep = rep or build()
-    files = {"report.json": scrub(json.dumps(rep, indent=1, default=str)) + "\n", "report.md": markdown(rep)}
-    message = f"Status report {rep.get('generated') or ''}".strip()
     gh = _GitHub(token, repo)
     try:
+        if not gh.is_private():
+            # The report shows balances, trades and the strategy's edges: never in public.
+            raise PushError(f"{repo} is public, so anyone could read the report. Use a private repo.")
+        rep = rep or build()
+        files = {"report.json": scrub(json.dumps(rep, indent=1, default=str)) + "\n", "report.md": markdown(rep)}
+        message = f"Status report {rep.get('generated') or ''}".strip()
         if not gh.branch_exists() and gh.create_branch(files, message):
             return True
         for path, text in files.items():

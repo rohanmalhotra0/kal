@@ -9,6 +9,7 @@ import types
 import unittest
 from contextlib import redirect_stdout
 from datetime import datetime, timezone
+from email.utils import formatdate
 from types import SimpleNamespace
 from unittest import mock
 
@@ -91,13 +92,21 @@ class CliTests(TempHome):
         sig = mock.patch.object(cli, "_sigterm_is_ctrl_c")
         sig.start()
         self.addCleanup(sig.stop)
+        self.log_setup = self.no_log_file()
         return calls
+
+    def no_log_file(self):
+        """logs.setup() would add a file handler for the rest of the test run."""
+        p = mock.patch("kal.logs.setup")
+        self.addCleanup(p.stop)
+        return p.start()
 
     def test_app_runs_dashboard_on_localhost(self):
         calls = self.fake_dashboard()
         code, _ = self.cli("app", "--port", "9000")
         self.assertEqual(code, 0)
         self.assertEqual(calls, [("127.0.0.1", 9000)])
+        self.log_setup.assert_called_once_with(self.home)   # logs go to $KAL_HOME/logs/kal.log
 
     def test_app_refuses_open_host_without_password(self):
         calls = self.fake_dashboard()
@@ -107,6 +116,7 @@ class CliTests(TempHome):
         self.assertEqual(code, 2)
         self.assertEqual(calls, [])
         self.assertIn("KAL_DASHBOARD_PASSWORD", text)
+        self.log_setup.assert_not_called()
 
     def test_app_open_host_with_password(self):
         calls = self.fake_dashboard()
@@ -125,10 +135,12 @@ class CliTests(TempHome):
             signal.getsignal(signal.SIGTERM)(signal.SIGTERM, None)
 
     def test_daemon(self):
+        log_setup = self.no_log_file()
         with mock.patch("kal.scheduler.Scheduler") as S:
             code, _ = self.cli("daemon")
         self.assertEqual(code, 0)
         S.return_value.serve_forever.assert_called_once()
+        log_setup.assert_called_once_with(self.home)
 
     def test_run(self):
         ok = {"ok": True, "signals": 2, "live_trades": 1, "paper_trades": 1, "notes": ["hello"]}
@@ -281,6 +293,139 @@ class CliTests(TempHome):
         self.assertEqual(config.load()["env"], "demo")
         self.assertIn("demo", text)
 
+    # ---------- upkeep commands ----------
+
+    def kalshi_date(self, behind=0):
+        reply = SimpleNamespace(status_code=200, headers={"Date": formatdate(time.time() - behind, usegmt=True)})
+        p = mock.patch("kal.maintenance.requests.get", return_value=reply)
+        self.addCleanup(p.stop)
+        return p.start()
+
+    def disk(self, free_mb=50_000):
+        """Tests shouldn't depend on how full this machine's disk is."""
+        p = mock.patch("kal.maintenance.shutil.disk_usage",
+                       return_value=SimpleNamespace(total=10 ** 12, used=0, free=free_mb * 1024 * 1024))
+        self.addCleanup(p.stop)
+        return p.start()
+
+    def test_health(self):
+        self.kalshi_date(0)
+        self.disk()
+        code, text = self.cli("health")
+        self.assertEqual(code, 0)   # only warnings: nothing has run yet
+        for bit in ("ok    disk:", "ok    clock: within 5 s", "WARN  timer:", "ok    trading:",
+                    "WARN  backup: none yet", "ok    bot: off", "Last trade run: never", "Last error: none"):
+            self.assertIn(bit, text)
+        db.insert("runs", kind="trade", ok=0, duration=1, message=json.dumps({"ok": False, "error": "boom"}))
+        config.trip("lost too much today")
+        code, text = self.cli("health")
+        self.assertEqual(code, 1)
+        self.assertIn("FAIL  bot: stopped itself: lost too much today", text)
+        self.assertIn("Last trade run: 0 s ago, FAILED: boom", text)
+        self.assertIn("Last error: 0 s ago, trade: boom", text)
+        self.assertEqual(config.load()["disabled_reason"], "lost too much today")   # it only looks
+
+    def test_health_never_trips_even_when_the_clock_or_disk_is_bad(self):
+        self.kalshi_date(120)
+        self.disk(100)
+        for _ in range(2):
+            code, text = self.cli("health")
+        self.assertEqual(code, 1)
+        self.assertIn("FAIL  clock:", text)
+        self.assertIn("s ahead of Kalshi's clock", text)
+        self.assertIn("FAIL  disk: only 100 MB free", text)
+        self.assertEqual(config.load()["disabled_reason"], "")
+
+    def test_health_alive_is_local_and_needs_the_timer(self):
+        from kal import maintenance
+        self.disk(500)   # a disk warning alone doesn't make it unhealthy
+        with mock.patch("kal.maintenance.requests.get", side_effect=AssertionError("no network here")):
+            code, text = self.cli("health", "--alive")
+            self.assertEqual(code, 1)
+            self.assertIn("FAIL  timer", text)
+            maintenance.beat()
+            code, text = self.cli("health", "--alive")
+        self.assertEqual(code, 0, text)
+
+    def test_backup_and_restore(self):
+        self.disk()
+        db.insert("orders", strategy="basket_arb", ticker="A", side="no", count=5, price=0.5, filled=5,
+                  status="executed")
+        self.assertEqual(self.cli("restore")[0], 1)   # no backups yet
+        code, text = self.cli("backup")
+        self.assertEqual(code, 0)
+        self.assertIn("Backed up kal.db", text)
+        day = datetime.now(timezone.utc).date().isoformat()
+        code, text = self.cli("restore")
+        self.assertEqual(code, 0)
+        self.assertIn(f"{day}: kal.db", text)
+        db.insert("orders", strategy="basket_arb", ticker="B", side="no", count=5, price=0.5, filled=5,
+                  status="executed")
+        code, text = self.cli("restore", day)
+        self.assertEqual(code, 2)   # asks first, changes nothing
+        self.assertIn("--yes", text)
+        self.assertEqual(len(db.query("SELECT * FROM orders")), 2)
+        self.assertEqual(config.load()["disabled_reason"], "")
+        code, text = self.cli("restore", day, "--yes")
+        self.assertEqual(code, 0, text)
+        self.assertEqual(len(db.query("SELECT * FROM orders")), 1)
+        self.assertIn("on --clear-trip", text)
+        self.assertIn("restored", config.load()["disabled_reason"])
+        code, text = self.cli("restore", "2020-01-01", "--yes")
+        self.assertEqual(code, 1)
+        self.assertIn("Not restored", text)
+
+    def test_backup_failure_is_plain(self):
+        from kal import maintenance
+        with mock.patch("kal.maintenance.backup", side_effect=maintenance.MaintenanceError("disk error")):
+            code, text = self.cli("backup")
+        self.assertEqual(code, 1)
+        self.assertIn("Backup FAILED: disk error", text)
+        self.assertIn("Nothing to back up", self.cli("backup")[1])
+
+    def test_logs(self):
+        from kal import logs
+        code, text = self.cli("logs")
+        self.assertEqual(code, 0)
+        self.assertIn("No log yet", text)
+        os.makedirs(os.path.dirname(logs.path()))
+        with open(logs.path(), "w") as f:
+            f.write("".join(f"line {i}\n" for i in range(80)))
+        code, text = self.cli("logs")
+        self.assertEqual(text.splitlines(), [f"line {i}" for i in range(30, 80)])
+        self.assertEqual(self.cli("logs", "-n", "2")[1].splitlines(), ["line 78", "line 79"])
+        for bad in ("0", "-3", "lots"):
+            with self.assertRaises(SystemExit), mock.patch("sys.stderr", io.StringIO()):
+                self.cli("logs", "-n", bad)
+
+    def test_summary(self):
+        with mock.patch.dict(os.environ, {}):
+            os.environ.pop("KAL_NTFY_TOPIC", None)
+            code, text = self.cli("summary")
+            self.assertEqual(code, 0)
+            self.assertIn("Real money: +$0.00", text)
+            code, text = self.cli("summary", "--send")
+            self.assertEqual(code, 1)
+            self.assertIn("KAL_NTFY_TOPIC", text)
+            os.environ["KAL_NTFY_TOPIC"] = "kal-test-topic-123"
+            with mock.patch("kal.notify.requests.post") as post:
+                post.return_value.status_code = 200
+                code, text = self.cli("summary", "--send")
+        self.assertEqual(code, 0)
+        self.assertIn("Sent", text)
+        self.assertTrue(post.call_args.args[0].endswith("/kal-test-topic-123"))
+
+    def test_setup_runs_the_guided_setup(self):
+        with mock.patch("kal.setup.run", return_value=0) as run:
+            self.assertEqual(self.cli("setup")[0], 0)
+        run.assert_called_once_with()
+
+    def test_hints_match_how_the_owner_types_commands(self):
+        config.trip("lost too much today")
+        with mock.patch.dict(os.environ, {"KAL_CMD": "sudo kal"}):
+            self.assertIn("Then run: sudo kal on --clear-trip", self.cli("on")[1])
+        self.assertIn("Then run: python -m kal on --clear-trip", self.cli("on")[1])
+
 
 # ---------- scan ----------
 
@@ -370,9 +515,10 @@ class SelftestTests(unittest.TestCase):
         self.assertEqual(bad, [])
         self.assertEqual({r["check"] for r in rows},
                          {"markets", "market fields", "events", "order book", "candlesticks", "series",
-                          "balance", "positions"})
+                          "clock", "balance", "positions"})
         for r in rows:
             self.assertEqual(set(r), {"check", "ok", "detail"})
+        self.assertIn("skipped", rows_by_check(rows)["clock"]["detail"])   # a fake has no clock to ask
 
     def test_no_key_skips_account(self):
         c = GoodFake(can_trade=False)
@@ -480,6 +626,22 @@ class SelftestTests(unittest.TestCase):
         self.assertFalse(rows_by_check(rows)["markets"]["ok"])
 
 
+class SelftestClockTests(TempHome):
+    def check(self, behind):
+        date = SimpleNamespace(status_code=200, headers={"Date": formatdate(time.time() - behind, usegmt=True)})
+        with mock.patch("kal.maintenance.requests.get", return_value=date):
+            return selftest._Checks(client.Kalshi()).clock_check()
+
+    def test_a_bad_clock_fails_but_never_trips(self):
+        """Kalshi refuses signed requests with a wrong timestamp, so orders would fail."""
+        self.assertEqual(self.check(0)[0], True)
+        for behind in (10, 60, -60, 60):
+            ok, detail = self.check(behind)
+            self.assertFalse(ok)
+            self.assertIn("Kalshi's clock", detail)
+        self.assertEqual(config.load()["disabled_reason"], "")
+
+
 class OrderProbeTests(unittest.TestCase):
     def test_not_sent_unless_asked(self):
         c = GoodFake()
@@ -549,8 +711,11 @@ class OrderProbeTests(unittest.TestCase):
             return SimpleNamespace(status_code=code, json=lambda: data, text=json.dumps(data))
         k = client.Kalshi(key_id="kid", private_key=object())
         k._req = req
-        rows = selftest.run(k, order_probe=True)
+        date = SimpleNamespace(status_code=200, headers={"Date": formatdate(time.time(), usegmt=True)})
+        with mock.patch("kal.maintenance.requests.get", return_value=date) as get:
+            rows = selftest.run(k, order_probe=True)
         self.assertEqual([r for r in rows if not r["ok"]], [])
+        self.assertEqual(get.call_args.args[0], k.base + "/trade-api/v2/markets")   # the clock check
         self.assertEqual(len(posts), 1)
         endpoint, body = posts[0]
         # Kalshi's V2 order endpoint (V1 now answers 410): buying YES is a bid on the YES book.
@@ -566,19 +731,21 @@ class OrderProbeTests(unittest.TestCase):
 PEM_TEXT = "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqSECRETPEMBODY\n-----END PRIVATE KEY-----\n"
 SECRETS = {"KALSHI_API_KEY_ID": "kid-SECRET-1234567", "KALSHI_PRIVATE_KEY": PEM_TEXT,
            "KAL_GITHUB_TOKEN": "github_pat_SECRET_7654321", "KAL_DASHBOARD_PASSWORD": "pw-SECRET-hunter2",
-           "KAL_GITHUB_REPO": "owner/kal"}
+           "KAL_NTFY_TOPIC": "kal-SECRET-topic-42", "KAL_GITHUB_REPO": "owner/kal"}
 
 
 class FakeGitHub:
     """Stands in for requests.request against the GitHub API."""
 
-    def __init__(self, branch=True, put_code=201):
-        self.branch, self.put_code = branch, put_code
+    def __init__(self, branch=True, put_code=201, private=True):
+        self.branch, self.put_code, self.private = branch, put_code, private
         self.calls = []
 
     def __call__(self, method, url, headers=None, timeout=None, json=None, params=None):
         path = url.split("/repos/owner/kal", 1)[1]
         self.calls.append((method, path, json, headers))
+        if method == "GET" and path == "":
+            return self.resp(200, {"full_name": "owner/kal", "private": self.private})
         if method == "GET" and path == "/git/ref/heads/status":
             return self.resp(200 if self.branch else 404, {"object": {"sha": "c0"}})
         if method == "GET" and path.startswith("/contents/"):
@@ -596,16 +763,22 @@ class FakeGitHub:
 
 class ReportTests(TempHome):
     def setUp(self):
-        super().setUp()
+        # Before TempHome: cleanups run after tearDown, so a snapshot taken later would put
+        # back the temp KAL_HOME after it's deleted.
         env = mock.patch.dict(os.environ, SECRETS)
         env.start()
         self.addCleanup(env.stop)
+        alerts = mock.patch("kal.notify.requests.post")   # the topic is set: never send a real alert
+        self.alerts = alerts.start()
+        self.addCleanup(alerts.stop)
+        super().setUp()
         with open(os.path.join(self.home, "kalshi.pem"), "w") as f:
             f.write(PEM_TEXT)
         config.update({"budget": 300})
         db.insert("runs", kind="trade", ok=0, duration=1.0,
                   message=json.dumps({"ok": False, "error": f"auth failed for {SECRETS['KALSHI_API_KEY_ID']} "
-                                                            f"{PEM_TEXT} {SECRETS['KAL_GITHUB_TOKEN']}"}))
+                                                            f"{PEM_TEXT} {SECRETS['KAL_GITHUB_TOKEN']} "
+                                                            f"https://ntfy.sh/{SECRETS['KAL_NTFY_TOPIC']}"}))
         db.insert("runs", kind="trade", ok=1, duration=2.0,
                   message=json.dumps({"ok": True, "signals": 3, "live_trades": 1, "paper_trades": 2, "notes": []}))
         db.insert("equity", balance=310.0, exposure=20.0, equity=305.0, paper_equity=1001.0)
@@ -704,11 +877,64 @@ class ReportTests(TempHome):
         self.assertIn("403", str(e.exception))
         self.assertNotIn(SECRETS["KAL_GITHUB_TOKEN"], str(e.exception))
 
+    def test_public_repo_is_refused(self):
+        gh = FakeGitHub(private=False)
+        with mock.patch("kal.report.requests.request", gh):
+            with self.assertRaises(report.PushError) as e:
+                report.maybe_push()
+        self.assertIn("public", str(e.exception))
+        self.assertEqual([c[:2] for c in gh.calls], [("GET", "")])  # nothing written
+
     def test_bad_repo_name_is_refused(self):
         with mock.patch.dict(os.environ, {"KAL_GITHUB_REPO": "https://evil.example/x"}), \
                 mock.patch("kal.report.requests.request", side_effect=AssertionError("no network")):
             with self.assertRaises(report.PushError):
                 report.maybe_push()
+
+    def test_server_upkeep_is_in_the_report(self):
+        from kal import maintenance
+        rep, text = self.everything()
+        self.assertEqual(rep["ops"]["last_backup"], None)
+        db.put("health", {"ts": time.time(), "checks": [
+            {"check": "disk", "ok": False, "level": "warn", "detail": "600 MB free.", "free_mb": 600},
+            {"check": "clock", "ok": True, "level": "ok", "detail": "within 5 s of Kalshi's"},
+            {"check": "clock", "ok": False, "level": "warn", "detail": "couldn't reach Kalshi", "unknown": True}]})
+        with mock.patch("kal.maintenance.shutil.disk_usage",
+                        return_value=SimpleNamespace(total=10 ** 12, used=0, free=10 ** 11)):
+            maintenance.backup()
+        maintenance.beat()
+        rep, text = self.everything()
+        self.assertEqual(rep["ops"]["disk_free_mb"], 600)
+        self.assertEqual(rep["ops"]["last_backup"], datetime.now(timezone.utc).date().isoformat())
+        self.assertLess(rep["ops"]["timer_seconds_ago"], 60)
+        self.assertIn("Server disk: 600 MB free.", rep["health"])
+        self.assertNotIn("couldn't reach", " ".join(rep["health"]))   # can't tell is not a problem
+        self.assertIn("- Server: 600 MB disk free", text)
+        db.put("health", {"ts": time.time() - 2 * 3600, "checks": [
+            {"check": "disk", "ok": False, "level": "warn", "detail": "600 MB free.", "free_mb": 600}]})
+        self.assertNotIn("Server disk: 600 MB free.", report.build()["health"])   # too old to warn from
+
+    def test_key_and_topic_saved_by_setup(self):
+        """`kal setup` saves the key ID and alert topic as files: the report must see the key
+        and never show either."""
+        os.environ.pop("KALSHI_API_KEY_ID")
+        os.environ.pop("KAL_NTFY_TOPIC")
+        self.assertFalse(report.build()["config"]["has_api_key"])
+        for name, value in (("kalshi_key_id", "kid-file-SECRET-77"), ("ntfy_topic", "kal-file-SECRET-88")):
+            with open(os.path.join(self.home, name), "w") as f:
+                f.write(value + "\n")
+        db.insert("runs", kind="trade", ok=0, duration=0,
+                  message=json.dumps({"ok": False, "error": "kid-file-SECRET-77 posting to kal-file-SECRET-88"}))
+        rep, text = self.everything()
+        self.assertTrue(rep["config"]["has_api_key"])
+        self.assertNotIn("kid-file-SECRET-77", text)
+        self.assertNotIn("kal-file-SECRET-88", text)
+
+    def test_an_old_backup_needs_a_look(self):
+        os.makedirs(os.path.join(self.home, "backups", "2020-01-01"))
+        with open(os.path.join(self.home, "backups", "2020-01-01", "kal.db"), "w"):
+            pass
+        self.assertIn("No backup since 2020-01-01.", report.build()["health"])
 
 
 # ---------- deploy and CI files ----------
@@ -741,13 +967,51 @@ class DeployFileTests(unittest.TestCase):
         compose = read("deploy", "docker-compose.yml")
         self.assertIn("127.0.0.1:8787:8787", compose)
         self.assertIn("unless-stopped", compose)
+        # Health checks are local (no network) and use the CLI command, which really exists.
+        for text in (df, compose):
+            self.assertIn('"python", "-m", "kal", "health", "--alive"', text)
+        self.assertIn("mem_limit: 400m", compose)
+        self.assertTrue(cli.parser().parse_args(["health", "--alive"]).alive)
 
     def test_systemd(self):
         unit = read("deploy", "kal.service")
-        self.assertIn("Restart=always", unit)
+        lines = set(unit.splitlines())
         self.assertIn("-m kal app", unit)
-        self.assertIn("User=kal", unit)
         self.assertNotIn("0.0.0.0", unit)
+        for line in ("User=kal", "Restart=always", "NoNewPrivileges=true", "ProtectSystem=strict",
+                     "ReadWritePaths=/var/lib/kal", "PrivateTmp=true", "MemoryMax=400M", "StartLimitIntervalSec=0"):
+            self.assertIn(line, lines)
+        restart = [int(x.split("=")[1]) for x in lines if x.startswith("RestartSec=")]
+        self.assertTrue(restart and restart[0] <= 10)
+        # The only writable place is the data folder, where logs and backups go too.
+        self.assertEqual([x for x in lines if x.startswith("ReadWritePaths=")], ["ReadWritePaths=/var/lib/kal"])
+
+    def test_install_keeps_the_clock_right_and_sets_up_alerts(self):
+        sh = read("deploy", "install.sh")
+        for bit in ("apt-get install -y -qq chrony", "systemd-timesyncd", "timedatectl", "KAL_NTFY_TOPIC=",
+                    "SystemMaxUse=", 'KAL_CMD="sudo kal"', "sudo kal health", "sudo kal summary --send",
+                    '"$DATA/ntfy_topic"', "umask 077"):
+            self.assertIn(bit, sh)
+        # The topic goes in the file `kal setup` and notify read, never as an active kal.env line:
+        # a topic there would win, and the owner would subscribe to the wrong one.
+        self.assertNotIn("\nKAL_NTFY_TOPIC=", sh)
+        self.assertTrue(os.access(os.path.join(ROOT, "deploy", "install.sh"), os.X_OK))
+
+    def test_docs_cover_the_basics(self):
+        docs = read("docs", "DEPLOY.md")
+        for bit in ("ntfy", "KAL_NTFY_TOPIC", "kal set env demo", "kal set env prod", "kal on --budget 300",
+                    "kal backup", "kal restore", "kal health", "kal logs", "Always under $20", "US data center",
+                    "kal stopped itself", "kal warning: disk", "kal warning: clock", "kal warning: trading",
+                    "kal backup failed", "kal on --clear-trip"):
+            self.assertIn(bit, docs)
+        readme = read("README.md")
+        for bit in ("ntfy", "KAL_NTFY_TOPIC", "kal health", "kal logs", "kal backup", "kal restore"):
+            self.assertIn(bit, readme)
+        # Every command the docs tell the owner to run must exist.
+        known = set(cli.parser()._subparsers._group_actions[0].choices)
+        import re
+        for cmd in set(re.findall(r"sudo kal ([a-z-]+)", docs + readme)):
+            self.assertIn(cmd, known, cmd)
 
 
 if __name__ == "__main__":
