@@ -15,7 +15,7 @@ from unittest import mock
 
 import requests
 
-from kal import config, db, engine, ledger
+from kal import config, db, engine, ledger, maintenance
 from kal.client import KalshiError, fee
 from tests.fakes import FakeKalshi
 from tests.helpers import TempHome, orders_proven
@@ -35,6 +35,7 @@ class ChaosKalshi(FakeKalshi):
         self.order_list = []     # every order, as Kalshi's order lookup shows it
         self.live_events = {}    # event ticker -> [market tickers]
         self.made = 0
+        self.sold = []
 
     # ---- the exchange's state ----
 
@@ -92,6 +93,21 @@ class ChaosKalshi(FakeKalshi):
                 o["status"] = "canceled"
         self.cancelled.append(order_id)
         return {}
+
+    def fills(self, min_ts=None):
+        return [{"order_id": o["order_id"], "ticker": o["ticker"], "side": o["side"], "action": "buy",
+                 "count_fp": f"{o['filled']:.2f}", f"{o['side']}_price_dollars": f"{o['price']:.4f}",
+                 "created_time": "2026-10-25T00:00:00Z"} for o in self.order_list if o["filled"] > 0]
+
+    def sell_some(self):
+        """The owner sells one of the bot's positions in the app, at the bid."""
+        open_ = sorted(t for t, n in self.held.items() if n and self.market_info.get(t, {}).get("status") == "active")
+        if not open_:
+            return None
+        t = self.rng.choice(open_)
+        n = self.held.pop(t)
+        self.cash += abs(n) * 0.5
+        return t
 
     # ---- between runs ----
 
@@ -152,14 +168,22 @@ class ChaosTests(TempHome):
         config.update({"strategies": {"basket_arb": {"mode": "live"}}})
         orders_proven()
 
-    def chaos(self, seed):
+    def chaos(self, seed, runs=RUNS, events=None):
+        """`events`: {run number: "backup" | "restore" | "sell"}, things the owner does."""
         rng, now = random.Random(seed), [time.time()]
         clock = lambda: now[0]   # noqa: E731
         c = ChaosKalshi(rng, clock)
         trips = []
         with mock.patch("time.time", clock):
-            for _ in range(RUNS):
+            for i in range(runs):
                 c.tick()
+                what = (events or {}).get(i)
+                if what == "backup":
+                    maintenance.backup()
+                elif what == "restore":
+                    maintenance.restore(maintenance.backups()[0][0])
+                elif what == "sell":
+                    c.sold.append(c.sell_some())
                 engine.run_once(c)
                 reason = config.load()["disabled_reason"]
                 if reason:
@@ -201,6 +225,24 @@ class ChaosTests(TempHome):
                 self.assertAlmostEqual(ledger.realized(), c.cash - START_CASH, places=6)
                 self.assertAlmostEqual(ledger.open_cost(), 0, places=6)
         self.assertGreater(traded, 20)   # the test did trade
+
+    def test_restore_and_owner_sales_keep_the_books_safe(self):
+        # The books are restored from an older backup mid-way, and the owner sells some of
+        # the bot's contracts in the app. The books must stay within budget and never count
+        # more profit than the exchange paid.
+        logging.disable(logging.ERROR)
+        self.addCleanup(logging.disable, logging.NOTSET)
+        c, trips = self.chaos(7, runs=90, events={20: "backup", 45: "restore", 60: "sell", 70: "sell"})
+        self.assertTrue(any("Books restored" in r for r in trips), trips)
+        self.assertFalse([r for r in trips if "books show" in r], trips)
+        self.assertEqual(ledger.unresolved_orders(), [])
+        self.assertAlmostEqual(ledger.open_cost(), 0, places=6)
+        true_pnl = c.cash - START_CASH
+        if any(c.sold):
+            self.assertGreater(db.query("SELECT COUNT(*) AS n FROM writeoffs")[0]["n"], 0)
+            self.assertLessEqual(ledger.realized(), true_pnl + 1e-6)   # never richer than real
+        else:
+            self.assertAlmostEqual(ledger.realized(), true_pnl, places=6)
 
 
 if __name__ == "__main__":
