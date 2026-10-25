@@ -148,6 +148,33 @@ show("mutually exclusive events: top YES-bid sums", sums[:15])
 code, d = get("/markets", limit=5, status="settled")
 show("settled sample", {"code": code, "markets": [pick(m) for m in (d.get("markets", []) if isinstance(d, dict) else [])]})
 
+# What do non-yes/no settlements look like? (voids, scalars) Sample many settled markets.
+results = collections.Counter()
+odd = []
+cursor = None
+for page in range(8):
+    params = {"limit": 1000}
+    if cursor:
+        params["cursor"] = cursor
+    code, d = get("/historical/markets", **params)
+    if not isinstance(d, dict):
+        break
+    for m in d.get("markets", []):
+        key = (m.get("status"), m.get("result"), m.get("market_type"))
+        results[str(key)] += 1
+        if m.get("result") not in ("yes", "no") and len(odd) < 12:
+            odd.append(pick(m))
+    cursor = d.get("cursor")
+    if not cursor:
+        break
+code, d = get("/markets", status="settled", limit=1000, mve_filter="exclude")
+for m in (d.get("markets", []) if isinstance(d, dict) else []):
+    results["recent " + str((m.get("status"), m.get("result"), m.get("market_type")))] += 1
+    if m.get("result") not in ("yes", "no") and len(odd) < 20:
+        odd.append(pick(m))
+show("settlement shapes (status, result, market_type)", dict(results.most_common(25)))
+show("non-yes/no settled examples", odd, 8000)
+
 # Historical store
 code, d = get("/historical/cutoff")
 show("historical cutoff", {"code": code, "body": d})
