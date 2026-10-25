@@ -476,6 +476,65 @@ class EngineTests(TempHome):
                          [(ev["markets"][0]["ticker"], "no"), (ev["markets"][1]["ticker"], "yes")])
         self.assertEqual(c.orders[0][2], c.orders[1][2])
 
+    # ---- legging: the second leg can come up short ----
+
+    def _live_pair(self, fill):
+        """A live (and verified) run where the thin NO on the earlier date goes first, and
+        fill(ticker, side, count, price) says how much each order gets."""
+        config.update({"strategies": {"date_ladder_arb": {"mode": "live", "verified": True}}})
+        ev = date_event()
+        c = fake_for(ev)
+        early, mid = ev["markets"][0]["ticker"], ev["markets"][1]["ticker"]
+        set_book(c, early, .40, .42, bid_size=15)   # NO on the earlier date is the thin leg
+        c.fill = fill
+        return c, early, mid
+
+    def test_a_short_second_leg_stops_the_bot_and_the_naked_leg_fits_max_per_trade(self):
+        c, early, mid = self._live_pair(lambda t, side, n, p: n if not c.orders else n // 2)   # fill runs before the log
+        s = engine.run_once(c)
+        self.assertFalse(s["ok"])
+        self.assertIn("half-built", config.load()["disabled_reason"])   # tripped: nothing more trades
+        self.assertFalse(config.load()["enabled"])
+        rows = db.query("SELECT ticker, side, count, filled, price FROM orders ORDER BY id")
+        self.assertEqual([(r["ticker"], r["side"]) for r in rows], [(early, "no"), (mid, "yes")])
+        self.assertEqual(rows[1]["count"], rows[0]["filled"])            # leg 2 asked for what leg 1 got
+        self.assertEqual(rows[1]["filled"], rows[0]["filled"] // 2)
+        first = rows[0]
+        naked = first["filled"] * first["price"] + fee(first["filled"], first["price"])
+        self.assertLessEqual(naked, config.load()["max_per_trade"] + 1e-9)   # the most it can lose
+        self.assertTrue(db.query("SELECT status FROM signals")[0]["status"].startswith("stranded:"))
+
+    def test_a_second_leg_that_fills_nothing_stops_too(self):
+        c, early, mid = self._live_pair(lambda t, side, n, p: n if not c.orders else 0)
+        s = engine.run_once(c)
+        self.assertFalse(s["ok"])
+        self.assertIn("half-built", config.load()["disabled_reason"])
+
+    def test_a_part_filled_first_leg_shrinks_the_second(self):
+        c, early, mid = self._live_pair(lambda t, side, n, p: min(n, 5) if not c.orders else n)
+        s = engine.run_once(c)
+        self.assertTrue(s["ok"], s)
+        asked = [o[2] for o in c.orders]
+        self.assertGreater(asked[0], 5)
+        self.assertEqual(asked[1], 5)                                     # asked for what leg 1 got
+        self.assertEqual(config.load()["disabled_reason"], "")
+
+    def test_a_first_leg_that_fills_nothing_buys_nothing_else(self):
+        c, early, mid = self._live_pair(lambda t, side, n, p: 0)
+        s = engine.run_once(c)
+        self.assertTrue(s["ok"], s)
+        self.assertEqual(len(c.orders), 1)
+        self.assertEqual(config.load()["disabled_reason"], "")
+
+    def test_promotion_never_turns_it_live(self):
+        # promote.py lifts paper-only flags on research edges. It never writes the config, so
+        # only the owner's two switches (mode live + verified) can put this on real money.
+        from kal.research import promote
+        before = config.load()["strategies"]["date_ladder_arb"]
+        promote.apply(config.load())
+        self.assertEqual(config.load()["strategies"]["date_ladder_arb"], before)
+        self.assertEqual(config.DEFAULTS["strategies"]["date_ladder_arb"], {"mode": "paper", "verified": False})
+
     def test_money_locked_past_max_arb_days_is_refused(self):
         config.update({"strategies": {"date_ladder_arb": {"mode": "paper"}}})
         c = fake_for(date_event(days=(40, 50, 55)))
