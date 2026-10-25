@@ -1,23 +1,74 @@
-# Prints how the real Kalshi API behaves (public data only: no key, no orders).
+# Side branch only (never merged): does the README's server install work on a fresh
+# Ubuntu 24.04, and does apt wait when Ubuntu's own updates hold its locks?
 name: api-probe
 
 on:
   workflow_dispatch:
-  push:
-    branches: [main]
-    paths: ["tools/api_probe.py", ".github/workflows/api-probe.yml"]
 
 permissions:
   contents: read
 
 jobs:
-  probe:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
+  clean:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - run: pip install requests
-      - run: python tools/api_probe.py
+      - name: README step 5, exactly (code from GitHub main)
+        run: |
+          sudo git clone https://github.com/rohanmalhotra0/kal.git /opt/kal
+          sudo bash /opt/kal/deploy/install.sh 2>&1 | sed -E 's/(Dashboard password: ).*/\1(hidden)/; s/(kal-)[a-z0-9]{20}/\1(hidden)/g'
+          echo "install rc=${PIPESTATUS[0]}"
+      - name: Service, timers, files
+        if: always()
+        run: |
+          systemctl is-enabled kal kal-watch.timer kal-update.timer || true
+          systemctl is-active kal kal-watch.timer || true
+          sudo ls -la /var/lib/kal /etc/kal | sed -E 's/kal-[a-z0-9]{20}/kal-(hidden)/g'
+          sudo journalctl -u kal --no-pager | tail -30
+          id kal; id kal-stage
+      - name: kal doctor (no key yet)
+        if: always()
+        run: sudo kal doctor; echo "doctor rc=$?"
+      - name: kal status
+        if: always()
+        run: sudo kal status; echo "rc=$?"
+      - name: kal setup with a throwaway key (Kalshi must refuse it)
+        if: always()
+        run: |
+          openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out /tmp/kalshi.pem 2>/dev/null
+          ls -la /tmp/kalshi.pem
+          printf '%s\n' 11111111-2222-3333-4444-555555555555 /tmp/kalshi.pem practice 300 no no | sudo kal setup; echo "setup rc=$?"
+          sudo ls -la /var/lib/kal
+      - name: Re-run the installer (must be safe)
+        if: always()
+        run: |
+          sudo bash /opt/kal/deploy/install.sh > /tmp/second.log 2>&1; echo "second install rc=$?"
+          tail -5 /tmp/second.log
+          sudo kal status; echo "rc=$?"
+      - name: Bot stays off
+        if: always()
+        run: sudo kal health; echo "health rc=$?"
+
+  locks:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: apt while another apt holds its locks (like a new droplet's own updates)
+        run: |
+          hold() { sudo python3 -c "import fcntl,sys,time; f=open(sys.argv[1],'a'); fcntl.lockf(f, fcntl.LOCK_EX); time.sleep(40)" "$1" & sleep 2; }
+          apt-get --version | head -1
+          echo "--- frontend lock held, plain apt-get install"
+          hold /var/lib/dpkg/lock-frontend
+          time sudo apt-get install -y -qq chrony; echo "rc=$?"; wait
+          echo "--- frontend lock held, apt-get -o DPkg::Lock::Timeout=120 install"
+          hold /var/lib/dpkg/lock-frontend
+          time sudo apt-get -o DPkg::Lock::Timeout=120 install -y -qq chrony; echo "rc=$?"; wait
+          echo "--- lists lock held, plain apt-get update"
+          hold /var/lib/apt/lists/lock
+          time sudo apt-get update -qq; echo "rc=$?"; wait
+          echo "--- lists lock held, apt-get -o DPkg::Lock::Timeout=120 update"
+          hold /var/lib/apt/lists/lock
+          time sudo apt-get -o DPkg::Lock::Timeout=120 update -qq; echo "rc=$?"; wait
+          echo "--- dpkg lock held (not frontend), timeout install"
+          hold /var/lib/dpkg/lock
+          time sudo apt-get -o DPkg::Lock::Timeout=120 install -y -qq --reinstall chrony; echo "rc=$?"; wait
