@@ -87,10 +87,15 @@ SSHD
 # apt-get gives up at once when a lock is held. So wait for them (up to 10 minutes).
 apt_get() { apt-get -o DPkg::Lock::Timeout=600 "$@"; }
 apt_update() {
-  local i tries="${KAL_APT_TRIES:-40}"
+  local i err said="" tries="${KAL_APT_TRIES:-40}"
   for i in $(seq 1 "$tries"); do
-    apt_get update -qq && return 0
-    [ "$i" = 1 ] && echo "Ubuntu is busy updating itself. Waiting for it (up to 10 minutes)..."
+    err=$(apt_get update -qq 2>&1 >/dev/null) && return 0
+    case "$err" in
+      *"Could not get lock"*)    # Ubuntu's own updates: say so once, not every try
+        [ -n "$said" ] || echo "Ubuntu is busy updating itself. Waiting for it (up to 10 minutes)..."
+        said=1 ;;
+      *) printf '%s\n' "$err" >&2 ;;
+    esac
     [ "$i" = "$tries" ] || sleep "${KAL_APT_PAUSE:-15}"
   done
   die "apt-get update keeps failing. Wait 5 minutes, then run this again."
@@ -243,6 +248,7 @@ Done. The bot is installed but OFF. It will not trade until you turn it on.
 Next steps (README.md, "Turn it on"):
  1. Send your key file. On your computer:
                         scp ~/Downloads/YOUR_KEY_FILE root@THIS_SERVER:/tmp/kalshi.pem
+    Or here:            nano /tmp/kalshi.pem   (paste the key file's text, then Ctrl+O, Enter, Ctrl+X)
  2. Answer 5 questions: sudo kal setup
     Then:               sudo rm /tmp/kalshi.pem
  3. Phone alerts:       install the ntfy app, subscribe to the topic below.

@@ -83,14 +83,14 @@ class InstallHelpers(unittest.TestCase):
         self.assertIn("STILL ON", r.stdout)
 
     # ---- a new server's own updates hold apt's locks: wait, don't stop ----
-    def _apt(self, fails):
+    def _apt(self, fails, error="E: Could not get lock /var/lib/apt/lists/lock"):
         """Run --apt-update with a fake apt-get that fails `fails` times, then works."""
         bindir = os.path.join(self.d, "bin")
         calls = os.path.join(self.d, "apt.log")
         _write(os.path.join(bindir, "apt-get"),
                f'#!/bin/sh\necho "$*" >> {calls}\n'
                f'n=$(wc -l < {calls})\n[ "$n" -gt {fails} ] && exit 0\n'
-               'echo "E: Could not get lock /var/lib/apt/lists/lock" >&2\nexit 100\n', x=True)
+               f'echo "{error}" >&2\nexit 100\n', x=True)
         env = dict(PATH=bindir + ":/usr/bin:/bin", KAL_APT_TRIES="4", KAL_APT_PAUSE="0")
         r = self._emit("--apt-update", env)
         return r, _read(calls).splitlines()
@@ -101,7 +101,14 @@ class InstallHelpers(unittest.TestCase):
         self.assertEqual(len(calls), 3)
         for c in calls:   # every try also waits on the lock itself
             self.assertEqual(c, "-o DPkg::Lock::Timeout=600 update -qq")
-        self.assertIn("Ubuntu is busy updating itself", r.stdout)
+        self.assertEqual(r.stdout.count("Ubuntu is busy updating itself"), 1)   # said once
+        self.assertNotIn("Could not get lock", r.stdout + r.stderr)
+
+    def test_apt_shows_any_other_error(self):
+        r, calls = self._apt(fails=1, error="E: Failed to fetch http://archive.ubuntu.com 404")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("Failed to fetch", r.stderr)
+        self.assertNotIn("Ubuntu is busy", r.stdout)
 
     def test_apt_gives_up_in_plain_words(self):
         r, calls = self._apt(fails=99)
