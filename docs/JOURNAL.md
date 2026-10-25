@@ -2,6 +2,22 @@
 
 Newest first. Each 2-hour check-in adds one entry: what it checked, what it found, links.
 
+## 2026-10-25 18:47 UTC — check-in: all green; date ladders answered the coordinator's 5 checks
+
+- Checked: CI green on main b3e2fff. market-check green on 0e04a90:
+  - self-test passes;
+  - scan finds 0 trades in all 6 strategies, nothing suspicious;
+  - research: 3 series, 0 new edges, 0 failures;
+  - coverage: 336 busy markets (floor 25).
+  No status report yet: the server is still being set up.
+- Idea this check-in: #6 date ladders, PR #21 (CI green, a second independent review running).
+  - Live needs `mode: live` and `verified`. Promotion never writes the config.
+  - A short second leg trips the bot, and the naked leg stays under `max_per_trade` (new tests).
+  - Real Drake gap: +18c a pair before fees, +15c after both legs' fees (17.6%).
+  - 6 of the 7 real gap hours pass the stricter checks. Hegseth is refused for its
+    death "fair price" rule.
+  https://github.com/rohanmalhotra0/kal/pull/21#issuecomment-6401661021
+
 ## 2026-10-25 18:40 UTC — server up, installer fixed, all finished PRs merged, date ladders built
 
 - **Server:** the owner made the droplet (2 GB, NYC1, Ubuntu 24.04, $12 a month). He is doing
