@@ -227,7 +227,8 @@ class DateLadderTests(unittest.TestCase):
 
     def test_custom_strike_holding_the_deadline_still_counts(self):
         # Real Kalshi: {"Date": "Sep 1, 2026", "Player": "Kade Anderson"}, each market its own date.
-        for key, form in (("Date", "{d}"), ("Date", "Before {d}"), ("Before", "{d}")):
+        for key, form in (("Date", "{d}"), ("Date", "Before {d}"), ("Before", "{d}"),
+                          ("date", "before {d} at 12:00 AM ET")):
             ev = self._custom(date_event(), key, form, Player="Kade Anderson")
             self.assertEqual(len(self.scan(ev)), 1, (key, form))
 
@@ -291,14 +292,44 @@ class DateLadderTests(unittest.TestCase):
                      "If Drake releases an album before {d}, then the market resolves to No."):
             self.assertEqual(self.scan(self._rules(date_event(), text)), [], text)
 
-    def test_windows_that_start_per_market_are_not_a_ladder(self):
-        # Each market counts from its own listing: something between two listings is YES on
-        # the earlier market only, and the pair pays nothing.
-        for text in ("If Trump declares a national emergency after issuance and before {d}, then the market "
-                     "resolves to Yes.",
-                     "If a budget resolution passes since this market was issued and before {d}, then the "
-                     "market resolves to Yes."):
+    LISTED = "If Drake releases a new album after issuance and before {d}, then the market resolves to Yes."
+
+    def _listed(self, opens):
+        ev = self._rules(date_event(), self.LISTED)   # the real Drake wording (KXALBUMRELEASEDATE-NEWDRA)
+        for m, t in zip(ev["markets"], opens):
+            if t is not None:
+                m["open_time"] = iso(t)
+        return ev
+
+    def test_after_issuance_windows_pair_when_listed_together(self):
+        t = time.time() - 30 * DAY
+        ev = self._listed((t, t, t))
+        sigs = self.scan(ev)
+        self.assertEqual(len(sigs), 1)
+        self.assertLockedIn(sigs[0], ev["markets"])
+        ev = self._listed((t, t - DAY, t - DAY))   # later deadlines listed first: still nested
+        self.assertEqual(len(self.scan(ev)), 1)
+
+    def test_after_issuance_windows_dont_pair_when_the_later_market_was_listed_later(self):
+        # Each market counts from its own listing: something between the two listings is YES
+        # on the earlier market only, and the pair pays nothing.
+        t = time.time() - 30 * DAY
+        self.assertEqual(self.scan(self._listed((t, t + DAY, t + DAY))), [])
+        self.assertEqual(self.scan(self._listed((None, None, None))), [])   # no listing time: no trade
+        for text in ("If a budget resolution passes since this market was issued and before {d}, then the "
+                     "market resolves to Yes.",
+                     "If Trump declares a national emergency after Issuance and before {d}, then the market "
+                     "resolves to Yes."):
             self.assertEqual(self.scan(self._rules(date_event(), text)), [], text)
+
+    def test_a_fixed_start_date_the_same_for_all_still_pairs(self):
+        ev = self._rules(date_event(), "If Young Thug and Gunna make a song together after Sep 30, 2025 and "
+                                       "before {d}, then the market resolves to Yes.")
+        self.assertEqual(len(self.scan(ev)), 1)
+
+    def test_a_full_stop_before_then_is_fine(self):
+        ev = self._rules(date_event(), "If Drake releases a new album before {d}. Then the market resolves to Yes.")
+        self.assertEqual(len(self.scan(ev)), 1)
 
     def test_buckets_with_their_own_start_dates_are_not_a_ladder(self):
         ev = date_event()
