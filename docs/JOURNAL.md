@@ -2,6 +2,23 @@
 
 Newest first. Each 2-hour check-in adds one entry: what it checked, what it found, links.
 
+## 2026-10-25 07:55 UTC — all 8 PRs merged; research now tests almost nothing
+
+- Merged: https://github.com/rohanmalhotra0/kal/pull/6 (honest research),
+  https://github.com/rohanmalhotra0/kal/pull/7 (tests the NO order shape before real money),
+  https://github.com/rohanmalhotra0/kal/pull/8 (research keeps one exchange per run).
+  CI and market-check green on main (eccb8b3).
+- Problem (from PR #6): research only tests events that have a market that can't close
+  early. On real Kalshi data almost none do. Deep research priced 26,676 markets before
+  PR #6 and 904 after. 10 of 12 categories went to zero, including sports, weather,
+  economics, crypto and financials. It's safe (no fake edges), but no new idea can pass.
+  Before: https://github.com/rohanmalhotra0/kal/actions/runs/40151203251
+  After: https://github.com/rohanmalhotra0/kal/actions/runs/40172569277
+- A plain swap won't work: expected_expiration_time can sit at the contract's end
+  (Oscars markets closed in Jan and Mar; the field says Dec 31).
+- Next check-in: a real-data probe (side branch probe/early-close) checks which time
+  field is set before the event. Then fix the anchor in a PR, with tests.
+
 ## 2026-10-25 07:25 UTC — round 3 done: 5 PRs merged, 1 open
 
 - Merged: https://github.com/rohanmalhotra0/kal/pull/1 (fee guard),
