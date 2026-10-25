@@ -201,7 +201,6 @@ fee_types = collections.Counter((s.get("fee_type"), s.get("fee_multiplier")) for
 show("fee_type / fee_multiplier counts", {str(k): v for k, v in fee_types.most_common(20)})
 cats = collections.Counter(s.get("category") for s in ser)
 show("series categories", dict(cats.most_common(30)))
-sys.exit(0)
 
 # ---- What can break a "locked-in" NO basket? (settlement floors, fair-price rules, netting)
 events, cursor = [], None
@@ -248,3 +247,4 @@ for m in markets:
                 examples[w].append(f"{m.get('ticker')}: ...{text[max(0, i - 160): i + 160]}...")
 show(f"rule wording in {len(markets)} markets of mutually exclusive events", dict(hits.most_common()))
 show("rule wording examples", dict(examples), limit=8000)
+sys.exit(0)
