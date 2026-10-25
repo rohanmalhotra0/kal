@@ -40,6 +40,18 @@ def pick(m):
 code, d = get("/exchange/status")
 show("exchange status", {"code": code, "body": d})
 
+# The demo (fake money) exchange the setup guide tells people to try first
+for demo in ("https://demo-api.kalshi.co/trade-api/v2", "https://demo-api.elections.kalshi.com/trade-api/v2"):
+    try:
+        r = requests.get(demo + "/exchange/status", timeout=20)
+        show(f"demo exchange {demo}", {"code": r.status_code, "body": r.text[:300]})
+        r = requests.get(demo + "/markets", params={"limit": 2, "status": "open"}, timeout=20)
+        show(f"demo markets {demo}", {"code": r.status_code,
+                                      "tickers": [m.get("ticker") for m in r.json().get("markets", [])]
+                                      if r.ok else r.text[:200]})
+    except Exception as e:
+        show(f"demo exchange {demo}", {"error": str(e)[:300]})
+
 code, d = get("/markets", limit=3, status="open")
 ms = d.get("markets", []) if isinstance(d, dict) else []
 show("market keys (first open market)", sorted(ms[0].keys()) if ms else d)
