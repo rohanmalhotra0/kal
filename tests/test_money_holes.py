@@ -687,6 +687,30 @@ class FairPriceWordingTests(TempHome):
                 self.assertEqual(self._live_orders_for(rules), [])
 
     def test_the_cancelled_game_clause_still_reads_with_odd_spacing(self):
-        m = {"rules_secondary": STANDARD.replace("fair price", "fair\nprice").replace(" will ", "  will ")}
+        m = {"rules_secondary": STANDARD.replace(" will ", "  will ").replace("fair price", "fair\u00a0price")}
+        self.assertFalse(base.plain_payouts([m]))
+        self.assertTrue(base.fair_price_only_if_cancelled([m]))   # paper only, as a bet
+
+    def test_lines_with_no_full_stop_stay_apart(self):
+        # Real tennis and golf rules end lines with no full stop. The clause is still its own line.
+        m = {"rules_secondary": "If a player retires, the opponent wins\n" + STANDARD + "\nKalshi is not affiliated"}
+        self.assertTrue(base.fair_price_only_if_cancelled([m]))
+
+    def test_a_clause_split_across_lines_is_not_trusted(self):
+        m = {"rules_secondary": STANDARD.replace("fair price", "fair\nprice")}
+        self.assertFalse(base.plain_payouts([m]))
+        self.assertFalse(base.fair_price_only_if_cancelled([m]))   # skipped, not even paper
+
+    def test_the_election_clause_is_paper_only(self):
+        # Seen on 200+ real election events (2026-10-25); the old exact-text check missed it.
+        m = {"rules_secondary": "Party affiliation is set when elected. If the election is postponed beyond one "
+                                "year from the original date or cancelled entirely, the market resolves to the "
+                                "last fair market price. Only seats actually contested are counted."}
         self.assertFalse(base.plain_payouts([m]))
         self.assertTrue(base.fair_price_only_if_cancelled([m]))
+
+    def test_golf_fair_market_value_is_not_trusted(self):
+        m = {"rules_secondary": "If a golfer withdraws:\nTournament Winner markets will resolve to No\n"
+                                "Head-to-Head markets will resolve to Fair Market Value\n\nKalshi is not affiliated"}
+        self.assertFalse(base.plain_payouts([m]))
+        self.assertFalse(base.fair_price_only_if_cancelled([m]))
