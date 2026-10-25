@@ -5,12 +5,12 @@ So its spendable money is budget + its realized profit (profit only counts if
 reinvest_profits is on; losses always count), minus what's tied up in its open
 positions. Built only from our own fills plus public settlement results, so a
 deposit, a manual trade, or a schema change in Kalshi's settlement feed can't
-inflate it.
+inflate it. Kalshi's fills are read only to lower it (contracts sold outside the bot).
 """
 import time
 
 from . import db
-from .client import fee, num, price, ts, yes_payout
+from .client import UnknownSettlement, fee, num, price, ts, yes_payout
 
 OPEN = ("active", "open")
 
@@ -81,13 +81,60 @@ def settle(client):
         paid = yes_payout(markets.get(ticker, {}))  # raises UnknownSettlement: the engine trips
         if paid is None:
             continue
+        if getattr(client, "can_trade", False) and _write_off_sold_outside(client, ticker, legs):
+            legs = [r for r in open_positions() if r["ticker"] == ticker]
         revenue = sum(r["count"] * (paid if r["side"] == "yes" else 1 - paid) for r in legs)
+        revenue = max(0.0, revenue - _restored_gain(ticker, paid))
         cost = sum(r["cost"] for r in legs)
         result = "yes" if paid == 1 else "no" if paid == 0 else f"{paid:.4f}"
         db.insert("settlements", ticker=ticker, settled_ts=time.time(), result=result,
                   revenue=revenue, cost=cost, pnl=revenue - cost)
         n += 1
     return n
+
+
+def _write_off_sold_outside(client, ticker, legs):
+    """Before a market's payout is booked, write off the bot's contracts on it that Kalshi's
+    fills show someone sold outside the bot (or netted away by buying the other side). A run
+    sees that in Kalshi's positions only while the market trades, so a sale while the bot
+    was stopped, or just before the close, would be booked as paid. Fills only ever lower
+    the books. Returns True if it wrote anything off."""
+    mine = {r["order_id"] for r in db.query("SELECT DISTINCT order_id FROM orders WHERE ticker = ? "
+                                            "AND order_id != ''", ticker)}
+    toward_yes = 0.0   # how much everyone else's fills moved the account's position to YES
+    try:
+        for f in client.fills(ticker=ticker):
+            oid, t, side, action, n, _, _ = _parse_fill(f)
+            if t == ticker and oid not in mine:
+                toward_yes += n if (side == "yes") == (action == "buy") else -n
+    except CatchUpError as e:
+        raise UnknownSettlement(f"{ticker}: can't read Kalshi's fills to check what the bot still held ({e})")
+    lost = 0.0
+    for r in legs:
+        n = toward_yes if r["side"] == "no" else -toward_yes
+        if n > 0.5:
+            lost += write_off(ticker, r["side"], n, "sold outside the bot before it settled (Kalshi's fills)")
+    if lost:
+        try:
+            from . import notify
+            notify.send("kal wrote off some contracts",
+                        f"Kalshi's fills show the bot's contracts on {ticker} were sold outside the bot "
+                        f"before it settled. It counted them as lost (${lost:.2f}). If you sold them, "
+                        f"that's fine.", tags=("warning",))
+        except Exception:
+            pass   # the write-off is booked either way; an alert failure can't undo it
+    return lost > 0
+
+
+def _restored_gain(ticker, paid):
+    """What orders added after a restore (catch_up) make over their cost on a settled market.
+    Some may be the owner's own trades, so only their losses count, never their gains."""
+    gain = 0.0
+    for r in db.query("SELECT side, filled, price FROM orders WHERE ticker = ? AND strategy = 'restored' "
+                      "AND filled > 0", ticker):
+        pay = r["filled"] * (paid if r["side"] == "yes" else 1 - paid)
+        gain += max(0.0, pay - r["filled"] * r["price"] - fee(r["filled"], r["price"]))
+    return gain
 
 
 def payout_of(result, side):
@@ -209,8 +256,9 @@ def catch_up(client):
     """After the books were restored from a backup, add the buys Kalshi shows since that
     backup's day that the books don't have, at the highest price paid. Fills from the
     owner's own trades in that window get counted too: the safe direction, since they only
-    make the bot think it spent more. Returns how many orders were added (0 if no restore
-    is waiting). Raises CatchUpError if a fill can't be read: never guess."""
+    make the bot think it spent more, and settle() never books their gains, only their
+    losses. Returns how many orders were added (0 if no restore is waiting). Raises
+    CatchUpError if a fill can't be read: never guess."""
     gap = db.get("restored")
     if not gap:
         return 0

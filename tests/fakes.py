@@ -92,8 +92,8 @@ class FakeKalshi:
     def settlements(self, min_ts=None):
         return []
 
-    def fills(self, min_ts=None):
-        return self.fill_list
+    def fills(self, min_ts=None, ticker=None):
+        return [f for f in self.fill_list if ticker is None or f.get("ticker") == ticker]
 
     def buy(self, ticker, side, count, limit_price, client_order_id=None):
         n = self.fill(ticker, side, count, limit_price)

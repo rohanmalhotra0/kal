@@ -6,8 +6,14 @@ from ..client import fee, ts
 
 # Rules that let Kalshi settle at the last traded price or a "fair" price of its choosing
 # (seen on real markets: death clauses on "leader leaves office" events). Then a market
-# can pay anything from $0 to $1, and a "locked-in" basket can lose.
-FAIR_PRICE_WORDS = ("last traded price", "fair price", "fair value")
+# can pay anything from $0 to $1, and a "locked-in" basket can lose. Matched on _plain()
+# text, so a doubled space or a line break ("fair\nprice") can't hide it.
+FAIR_PRICE = re.compile(r"fair (?:market )?(?:price|value)|last traded? price|price of the last trade")
+
+
+def _plain(text):
+    """Lowercase, with each run of spaces and line breaks (no-break spaces too) as one space."""
+    return " ".join((text or "").split()).lower()
 
 
 def plain_payouts(markets):
@@ -20,8 +26,7 @@ def plain_payouts(markets):
             return False
         if m.get("settlement_bounds_type", "default") != "default":
             return False
-        rules = f"{m.get('rules_primary') or ''} {m.get('rules_secondary') or ''}".lower()
-        if any(w in rules for w in FAIR_PRICE_WORDS):
+        if FAIR_PRICE.search(_plain(f"{m.get('rules_primary') or ''} {m.get('rules_secondary') or ''}")):
             return False
     return True
 
@@ -80,6 +85,14 @@ CANCELLATION_CLAUSES = [re.compile(p, re.I) for p in (
     r"price in accordance with the rules\.",
     r"if no data is available at the end of this period, all markets will resolve to the last fair price "
     r"determined by kalshi\.",
+    r"if the election is postponed beyond one year from the original date or cancell?ed entirely, the market "
+    r"resolves to the last fair market price\.",
+    # Esports (CS2, Dota 2, LoL, Valorant, ...) and darts, seen on real events 2026-10-25.
+    rf"if (?:the relevant|a) (?:match or map|match|map) is (?:cancell?ed before play begins|forfeited before any "
+    rf"play occurs(?: in the map)?|postponed and not started within (?:{_WINDOW}) of its originally scheduled start "
+    rf"time), the market will resolve to the fair market price\.",
+    r"if the cancell?ed match is not played, rescheduled, or declared a tie, the market will resolve to the fair "
+    r"market price\.",
 )]
 
 
@@ -91,18 +104,21 @@ def fair_price_only_if_cancelled(markets):
     """True if every market is binary with no payout floor or cap, and every sentence of its
     rules that names a fair or last traded price is one of CANCELLATION_CLAUSES, word for
     word. Such a market pays $0 or $1 unless a game is cancelled or never played (or no data
-    comes); then Kalshi picks the price, so a basket of them is not locked in. Fails closed:
-    any other fair-price sentence (a death clause, the exchange's discretion) means no."""
+    comes, or an election is called off); then Kalshi picks the price, so a basket of them is
+    not locked in. Fails closed: any other fair-price sentence (a death clause, the
+    exchange's discretion), or one split across a line break, means no."""
     for m in markets:
         if m.get("market_type", "binary") != "binary":
             return False
         if m.get("settlement_bounds_type", "default") != "default":
             return False
         for field in ("rules_primary", "rules_secondary"):   # apart: never one run-on sentence
-            for sentence in _sentences(m.get(field)):
-                if any(w in sentence.lower() for w in FAIR_PRICE_WORDS) and \
-                        not any(c.fullmatch(sentence) for c in CANCELLATION_CLAUSES):
-                    return False
+            text = m.get(field)
+            # Split first: many rules end lines with no full stop, and joining lines would
+            # glue a clause to the line before it.
+            clauses = [s for s in map(_plain, _sentences(text)) if any(c.fullmatch(s) for c in CANCELLATION_CLAUSES)]
+            if len(FAIR_PRICE.findall(_plain(text))) != sum(len(FAIR_PRICE.findall(s)) for s in clauses):
+                return False
     return True
 
 

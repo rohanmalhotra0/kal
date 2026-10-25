@@ -1,14 +1,17 @@
-"""Holes the round-3 reviewers found in the money path, each shown and then closed."""
+"""Holes the reviewers found in the money path, each shown and then closed."""
+import io
 import json
 import time
 import unittest
+from contextlib import redirect_stdout
 from unittest import mock
 
 import requests
 
-from kal import client, config, db, engine, ledger, maintenance, paper, risk
+import kal.__main__ as cli
+from kal import client, config, db, engine, gate, ledger, maintenance, paper, risk
 from kal.client import KalshiError
-from kal.strategies import basket_arb
+from kal.strategies import base, basket_arb
 from tests.fakes import FakeKalshi
 from tests.helpers import TempHome, orders_proven
 from tests.test_core import arb_event, fake_with_arb
@@ -409,3 +412,333 @@ class InterestTests(TempHome):
             c._balance = balance
             self.assertEqual((ledger.capital(cfg), ledger.available(cfg), ledger.equity(c, cfg)), before)
         self.assertEqual(before[1], 300.0)
+
+
+# ---------- holes the 2026-10-25 evening audit found ----------
+
+def _all_off():
+    return {k: {"mode": "off"} for k in config.DEFAULTS["strategies"]}
+
+
+class RestoredOrdersTests(TempHome):
+    """After a restore, catch_up imports every buy since the backup, the owner's own too.
+    Their losses count against the bot; their gains never count, so the owner's winnings
+    can't become money the bot may lose."""
+
+    def setUp(self):
+        super().setUp()
+        config.update({"enabled": True, "budget": 300, "strategies": _all_off()})
+        db.put("books_exist", True)
+        maintenance.backup()
+        maintenance.restore(maintenance.backups()[0][0])
+        self.c = FakeKalshi(balance=1000)
+        # After the backup, the owner bought 100 YES at $0.10 by hand on the same account.
+        self.c.fill_list = [{"order_id": "own1", "ticker": "OWN-1", "side": "yes", "action": "buy",
+                             "count_fp": "100.00", "yes_price_dollars": "0.1000",
+                             "created_time": "2026-10-24T10:00:00Z"}]
+        self.c.position_list = [{"ticker": "OWN-1", "position": 100, "exposure": 10}]
+        self.c.market_info["OWN-1"] = {"ticker": "OWN-1", "status": "active", "yes_bid_dollars": "0.1000"}
+        config.clear_trip()
+        config.update({"enabled": True})
+        engine.run_once(self.c)   # catch_up adds it as the bot's
+        self.assertEqual(config.load()["disabled_reason"], "")
+        self.cost = 10 + client.fee(100, 0.10)
+
+    def _settle(self, result):
+        self.c.market_info["OWN-1"] = {"ticker": "OWN-1", "status": "finalized", "result": result,
+                                       "settlement_value_dollars": "1.0000" if result == "yes" else "0.0000"}
+        self.c.position_list = []
+        engine.run_once(self.c)
+
+    def test_a_win_on_an_imported_order_never_grows_capital(self):
+        self._settle("yes")   # the owner's $10 bet pays $100
+        self.assertAlmostEqual(ledger.realized(), 0)
+        self.assertLessEqual(ledger.capital(config.load()), 300 + 1e-9)
+
+    def test_a_loss_on_an_imported_order_still_counts(self):
+        self._settle("no")
+        self.assertAlmostEqual(ledger.realized(), -self.cost)
+
+
+class DailyStopTests(TempHome):
+    """README: "Lose over 10% of the budget in a day, and it turns itself off." The day is
+    measured by profit and loss, so a budget change can't hide a loss or fake one."""
+
+    def setUp(self):
+        super().setUp()
+        config.update({"enabled": True, "budget": 300, "strategies": _all_off()})
+        # 200 NO at $0.50 ($103.50 with the fee), marked at $0.50.
+        db.insert("orders", ticker="M-1", side="no", count=200, price=0.5, filled=200,
+                  status="executed", order_id="o1", client_order_id="c1")
+        self.c = FakeKalshi(balance=1000)
+        self.c.market_info["M-1"] = {"ticker": "M-1", "status": "active", "no_bid_dollars": "0.5000"}
+        self.c.position_list = [{"ticker": "M-1", "position": -200, "exposure": 100}]
+        engine.run_once(self.c)   # the UTC day starts here
+        self.assertEqual(config.load()["disabled_reason"], "")
+
+    def _lose_it(self):   # M-1 settles against the bot: the $100 it was marked at is gone
+        self.c.market_info["M-1"] = {"ticker": "M-1", "status": "finalized", "result": "yes",
+                                     "settlement_value_dollars": "1.0000"}
+        self.c.position_list = []
+        engine.run_once(self.c)
+
+    def test_a_bad_day_stops_it(self):
+        self._lose_it()
+        self.assertIn("daily limit", config.load()["disabled_reason"])
+
+    def test_a_same_day_budget_raise_doesnt_hide_the_loss(self):
+        config.update({"budget": 600})
+        self._lose_it()
+        # $100 lost today is over 10% of even the new $600 budget.
+        self.assertIn("daily limit", config.load()["disabled_reason"])
+
+    def test_a_budget_cut_is_not_a_loss(self):
+        config.update({"budget": 150})
+        engine.run_once(self.c)
+        self.assertEqual(config.load()["disabled_reason"], "")
+
+    def test_a_day_that_started_before_this_change_still_counts(self):
+        start = db.get("day_start")
+        db.put("day_start", {"day": start["day"], "equity": start["equity"]})   # the old record, no pnl
+        self._lose_it()
+        self.assertIn("daily limit", config.load()["disabled_reason"])
+
+
+class SoldThenSettledTests(TempHome):
+    """A run sees contracts sold outside the bot in Kalshi's positions only while the market
+    trades. Kalshi's fills still show the sale after that, so the payout isn't booked."""
+
+    def setUp(self):
+        super().setUp()
+        config.update({"enabled": True, "budget": 300, "strategies": _all_off()})
+        db.insert("orders", ticker="S-1", side="no", count=20, price=0.9, filled=20,
+                  status="executed", order_id="o1", client_order_id="c1")
+        self.cost = 18 + client.fee(20, 0.9)
+        self.c = FakeKalshi(balance=1000)
+        self.c.fill_list = [self.fill("o1", "buy")]   # the bot's own buy
+        self.c.market_info["S-1"] = {"ticker": "S-1", "status": "active", "no_bid_dollars": "0.9000"}
+        self.c.position_list = [{"ticker": "S-1", "position": -20, "exposure": 18}]
+        engine.run_once(self.c)   # books match Kalshi
+        self.assertEqual(config.load()["disabled_reason"], "")
+
+    def fill(self, oid, action, side="no", n=20, p=0.9):
+        return {"order_id": oid, "ticker": "S-1", "side": side, "action": action, "count_fp": f"{n:.2f}",
+                f"{side}_price_dollars": f"{p:.4f}", "created_time": "2026-10-25T10:00:00Z"}
+
+    def _settle_no(self):
+        self.c.position_list = []
+        self.c.market_info["S-1"] = {"ticker": "S-1", "status": "finalized", "result": "no",
+                                     "settlement_value_dollars": "0.0000"}
+        engine.run_once(self.c)
+
+    def test_sold_while_the_bot_was_stopped(self):
+        # A half-built-basket stop says "Check open positions on Kalshi": the owner sells the
+        # leg, the market settles, then the owner presses Reset.
+        config.trip("basket left half-built on S. Check open positions on Kalshi.")
+        self.c.fill_list.append(self.fill("owner-1", "sell"))
+        config.clear_trip()
+        config.update({"enabled": True})
+        self._settle_no()
+        self.assertAlmostEqual(ledger.realized(), -self.cost)   # never the $20 payout
+
+    def test_sold_just_before_the_close(self):
+        self.c.fill_list.append(self.fill("owner-1", "sell"))
+        self.c.position_list = []
+        self.c.market_info["S-1"] = {"ticker": "S-1", "status": "closed"}
+        engine.run_once(self.c)   # closed: Kalshi may be paying out, so nothing written off yet
+        self.assertAlmostEqual(ledger.realized(), 0)
+        self._settle_no()
+        self.assertAlmostEqual(ledger.realized(), -self.cost)
+
+    def test_buying_the_other_side_nets_contracts_away(self):
+        self.c.fill_list.append(self.fill("owner-1", "buy", side="yes", n=5, p=0.1))
+        self._settle_no()
+        self.assertAlmostEqual(ledger.realized(), 15 - self.cost)   # 15 NO left were paid
+
+    def test_the_owners_own_round_trip_changes_nothing(self):
+        self.c.fill_list += [self.fill("owner-1", "buy", n=10), self.fill("owner-2", "sell", n=10)]
+        self._settle_no()
+        self.assertAlmostEqual(ledger.realized(), 20 - self.cost)
+        self.assertEqual(db.query("SELECT COUNT(*) AS n FROM writeoffs")[0]["n"], 0)
+
+    def test_a_fill_it_cant_read_stops_it(self):
+        self.c.fill_list.append({"order_id": "x", "ticker": "S-1", "count_fp": "5.00"})
+        self._settle_no()
+        self.assertIn("can't read Kalshi's fills", config.load()["disabled_reason"])
+        self.assertEqual(db.query("SELECT COUNT(*) AS n FROM settlements")[0]["n"], 0)   # nothing guessed
+
+
+class DemoPracticeTests(TempHome):
+    """Strategy modes are one setting for both exchanges. One turned live for practice on
+    demo (fake money) goes back to paper on the switch to prod, and the owner is told."""
+
+    def cli(self, *argv):
+        out = io.StringIO()
+        with redirect_stdout(out):
+            code = cli.main(list(argv))
+        return code, out.getvalue()
+
+    def test_a_strategy_live_for_demo_practice_buys_nothing_real(self):
+        from tests.test_arb_strategies import fake_for, ladder_event, set_book
+        config.update({"env": "demo", "budget": 60, "max_per_arb": 30, "strategies": _all_off()})
+        config.update({"strategies": {"ladder_arb": {"mode": "live"}}})   # fake-money practice
+        config.switch({"env": "prod"})                                    # then real money
+        self.assertEqual(config.load()["strategies"]["ladder_arb"]["mode"], "paper")
+        config.update({"enabled": True})
+        orders_proven("prod")
+        c = fake_for(ladder_event())
+        set_book(c, "LAD-60", .62, .64, bid_size=15)
+        s = engine.run_once(c)
+        self.assertTrue(s["ok"], s)
+        self.assertEqual(c.orders, [])
+
+    def test_basket_arb_stays_live(self):   # live by default: the owner chose it on prod
+        config.update({"env": "demo"})
+        config.switch({"env": "prod"})
+        self.assertEqual(config.load()["strategies"]["basket_arb"]["mode"], "live")
+
+    def test_going_to_demo_changes_no_mode(self):
+        config.update({"strategies": {"ladder_arb": {"mode": "live"}}})   # on prod, on purpose
+        config.switch({"env": "demo"})
+        self.assertEqual(config.load()["strategies"]["ladder_arb"]["mode"], "live")
+
+    def test_kal_on_says_what_trades_and_what_went_back(self):
+        config.update({"env": "demo", "budget": 300, "strategies": {"ladder_arb": {"mode": "live"}}})
+        code, text = self.cli("on", "--env", "prod")
+        self.assertEqual(code, 0)
+        self.assertIn("Back on paper for real money: ladder_arb", text)
+        self.assertIn("Live (real money): basket_arb.", text)
+
+
+class UnreadableReplyTests(TempHome):
+    """An immediate-or-cancel order that part-fills ends "canceled". A reply that says only
+    that can't be read as 0 filled: the order is looked up before anything else trades."""
+
+    def setUp(self):
+        super().setUp()
+        config.update({"enabled": True, "budget": 60, "max_per_arb": 30, "strategies": _all_off()})
+        config.update({"strategies": {"basket_arb": {"mode": "live"}}})
+        orders_proven()
+
+    def test_a_first_leg_reply_with_no_count_is_looked_up(self):
+        c = fake_with_arb()
+
+        def buy(ticker, side, count, price, client_order_id=None):
+            c.orders.append((ticker, side, count, price))
+            return {"order_id": f"o{len(c.orders)}", "status": "canceled"}
+        c.buy = buy
+        s = engine.run_once(c)
+        self.assertFalse(s["ok"], s)
+        self.assertEqual(len(c.orders), 1)   # nothing more bought
+        self.assertEqual([r["status"] for r in ledger.unresolved_orders()], ["unknown"])
+
+    def test_a_later_leg_reply_with_no_count_stops_the_bot(self):
+        c = fake_with_arb()
+        real_buy = c.buy
+
+        def buy(ticker, side, count, price, client_order_id=None):
+            if c.orders:
+                c.orders.append((ticker, side, count, price))
+                return {"order_id": f"o{len(c.orders)}", "status": "canceled"}
+            return real_buy(ticker, side, count, price, client_order_id)
+        c.buy = buy
+        engine.run_once(c)
+        self.assertIn("half-built", config.load()["disabled_reason"])
+
+    def test_the_test_orders_must_say_how_much_filled(self):
+        ok, detail, alarming = gate.judge("T", 0.5, {"order_id": "x", "status": "canceled"})
+        self.assertEqual((ok, alarming), (False, False))
+        self.assertIn("how much filled", detail)
+        ok, _, _ = gate.judge("T", 0.5, {"order_id": "x", "status": "canceled", "fill_count": "0.00"})
+        self.assertTrue(ok)
+
+
+STANDARD = ("If the game is cancelled or rescheduled to over 48 hours away, the market will resolve "
+            "to a fair price in accordance with the rules.")
+
+
+class FairPriceWordingTests(TempHome):
+    """plain_payouts keeps "Kalshi picks the price" events off real money. Spacing, line
+    breaks and "fair market value" must not slip past it."""
+
+    def setUp(self):
+        super().setUp()
+        config.update({"enabled": True, "budget": 60, "max_per_arb": 30, "strategies": _all_off()})
+        config.update({"strategies": {"basket_arb": {"mode": "live"}}})
+        orders_proven()
+
+    def _live_orders_for(self, rules):
+        c = fake_with_arb()
+        for m in c.event_list[0]["markets"]:
+            m["rules_secondary"] = rules
+        engine.run_once(c)
+        return c.orders
+
+    def test_plain_rules_still_trade(self):   # the control: this basket does trade
+        self.assertNotEqual(self._live_orders_for("The market resolves to Yes if it happens."), [])
+
+    def test_fair_price_wordings_never_trade_real_money(self):
+        for rules in (STANDARD, STANDARD.replace("fair price", "fair  price"),
+                      STANDARD.replace("fair price", "fair\nprice"), STANDARD.replace(" ", "\u00a0"),
+                      "If the person dies before the date, the market will settle at fair market value "
+                      "as determined by Kalshi.",
+                      "If trading stops, the market settles at the price of the last trade."):
+            with self.subTest(rules=rules):
+                self.assertEqual(self._live_orders_for(rules), [])
+
+    def test_the_cancelled_game_clause_still_reads_with_odd_spacing(self):
+        m = {"rules_secondary": STANDARD.replace(" will ", "  will ").replace("fair price", "fair\u00a0price")}
+        self.assertFalse(base.plain_payouts([m]))
+        self.assertTrue(base.fair_price_only_if_cancelled([m]))   # paper only, as a bet
+
+    def test_lines_with_no_full_stop_stay_apart(self):
+        # Real tennis and golf rules end lines with no full stop. The clause is still its own line.
+        m = {"rules_secondary": "If a player retires, the opponent wins\n" + STANDARD + "\nKalshi is not affiliated"}
+        self.assertTrue(base.fair_price_only_if_cancelled([m]))
+
+    def test_a_clause_split_across_lines_is_not_trusted(self):
+        m = {"rules_secondary": STANDARD.replace("fair price", "fair\nprice")}
+        self.assertFalse(base.plain_payouts([m]))
+        self.assertFalse(base.fair_price_only_if_cancelled([m]))   # skipped, not even paper
+
+    def test_the_election_clause_is_paper_only(self):
+        # Seen on 200+ real election events (2026-10-25); the old exact-text check missed it.
+        m = {"rules_secondary": "Party affiliation is set when elected. If the election is postponed beyond one "
+                                "year from the original date or cancelled entirely, the market resolves to the "
+                                "last fair market price. Only seats actually contested are counted."}
+        self.assertFalse(base.plain_payouts([m]))
+        self.assertTrue(base.fair_price_only_if_cancelled([m]))
+
+    def test_esports_and_darts_cancel_clauses_are_paper_only(self):
+        # Word for word from real events (2026-10-25): the match or map never happens.
+        for text in ("If the relevant match is cancelled before play begins, the market will resolve to the fair "
+                     "market price.",
+                     "If the relevant match or map is postponed and not started within 48 hours of its originally "
+                     "scheduled start time, the market will resolve to the fair market price.",
+                     "If the relevant map is cancelled before play begins, the market will resolve to the fair "
+                     "market price.",
+                     "If a match is forfeited before any play occurs, the market will resolve to the fair market "
+                     "price.",
+                     "If a map is forfeited before any play occurs in the map, the market will resolve to the fair "
+                     "market price.",
+                     "If the relevant match is forfeited before any play occurs, the market will resolve to the fair "
+                     "market price.",
+                     "If the cancelled match is not played, rescheduled, or declared a tie, the market will resolve "
+                     "to the fair market price."):
+            with self.subTest(text=text):
+                m = {"rules_secondary": "The market refers to the full match.\n" + text}
+                self.assertFalse(base.plain_payouts([m]))
+                self.assertTrue(base.fair_price_only_if_cancelled([m]))
+
+    def test_the_exchanges_discretion_is_not_trusted(self):
+        # Real tennis rules: Kalshi decides what "can't be settled" means.
+        m = {"rules_secondary": "Any markets that cannot be unconditionally settled will resolve to fair market "
+                                "price, as determined at the sole discretion of the exchange."}
+        self.assertFalse(base.plain_payouts([m]))
+        self.assertFalse(base.fair_price_only_if_cancelled([m]))
+
+    def test_golf_fair_market_value_is_not_trusted(self):
+        m = {"rules_secondary": "If a golfer withdraws:\nTournament Winner markets will resolve to No\n"
+                                "Head-to-Head markets will resolve to Fair Market Value\n\nKalshi is not affiliated"}
+        self.assertFalse(base.plain_payouts([m]))
+        self.assertFalse(base.fair_price_only_if_cancelled([m]))

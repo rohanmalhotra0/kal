@@ -479,6 +479,24 @@ def _budget_ok(new, old, env):
 SWITCH_BUSY = "A trade run is still going. Try again in a minute."
 
 
+def _back_on_paper(before, cfg):
+    """Lines naming the strategies a switch to prod put back on paper (live was for demo)."""
+    if before["env"] == "prod" or cfg["env"] != "prod":
+        return []
+    back = [n for n in config.practice_live(before) if cfg["strategies"].get(n, {}).get("mode") == "paper"]
+    if not back:
+        return []
+    return [f"Back on paper for real money: {', '.join(back)}. Live was for demo practice.",
+            f"To trade one with real money: {_cmd(f'set strategies.{back[0]}.mode live')}"]
+
+
+def _live_now(cfg):
+    """A line naming the strategies set to live."""
+    live = sorted(n for n, s in cfg["strategies"].items() if (s or {}).get("mode") == "live")
+    money = "fake money" if cfg["env"] == "demo" else "real money"
+    return f"Live ({money}): {', '.join(live)}." if live else "No strategy is set to live: all paper."
+
+
 def cmd_on(args):
     stored = config.load()
     if stored["disabled_reason"] and not args.clear_trip:
@@ -507,7 +525,8 @@ def cmd_on(args):
         say(f"Not changed: {e}")
         return 2
     say(f"Bot is ON. Exchange: {_where(cfg)}.",
-        f"Budget: ${cfg['budget']:.2f}. That is the most it can lose in total.")
+        f"Budget: ${cfg['budget']:.2f}. That is the most it can lose in total.",
+        _live_now(cfg), *_back_on_paper(stored, cfg))
     if cfg["budget"] <= 0:
         say("Budget is $0, so it can't buy anything real. Add --budget 300 (or what you want).")
     return 0
@@ -586,7 +605,7 @@ def cmd_set(args):
     shown = new
     for k in path:
         shown = shown.get(k) if isinstance(shown, dict) else None
-    say(f"{args.key} is now {shown}.")
+    say(f"{args.key} is now {shown}.", *_back_on_paper(cfg, new))
     return 0
 
 

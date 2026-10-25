@@ -251,6 +251,19 @@ def switch(changes, wait=None):
     if changes.get("env") in (None, load()["env"]):
         return update(changes)
     with no_trade_run(wait):
-        if load()["enabled"]:
+        cur = load()
+        if cur["enabled"]:
             raise ValueError("turn the bot off before you switch")
+        if changes["env"] == "prod":
+            # Modes are one setting for both exchanges. A strategy turned live for practice
+            # on demo (fake money) goes back to paper, so real money is chosen on prod itself.
+            back = {name: {"mode": "paper"} for name in practice_live(cur)}
+            changes = _merge({"strategies": back}, changes)
         return update(changes)
+
+
+def practice_live(cfg):
+    """Strategies a switch to prod puts back on paper: live now, but not live by default."""
+    default = {name: (s or {}).get("mode") for name, s in DEFAULTS["strategies"].items()}
+    return sorted(name for name, s in cfg["strategies"].items()
+                  if (s or {}).get("mode") == "live" and default.get(name) != "live")
