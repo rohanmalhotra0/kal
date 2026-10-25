@@ -2,6 +2,21 @@
 
 Newest first. Each 2-hour check-in adds one entry: what it checked, what it found, links.
 
+## 2026-10-25 12:50 UTC — check-in: two real-data answers, both "no edge"
+
+- Checked: CI green on main, market-check green. No server yet, so no status report.
+- **Research with #9's fix priced 24,878 real markets** (main prices 904). No price
+  range has an edge after fees in any category. Best: NO at 95c+ with spreads of 2c or
+  less, +0.2% (worst case -2.7%). Idea #5 (NO where YES is over-bet): rejected for a
+  taker. https://github.com/rohanmalhotra0/kal/pull/9#issuecomment-6396866572
+- **Maker test: no lead, even in a maker's best case** (4,103 markets). Best: NO bids
+  at 90-95c, +2.3% (worst -20%). Not worth building resting orders now.
+  https://github.com/rohanmalhotra0/kal/pull/10#issuecomment-6397845896
+- Crypto prices 0 markets on purpose: its markets open 15-60 minutes before they
+  close, so a 6-hour test can't apply.
+- Honest state: no strategy beats fees yet. Turned on, the bot will mostly wait and
+  take only locked-in arbitrage, which is rare. The weather test (#11) is still running.
+
 ## 2026-10-25 10:47 UTC — check-in: two new backtests, each attacked by a reviewer
 
 - Checked: CI and market-check green on main. No server yet, so no status report.
