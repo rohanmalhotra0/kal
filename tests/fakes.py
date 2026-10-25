@@ -24,7 +24,9 @@ class FakeKalshi:
         self.market_list = []         # what markets() returns
         self.books = {}               # ticker -> {"yes": [(p, q)...], "no": [...]}
         self.market_info = {}         # ticker -> market dict for markets_by_ticker / market()
-        self.position_list = []
+        self.position_list = None     # what positions() returns; None = what buy() bought
+        self.held = {}                # ticker -> net contracts bought (+ YES, - NO)
+        self.fill_list = []           # what fills() returns
         self.settled = {}             # series -> [market dicts]
         self.candle_data = {}         # ticker -> [candles]
         self.series_list = []
@@ -66,7 +68,9 @@ class FakeKalshi:
         return self._balance
 
     def positions(self):
-        return self.position_list
+        if self.position_list is not None:
+            return self.position_list
+        return [{"ticker": t, "position": n, "exposure": 0.0} for t, n in self.held.items() if n]
 
     def settled_markets(self, series, limit=None):
         return self.settled.get(series, [])
@@ -81,11 +85,12 @@ class FakeKalshi:
         return []
 
     def fills(self, min_ts=None):
-        return []
+        return self.fill_list
 
     def buy(self, ticker, side, count, limit_price, client_order_id=None):
         n = self.fill(ticker, side, count, limit_price)
         self.orders.append((ticker, side, count, limit_price))
+        self.held[ticker] = self.held.get(ticker, 0) + (n if side == "yes" else -n)
         return {"order_id": f"o{len(self.orders)}", "status": "executed" if n == count else "canceled",
                 "fill_count_fp": f"{n:.2f}"}
 

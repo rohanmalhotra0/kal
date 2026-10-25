@@ -144,11 +144,18 @@ class Kalshi:
             raise KalshiError(f"GET {endpoint} -> {r.status_code}: {r.text[:300]}", r.status_code)
         return r.json()
 
-    def paginate(self, endpoint, key, params=None, limit=None):
+    def paginate(self, endpoint, key, params=None, limit=None, strict=False):
+        """Every page of a list. strict: a reply without `key` raises instead of reading as
+        an empty list. For account data (positions, orders, fills) a missing key means the
+        reply changed shape (Kalshi renamed fields in 2026), and reading that as "nothing"
+        would blind the checks that catch lost fills. A key that's there but null is empty."""
         params, out = dict(params or {}), []
         while True:
             d = self.get(endpoint, params)
-            out += d.get(key, [])
+            if strict and (not isinstance(d, dict) or key not in d):
+                keys = ", ".join(sorted(d)) if isinstance(d, dict) else type(d).__name__
+                raise KalshiError(f"{endpoint}: reply has no '{key}' (got: {keys[:200]})")
+            out += d.get(key) or []
             if not d.get("cursor") or (limit and len(out) >= limit):
                 return out[:limit] if limit else out
             params["cursor"] = d["cursor"]
@@ -253,7 +260,7 @@ class Kalshi:
     def positions(self):
         """Open market positions: [{'ticker', 'position' (+yes/-no), 'exposure' dollars}]."""
         out = []
-        for p in self.paginate("/portfolio/positions", "market_positions", {"limit": 1000}):
+        for p in self.paginate("/portfolio/positions", "market_positions", {"limit": 1000}, strict=True):
             pos = num(p, "position")
             if pos:
                 out.append({"ticker": p["ticker"], "position": pos,
@@ -262,11 +269,11 @@ class Kalshi:
 
     def settlements(self, min_ts=None):
         params = {"limit": 1000, **({"min_ts": int(min_ts)} if min_ts else {})}
-        return self.paginate("/portfolio/settlements", "settlements", params)
+        return self.paginate("/portfolio/settlements", "settlements", params, strict=True)
 
     def fills(self, min_ts=None):
         params = {"limit": 1000, **({"min_ts": int(min_ts)} if min_ts else {})}
-        return self.paginate("/portfolio/fills", "fills", params)
+        return self.paginate("/portfolio/fills", "fills", params, strict=True)
 
     def orders(self, ticker=None, min_ts=None):
         params = {"limit": 1000}
@@ -274,7 +281,7 @@ class Kalshi:
             params["ticker"] = ticker
         if min_ts:
             params["min_ts"] = int(min_ts)
-        return self.paginate("/portfolio/orders", "orders", params)
+        return self.paginate("/portfolio/orders", "orders", params, strict=True)
 
     def cancel(self, order_id):
         r = self._req("DELETE", f"/portfolio/events/orders/{order_id}")
