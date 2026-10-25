@@ -58,6 +58,12 @@ tests/            unittest; tests/fakes.py has FakeKalshi, tests/helpers.py has 
 - Price ticks are 1c, 0.1c, or 0.1c near the ends (`price_ranges`). Orders are priced off
   the opposite side's real bid, so they're always on a tick.
 - Combo markets (`KXMVE...`) are skipped everywhere.
+- **Orders use V2 only.** `POST /portfolio/orders` answers 410 `deprecated_v1_order_endpoint`.
+  Create: `POST /portfolio/events/orders` on one YES book (`bid`/`ask`): buy YES at p =
+  bid p, buy NO at p = ask 1-p; count/price are strings. Cancel:
+  `DELETE /portfolio/events/orders/{id}`. Reads stay on `/portfolio/orders`, `/positions`,
+  `/fills`, `/settlements`, `/balance` (all checked to exist).
+- The demo (fake money) exchange is `https://demo-api.kalshi.co`.
 
 ## Failing closed
 

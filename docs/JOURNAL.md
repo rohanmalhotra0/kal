@@ -2,6 +2,15 @@
 
 Newest first. Each 2-hour check-in adds one entry: what it checked, what it found, links.
 
+## 2026-10-25 01:10 UTC — order endpoint moved
+
+- **Kalshi retired the V1 order endpoint** (`POST /portfolio/orders` -> 410). Every real
+  order would have failed. Switched to V2 (`/portfolio/events/orders`, bid/ask on the YES
+  book). All other endpoints the bot uses checked: they exist.
+- Kalshi maintenance and network errors no longer trip the bot; a 6-hour outage alerts.
+- New safety check: Kalshi positions must match the bot's books, or it trips.
+- Demo exchange address confirmed. Price ticks confirmed (orders always land on a tick).
+
 ## 2026-10-25 01:00 UTC — first real-data checks
 
 - Built the full system: 6 strategies, research, dashboard, safety limits.
