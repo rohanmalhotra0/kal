@@ -426,8 +426,10 @@ def poly_price(history, t, max_age=backtest.LOOKBACK_HOURS * H):
 
 def http_get(pace=0.15, session=None):
     """get(url, params) -> JSON, paced, retrying network errors, 429 and 5xx."""
-    s = session or requests.Session()
-    s.headers.setdefault("User-Agent", "kal-research/1.0")
+    s = session
+    if s is None:
+        s = requests.Session()
+        s.headers["User-Agent"] = "kal-research/1.0"
     lock, last = threading.Lock(), [0.0]
 
     def get(url, params):

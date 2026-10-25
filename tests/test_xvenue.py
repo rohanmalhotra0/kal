@@ -2,11 +2,11 @@
 
 Matching games across Kalshi and Polymarket, prices at the decision time with no
 peeking, the fee, the statistics, and the runner end to end. All data is fake."""
+import importlib.util
 import io
 import json
 import math
 import os
-import sys
 from contextlib import redirect_stdout
 from datetime import datetime, timezone
 
@@ -15,8 +15,10 @@ from kal.strategies import favorites
 from tests.fakes import FakeKalshi
 from tests.helpers import TempHome
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tools"))
-import xvenue_research  # noqa: E402
+_TOOL = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tools", "xvenue_research.py")
+_spec = importlib.util.spec_from_file_location("xvenue_research", _TOOL)
+xvenue_research = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(xvenue_research)
 
 H = 3600
 DAY = 86400
