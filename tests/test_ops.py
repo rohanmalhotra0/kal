@@ -289,7 +289,7 @@ def arb_fake():
     c = FakeKalshi(can_trade=True)
     bids = (0.55, 0.35, 0.15, 0.07)
     markets = [{"ticker": f"EV1-{i}", "event_ticker": "EV1", "status": "active",
-                "yes_bid_dollars": f"{b:.4f}"} for i, b in enumerate(bids)]
+                "close_time": iso(NOW + 86400), "yes_bid_dollars": f"{b:.4f}"} for i, b in enumerate(bids)]
     c.event_list = [{"event_ticker": "EV1", "title": "Test event", "mutually_exclusive": True,
                      "markets": markets}]
     for m, b in zip(markets, bids):

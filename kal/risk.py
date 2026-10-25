@@ -1,6 +1,7 @@
 """Safety checks that sit between strategies and real money."""
 import fcntl
 import os
+import time
 from collections import defaultdict
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -64,6 +65,14 @@ class Limits:
             if sig.payout_min / sig.cost - 1 > MAX_ARB_ROI:
                 return (f"too good to be true: ${sig.cost:.2f} 'locked in' to pay ${sig.payout_min:.2f}. "
                         f"Probably a misread market")
+            if not sig.closes_at:
+                return "locked-in trade with no known settle date"
+            days = max((sig.closes_at - time.time()) / 86400, 1 / 24)
+            if days > cfg["max_arb_days"]:
+                return f"locks money up for {days:.0f} days (max {cfg['max_arb_days']})"
+            apr = (sig.payout_min / sig.cost) ** (365 / days) - 1
+            if apr < cfg["min_arb_apr"]:
+                return f"pays {apr:.0%} a year, under the {cfg['min_arb_apr']:.0%} minimum"
         else:
             if sig.max_loss > cfg["max_per_trade"] + 1e-9:
                 return f"could lose ${sig.max_loss:.2f}, over max_per_trade"

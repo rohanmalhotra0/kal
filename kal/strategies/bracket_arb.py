@@ -17,7 +17,7 @@ value lands in it, nothing wins and the whole basket is lost. So:
 from ..client import price
 from .base import Leg, Signal, Strategy
 from .ladder_arb import (allocate, locked_basket, one_close_time, own_markets, quote, same_custom_strike,
-                         strike, thinnest_first, tradeable)
+                         strike, thinnest_first, tradeable, with_close)
 
 LOW = ("less", "less_or_equal")          # bottom bracket: YES below cap_strike
 HIGH = ("greater", "greater_or_equal")   # top bracket: YES above floor_strike
@@ -94,8 +94,8 @@ class BracketArb(Strategy):
                 continue  # quick check on the listing before paying for order books
             quotes = [(m["ticker"], "yes", *quote(ctx.client.orderbook(m["ticker"]), "yes"))
                       for m in markets]
-            candidates.append((quotes, lambda bk, ev=ev: to_signal(
-                ev["event_ticker"], ev.get("title", ""), bk, self._verified(ctx))))
+            candidates.append((quotes, lambda bk, ev=ev: with_close(to_signal(
+                ev["event_ticker"], ev.get("title", ""), bk, self._verified(ctx)), ev)))
         return allocate(ctx, candidates)
 
     def recheck(self, ctx, sig):
@@ -105,7 +105,11 @@ class BracketArb(Strategy):
                   for leg in sig.legs]
         basket = locked_basket(quotes, min(ctx.budget_left, float(ctx.cfg["max_per_arb"])),
                                float(ctx.cfg["max_per_trade"]))
-        return to_signal(sig.event, sig.title, basket, self._verified(ctx)) if basket else None
+        if not basket:
+            return None
+        fresh = to_signal(sig.event, sig.title, basket, self._verified(ctx))
+        fresh.closes_at = sig.closes_at
+        return fresh
 
 
 STRATEGY = BracketArb()

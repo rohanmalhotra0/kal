@@ -11,9 +11,13 @@ from tests.fakes import FakeKalshi
 from tests.helpers import TempHome
 
 
-def arb_event(ticker="EV1", bids=(0.55, 0.35, 0.15, 0.07), size=40, exclusive=True):
-    markets = [{"ticker": f"{ticker}-{i}", "yes_bid_dollars": f"{b:.4f}", "status": "active"}
-               for i, b in enumerate(bids)]
+SOON = __import__("datetime").datetime.fromtimestamp(
+    __import__("time").time() + 2 * 86400, __import__("datetime").timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def arb_event(ticker="EV1", bids=(0.55, 0.35, 0.15, 0.07), size=40, exclusive=True, close=None):
+    markets = [{"ticker": f"{ticker}-{i}", "yes_bid_dollars": f"{b:.4f}", "status": "active",
+                "close_time": close or SOON} for i, b in enumerate(bids)]
     return {"event_ticker": ticker, "title": "Test event", "mutually_exclusive": exclusive,
             "markets": markets}
 
@@ -45,6 +49,21 @@ class ClientTests(unittest.TestCase):
         self.assertEqual(client.price({"yes_ask": 93}, "yes_ask"), 0.93)
         self.assertEqual(client.filled({"fill_count_fp": "3.00"}, 5), 3)
         self.assertEqual(client.filled({"status": "executed"}, 5), 5)
+
+    def test_price_shapes_seen_on_the_real_api(self):
+        self.assertEqual(client.price({"yes_bid_dollars": "0.0500"}, "yes_bid"), 0.05)
+        self.assertEqual(client.price({"close": "0.8000"}, "close"), 0.8)   # historical candles
+        self.assertEqual(client.price({"close": 80}, "close"), 0.8)         # legacy cents
+        self.assertEqual(client.price({"close": None}, "close"), 0.0)
+        self.assertEqual(client.price({"close": "junk"}, "close"), 0.0)
+        self.assertEqual(client.price({}, "close"), 0.0)
+        self.assertEqual(client.candle_close({"yes_ask": {"close": "0.8000", "high": "1.0000"}}, "yes_ask"), 0.8)
+
+    def test_markets_by_ticker_falls_back_to_one_by_one(self):
+        k = client.Kalshi()
+        k.markets = lambda limit=None, **p: []  # the batch filter came back empty on the real API
+        k.market = lambda t: {"ticker": t, "status": "finalized", "result": "yes"}
+        self.assertEqual(set(k.markets_by_ticker(["A", "B", "A"])), {"A", "B"})
 
     def test_orderbook_both_formats(self):
         k = client.Kalshi()
@@ -95,6 +114,7 @@ class BasketArbTests(TempHome):
     def test_profit_locked_for_every_outcome(self):
         b = basket_arb.no_basket([("A", 0.55, 40), ("B", 0.35, 25), ("C", 0.15, 60), ("D", 0.07, 10)], 30)
         sig = basket_arb.to_signal("E", "t", b)
+        sig.closes_at = __import__("time").time() + 86400
         for winner in [l.ticker for l in sig.legs] + [None]:
             payout = sum(l.count for l in sig.legs if l.ticker != winner)
             self.assertGreater(payout - sig.cost, 0)
@@ -373,6 +393,25 @@ class LedgerTests(TempHome):
         engine.run_once(c)
         spent = sum(r["filled"] * r["price"] for r in db.query("SELECT * FROM orders"))
         self.assertLessEqual(spent, 10)
+
+
+class SettleDateTests(unittest.TestCase):
+    def _arb(self, days, cost_per=0.9, n=10):
+        import time as _t
+        return Signal("x", "E", "t", [Leg("A", "no", cost_per / 2, n), Leg("B", "no", cost_per / 2, n)],
+                      payout_min=n * 1.0, closes_at=_t.time() + days * 86400 if days is not None else None)
+
+    def test_locked_in_trade_must_settle_soon_and_pay_enough_per_year(self):
+        cfg = dict(config.DEFAULTS, max_per_trade=30)
+        lim = risk.Limits(cfg, 1000)
+        self.assertIsNone(lim.refuse(self._arb(2)))
+        self.assertIn("locks money up", lim.refuse(self._arb(4000)))      # a 2040 career ladder
+        self.assertIn("no known settle date", lim.refuse(self._arb(None)))
+        import time as _t
+        tiny = Signal("x", "E", "t", [Leg("A", "no", 0.98, 10), Leg("B", "no", 0.005, 10)],
+                      payout_min=10.0, closes_at=_t.time() + 29 * 86400)  # ~1% over a month
+        self.assertTrue(tiny.guaranteed)
+        self.assertIn("a year", lim.refuse(tiny))
 
 
 class FinalityTests(unittest.TestCase):

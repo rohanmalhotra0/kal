@@ -59,6 +59,29 @@ show("strike_type counts (200 open events)", dict(types))
 excl = collections.Counter(str(e.get("mutually_exclusive")) for e in evs)
 show("mutually_exclusive counts", dict(excl))
 
+# Batch and single lookups on NORMAL (non-combo) markets: the ledger depends on them
+normal = [m["ticker"] for e in evs if not e["event_ticker"].startswith("KXMVE")
+          for m in e.get("markets", [])][:3]
+if normal:
+    code, d3 = get("/markets", tickers=",".join(normal), limit=1000)
+    got = [m["ticker"] for m in d3.get("markets", [])] if isinstance(d3, dict) else d3
+    show("tickers= filter on normal markets", {"code": code, "asked": normal, "got": got})
+    code, d4 = get(f"/markets/{normal[0]}")
+    show("single market lookup", {"code": code, "keys": list(d4.keys()) if isinstance(d4, dict) else d4,
+                                  "ticker": (d4.get("market") or {}).get("ticker") if isinstance(d4, dict) else None})
+    ev0 = next(e for e in evs if any(m["ticker"] == normal[0] for m in e.get("markets", [])))
+    code, d5 = get(f"/series/{ev0['series_ticker']}/markets/{normal[0]}/candlesticks",
+                   start_ts=int(__import__("time").time()) - 86400, end_ts=int(__import__("time").time()),
+                   period_interval=60)
+    c0 = (d5.get("candlesticks") or [None])[-1] if isinstance(d5, dict) else None
+    show("live candle format", {"code": code, "last": c0})
+# settled normal markets: do they come back from status=settled?
+code, d6 = get("/markets", limit=5, status="settled", mve_filter="exclude")
+show("settled (no combos) sample", {"code": code, "statuses": [m.get("status") for m in d6.get("markets", [])]
+                                     if isinstance(d6, dict) else d6,
+                                     "results": [m.get("result") for m in d6.get("markets", [])]
+                                     if isinstance(d6, dict) else None})
+
 # Ladders: events with >= 3 'greater' markets, show wording and tickers
 ladders = [e for e in evs if sum(m.get("strike_type") in ("greater", "greater_or_equal") for m in e.get("markets", [])) >= 3]
 for e in ladders[:4]:

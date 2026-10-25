@@ -6,7 +6,7 @@ least c * (|S| - 1): every NO pays except the winner's. So when the YES bids
 add up to more than $1 (net of fees), the profit is locked in. This usually
 happens because people overpay for longshots.
 """
-from ..client import fee, price
+from ..client import fee, price, ts
 from .base import Leg, Signal, Strategy
 
 MIN_PROFIT = 0.05   # dollars per basket, after fees
@@ -43,6 +43,14 @@ def to_signal(event, title, basket):
     return sig
 
 
+def latest_close(markets):
+    """When the last market in the basket closes, or None if any close time is unreadable."""
+    try:
+        return max(ts(m["close_time"]) for m in markets)
+    except (KeyError, TypeError, ValueError, AttributeError):
+        return None
+
+
 class BasketArb(Strategy):
     name = "basket_arb"
     title = "Basket arbitrage"
@@ -65,13 +73,19 @@ class BasketArb(Strategy):
                     if m["ticker"] not in ctx.held]
             basket = no_basket(legs, self._budget(ctx))
             if basket:
-                found.append(to_signal(ev["event_ticker"], ev.get("title", ""), basket))
+                sig = to_signal(ev["event_ticker"], ev.get("title", ""), basket)
+                sig.closes_at = latest_close(markets)
+                found.append(sig)
         return sorted(found, key=lambda s: -s.exp_profit)
 
     def recheck(self, ctx, sig):
         legs = [(leg.ticker, *ctx.client.best_bid(leg.ticker, "yes")) for leg in sig.legs]
         basket = no_basket(legs, self._budget(ctx))
-        return to_signal(sig.event, sig.title, basket) if basket else None
+        if not basket:
+            return None
+        fresh = to_signal(sig.event, sig.title, basket)
+        fresh.closes_at = sig.closes_at
+        return fresh
 
 
 STRATEGY = BasketArb()

@@ -28,6 +28,8 @@ DEFAULTS = {
     "max_per_arb": 30.0,         # most a locked-in arbitrage basket can cost
     "max_per_event": 20.0,       # markets in one event move together
     "max_exposure": 0.5,         # most of the capital tied up in directional bets at once
+    "max_arb_days": 30,          # a locked-in trade must settle within this many days
+    "min_arb_apr": 0.20,         # and pay at least this much a year (Kalshi pays ~4% on cash)
     "daily_loss_limit": 0.10,    # fraction of capital; past this the bot turns itself off
     "max_consecutive_errors": 3,
     "kelly_fraction": 0.25,      # bet a quarter of the Kelly size
@@ -52,7 +54,7 @@ DEFAULTS = {
 MODES = ("off", "paper", "live")
 _MONEY = ("budget", "cash_floor", "max_per_trade", "max_per_arb", "max_per_event", "paper_bankroll")
 _POSITIVE_INTS = ("max_consecutive_errors", "trade_interval_min", "research_interval_hours",
-                  "research_max_series", "research_max_markets")
+                  "research_max_series", "research_max_markets", "max_arb_days")
 
 
 def home():
@@ -140,6 +142,9 @@ def validate(cfg):
         v = cfg.get(k)
         if isinstance(v, bool) or not isinstance(v, (int, float)) or not lo < v <= hi:
             raise ValueError(f"{k} must be a fraction above {lo} and at most {hi}")
+    v = cfg.get("min_arb_apr")
+    if isinstance(v, bool) or not isinstance(v, (int, float)) or not 0 <= v <= 10:
+        raise ValueError("min_arb_apr must be a yearly fraction between 0 and 10")
     v = cfg.get("research_hours_before_close")
     if isinstance(v, bool) or not isinstance(v, (int, float)) or not v > 0:
         raise ValueError("research_hours_before_close must be more than 0")

@@ -113,6 +113,12 @@ def same_custom_strike(ev):
     return len(customs) == 1
 
 
+def with_close(sig, ev):
+    """Stamp a signal with its event's (single) close time."""
+    sig.closes_at = close_ts((ev.get("markets") or [{}])[0])
+    return sig
+
+
 def tradeable(m, ctx):
     return m.get("status") in OPEN and m["ticker"] not in ctx.held
 
@@ -263,8 +269,8 @@ class LadderArb(Strategy):
                 quotes = [(b, "yes", *quote(books[b], "yes")), (n, "no", *quote(books[n], "no"))]
                 meta = {"narrow": n, "broad": b, "strike_type": kind,
                         "strikes": {n: strikes[n], b: strikes[b]}}
-                candidates.append((quotes, lambda bk, ev=ev, meta=meta: to_signal(
-                    ev["event_ticker"], ev.get("title", ""), bk, meta)))
+                candidates.append((quotes, lambda bk, ev=ev, meta=meta: with_close(to_signal(
+                    ev["event_ticker"], ev.get("title", ""), bk, meta), ev)))
         return allocate(ctx, candidates)
 
     def recheck(self, ctx, sig):
@@ -273,7 +279,11 @@ class LadderArb(Strategy):
         quotes = [(leg.ticker, leg.side, *quote(ctx.client.orderbook(leg.ticker), leg.side))
                   for leg in sig.legs]
         basket = locked_basket(quotes, self._budget(ctx), float(ctx.cfg["max_per_trade"]))
-        return to_signal(sig.event, sig.title, basket, sig.meta) if basket else None
+        if not basket:
+            return None
+        fresh = to_signal(sig.event, sig.title, basket, sig.meta)
+        fresh.closes_at = sig.closes_at
+        return fresh
 
 
 STRATEGY = LadderArb()

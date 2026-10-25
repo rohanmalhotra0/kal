@@ -15,7 +15,7 @@ import logging
 import time
 
 from . import config
-from .client import Kalshi, KalshiError, candle_close, filled, num, price, ts
+from .client import Kalshi, KalshiError, candle_close, filled, num, price, ts, price_strict
 
 PROBE_PRICE = 0.01
 PROBE_MIN_ASK = 0.10      # the probe only goes where the cheapest seller asks this much
@@ -77,7 +77,7 @@ class _Checks:
             if not all(_has(m, f) for f in PRICES):
                 continue
             try:
-                p = {f: price(m, f) for f in PRICES}
+                p = {f: price_strict(m, f) for f in PRICES}
             except (TypeError, ValueError):
                 bad += 1
                 continue

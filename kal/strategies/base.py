@@ -31,6 +31,9 @@ class Signal:
     # None means "assume $0", the safe default. A NO basket sets it, since a partial NO
     # basket still pays at least c * (k - 1).
     prefix_payouts: list = None
+    # Unix time the signal's markets close (the latest, for a basket). Locked-in trades
+    # must say, so money isn't tied up for years for a cent of profit.
+    closes_at: float = None
 
     @property
     def cost(self):

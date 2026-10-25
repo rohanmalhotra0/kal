@@ -138,11 +138,25 @@ class Kalshi:
         return self.paginate("/markets", "markets", {"limit": 1000, **params}, limit)
 
     def markets_by_ticker(self, tickers):
+        """{ticker: market}. Batches with tickers=, then fetches any it missed one by one:
+        the real API returned nothing for some tickers in a batch, and a position we can't
+        see would never settle in the ledger."""
         out = {}
-        tickers = list(tickers)
+        tickers = list(dict.fromkeys(tickers))
         for i in range(0, len(tickers), 100):
-            for m in self.markets(tickers=",".join(tickers[i:i + 100])):
-                out[m["ticker"]] = m
+            try:
+                for m in self.markets(tickers=",".join(tickers[i:i + 100])):
+                    out[m["ticker"]] = m
+            except KalshiError:
+                pass
+        for t in tickers:
+            if t not in out:
+                try:
+                    m = self.market(t)
+                except KalshiError:
+                    continue
+                if m:
+                    out[t] = m
         return out
 
     def market(self, ticker):
@@ -267,12 +281,53 @@ def num(d, field):
     return float(v or 0)
 
 
+def to_dollars(v):
+    """One price value in dollars, whatever shape Kalshi sent it in.
+
+    Seen on the real API: "0.8000" (fixed-point dollar string, also used without a
+    _dollars suffix in historical candles), 93 (legacy integer cents), None/"" (no
+    price). JSON integers and digit-only strings are cents; anything with a decimal
+    point is dollars. Unreadable values count as no price, never as a tradeable one."""
+    if v is None or v == "" or isinstance(v, bool):
+        return 0.0
+    try:
+        if isinstance(v, str):
+            f = float(v)
+            return f if "." in v else f / 100
+        if isinstance(v, int):
+            return v / 100
+        return float(v)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def price(d, field):
-    """A price in dollars from `x_dollars` or legacy integer cents `x`."""
-    if d.get(f"{field}_dollars") not in (None, ""):
-        return float(d[f"{field}_dollars"])
-    v = d.get(field)
-    return v / 100 if v else 0.0
+    """A price in dollars from `x_dollars` (always dollars), else from `x` (see to_dollars)."""
+    v = d.get(f"{field}_dollars")
+    if v not in (None, ""):
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return 0.0
+    return to_dollars(d.get(field))
+
+
+def price_strict(d, field):
+    """Like price(), but raises ValueError on a value it can't read, so the self-test can
+    catch a format change instead of quietly seeing "no price"."""
+    raw = d.get(f"{field}_dollars")
+    if raw in (None, ""):
+        raw = d.get(field)
+        if raw in (None, ""):
+            return 0.0
+        if isinstance(raw, bool):
+            raise ValueError(f"{field}: {raw!r}")
+        if isinstance(raw, str):
+            float(raw)  # raises on junk
+        return to_dollars(raw)
+    if isinstance(raw, bool):
+        raise ValueError(f"{field}: {raw!r}")
+    return float(raw)
 
 
 def filled(order, requested):

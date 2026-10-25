@@ -18,7 +18,7 @@ from kal.strategies.base import Context, Leg
 from tests.fakes import FakeKalshi
 from tests.helpers import TempHome
 
-FUTURE = "2099-01-01T00:00:00Z"
+FUTURE = datetime.fromtimestamp(time.time() + 3 * 86400, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 UP, DOWN = ladder_arb.UP, ladder_arb.DOWN
 
 
@@ -545,7 +545,7 @@ if __name__ == "__main__":
 class RealDataRegressionTests(unittest.TestCase):
     """Shapes seen on the real Kalshi API (market-check, Oct 2026)."""
 
-    def _ev(self, event, rungs, close="2030-01-01T00:00:00Z"):
+    def _ev(self, event, rungs, close=FUTURE):
         return {"event_ticker": event, "mutually_exclusive": False,
                 "markets": [{"ticker": f"{event}-{suffix}", "event_ticker": event, "strike_type": "greater",
                              "floor_strike": strike, "yes_sub_title": words, "close_time": close,
