@@ -2,6 +2,14 @@
 
 Newest first. Each 2-hour check-in adds one entry: what it checked, what it found, links.
 
+## 2026-10-25 22:50 UTC — check-in: all green; new research paused for the usage limit
+
+- Checked: CI green on main 772a322. market-check green on c32c0c4 (PR #24's code): self-test
+  passes, the scan found 0 trades in every strategy (nothing suspicious), research ran
+  3 series with 0 failures, 338 busy markets. No status report yet: the server is still being set up.
+- No new idea this check-in: the account is near its weekly usage limit (resets Thursday), so
+  research and swarms wait. Next: the owner's `sudo kal doctor` output from the server.
+
 ## 2026-10-25 21:35 UTC — PR #24 merged: 5 more holes closed after a review of PR #23
 
 - An independent review of PR #23's new code proved 5 holes, each with a failing test. All
