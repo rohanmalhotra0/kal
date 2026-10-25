@@ -18,11 +18,8 @@ import logging
 import time
 
 from . import config
-from .client import Kalshi, KalshiError, candle_close, filled, num, price_strict, ts
+from .client import Kalshi, KalshiError, candle_close, num, price_strict, ts
 
-PROBE_PRICE = 0.01
-PROBE_MIN_ASK = 0.10      # the probe only goes where the cheapest seller asks this much
-PROBE_TRIES = 10          # liquid markets to look at for the probe
 BOOK_TRIES = 5            # markets to try before saying no order book parses
 CANDLE_TRIES = 8          # busy markets to try before saying no candles parse
 CANDLE_DAYS = 3
@@ -214,21 +211,13 @@ class _Checks:
         return True, f"{len(ps)} open positions"
 
     def order_probe(self):
-        """One IOC buy of 1 YES at $0.01 where the YES ask is far higher. Never a second order."""
+        """One IOC buy of 1 YES at $0.01 where the YES ask is far higher. Never a second order.
+        The same test the engine runs before real money (kal/gate.py), so a pass here also
+        unlocks real trading for this key and exchange, and a fill or a resting order stops it."""
         if not self.c.can_trade:
             return False, "skipped: needs an API key"
-        for m in self._candidates()[:PROBE_TRIES]:
-            t = m["ticker"]
-            book = self.c.orderbook(t)  # fresh, right before the order
-            no = [lv for lv in (book or {}).get("no") or [] if 0 < lv[0] < 1]
-            if not no:
-                continue
-            ask = round(1 - max(no)[0], 4)
-            if ask < PROBE_MIN_ASK:
-                continue
-            order = self.c.buy(t, "yes", 1, PROBE_PRICE)
-            return _judge_probe(t, ask, order)
-        return False, f"no busy market with a YES ask of ${PROBE_MIN_ASK:.2f} or more"
+        from . import gate
+        return gate.probe(self.c, config.load().get("env", "prod"))
 
     # ---------- helpers ----------
 
@@ -281,22 +270,6 @@ def _book_problem(book):
     if book["yes"] and book["no"] and max(book["yes"])[0] + max(book["no"])[0] > 1 + 1e-9:
         return "YES bid + NO bid is over $1: prices are being misread"
     return None
-
-
-def _judge_probe(ticker, ask, order):
-    if not isinstance(order, dict):
-        return False, f"{ticker}: the order reply is not a dict"
-    status = order.get("status")
-    n = filled(order, 1)
-    if n > 0:
-        return False, (f"{ticker}: the $0.01 order FILLED ({n:g}). It cost at most $0.02. "
-                       "Check the order on Kalshi.")
-    if status == "resting":
-        return False, f"{ticker}: the order is resting, so IOC was ignored. Cancel it on Kalshi."
-    known = "fill_count_fp" in order or "fill_count" in order or status in ("canceled", "cancelled", "executed")
-    if not known:
-        return False, f"{ticker}: can't tell from the reply how much filled (keys: {sorted(order)[:12]})"
-    return True, f"{ticker}: order accepted, 0 filled (YES ask was ${ask:.2f}, status {status})"
 
 
 def _client():

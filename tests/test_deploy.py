@@ -4,6 +4,7 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -26,6 +27,13 @@ class DeployScriptTests(unittest.TestCase):
         self.assertIn("env -i", text)
         self.assertIn('KAL_HOME="$scratch/state"', text)
         self.assertLess(text.index("unittest discover"), text.index("systemctl restart kal"))
+
+    def test_tests_never_see_real_data_or_secrets(self):
+        import tests
+        self.assertTrue(os.environ["KAL_HOME"].startswith(tempfile.gettempdir()))
+        self.assertTrue(tests._HOME.startswith(tempfile.gettempdir()))
+        for name in ("KALSHI_API_KEY_ID", "KAL_NTFY_TOPIC", "KAL_GITHUB_TOKEN"):
+            self.assertNotIn(name, os.environ)
 
     def test_install_ships_the_update_units_but_leaves_them_off(self):
         with open(os.path.join(ROOT, "deploy", "install.sh")) as f:

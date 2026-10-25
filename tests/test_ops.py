@@ -508,7 +508,7 @@ class ScanTests(TempHome):
 
 # ---------- self-test ----------
 
-class SelftestTests(unittest.TestCase):
+class SelftestTests(TempHome):
     def test_good_shapes_pass(self):
         rows = selftest.run(GoodFake())
         bad = [r for r in rows if not r["ok"]]
@@ -642,18 +642,23 @@ class SelftestClockTests(TempHome):
         self.assertEqual(config.load()["disabled_reason"], "")
 
 
-class OrderProbeTests(unittest.TestCase):
+class OrderProbeTests(TempHome):
+    """The self-test's probe is the engine's gate (kal/gate.py): it writes the gate's state
+    and can trip the bot, so each test gets its own KAL_HOME."""
+
     def test_not_sent_unless_asked(self):
         c = GoodFake()
         selftest.run(c)
         self.assertEqual(c.orders, [])
 
     def test_one_cent_order_that_does_not_fill_passes(self):
+        from kal import gate
         c = GoodFake()
         c.fill = lambda t, side, n, p: 0
         probe = rows_by_check(selftest.run(c, order_probe=True))["order probe"]
         self.assertTrue(probe["ok"], probe)
         self.assertEqual(c.orders, [("KXA-1", "yes", 1, 0.01)])
+        self.assertTrue(gate.passed(c, "prod"))  # `kal setup` passing unlocks real trading too
 
     def test_a_fill_fails_the_probe(self):
         c = GoodFake()  # the fake fills everything by default
@@ -661,6 +666,7 @@ class OrderProbeTests(unittest.TestCase):
         self.assertFalse(probe["ok"])
         self.assertIn("FILLED", probe["detail"])
         self.assertEqual(len(c.orders), 1)  # never a second order
+        self.assertIn("FILLED", config.load()["disabled_reason"])  # and the bot stops
 
     def test_skips_markets_where_a_cent_could_fill(self):
         c = GoodFake()
