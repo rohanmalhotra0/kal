@@ -34,6 +34,8 @@ class FakeKalshi:
         self.order_list = []          # what the orders() lookup returns (for reconciliation)
         self.cancelled = []
         self.trade_list = {}          # ticker -> public trades, for the informed-flow check
+        self.series_fees = {}         # series -> {"fee_type", "fee_multiplier"} (default: quadratic x1)
+        self.fee_overrides = []       # what event_fee_changes() returns
         self.fill = lambda ticker, side, count, price: count  # override to simulate partial fills
 
     def events(self, **params):
@@ -41,6 +43,12 @@ class FakeKalshi:
 
     def markets(self, limit=None, **params):
         return self.market_list
+
+    def series_info(self, ticker):
+        return {"ticker": ticker, **self.series_fees.get(ticker, {"fee_type": "quadratic", "fee_multiplier": 1})}
+
+    def event_fee_changes(self):
+        return self.fee_overrides
 
     def trades(self, ticker, min_ts=None, limit=500):
         return [t for t in self.trade_list.get(ticker, [])
