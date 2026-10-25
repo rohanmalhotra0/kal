@@ -10,7 +10,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from kal import config  # noqa: E402
 from kal.client import Kalshi  # noqa: E402
 from kal.strategies import date_ladder_arb as d  # noqa: E402
-from kal.strategies.base import Context  # noqa: E402
+from kal.strategies.base import Context, plain_payouts  # noqa: E402
 from kal.strategies.ladder_arb import own_markets, same_custom_strike  # noqa: E402
 
 GAPS = ["KXBRIANCONF-26JUL08", "KXALBUMRELEASEDATE-NEWDRA", "KXHEGSETHOUT-26APR", "KXFISAEXTEND-26APR",
@@ -62,6 +62,11 @@ def main():
         counts[r] += 1
         if len(examples[r]) < 3:
             examples[r].append(ev)
+    keys = collections.Counter()
+    for ev in events:
+        if before_family(ev) and why(ev) == "custom_strike differs":
+            keys[tuple(sorted({k for m in ev["markets"] for k in (m.get("custom_strike") or {})}))] += 1
+    print("custom_strike keys in those families:", keys.most_common(10))
     print("open 'Before <date>' families, by what date_ladder_arb says:")
     for r, n in counts.most_common():
         print(f"  {n:4d}  {r}")
@@ -75,6 +80,10 @@ def main():
                         seen.append(x)
                 for x in seen[:2]:
                     print(f"          | {x[:400]}")
+            if r == "custom_strike differs":
+                for m in ev["markets"][:4]:
+                    print(f"          | {m['ticker']} {m.get('yes_sub_title')!r} custom_strike={m.get('custom_strike')!r}"
+                          f" strike_type={m.get('strike_type')!r} floor={m.get('floor_strike')!r}")
             if r.startswith("own_markets"):
                 m = ev["markets"][0]
                 print(f"          | {m.get('market_type')} {m.get('settlement_bounds_type')} "
@@ -88,7 +97,8 @@ def main():
             print(f"  {t}: {why(e)}  ({len(e['markets'])} markets, me={e.get('mutually_exclusive')!r})")
             if why(e) != "ok":
                 for m in e["markets"][:3]:
-                    print(f"      {m['ticker']} | {m.get('yes_sub_title')!r} | {(m.get('rules_primary') or '')[:160]!r}")
+                    print(f"      {m['ticker']} | {m.get('yes_sub_title')!r} | event_ticker={m.get('event_ticker')!r}"
+                          f" | custom_strike={m.get('custom_strike')!r} | plain={plain_payouts([m])}")
         except Exception as ex:
             print(f"  {t}: lookup failed: {ex}")
     cfg = config.load()
