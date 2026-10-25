@@ -11,7 +11,7 @@ from kal import config  # noqa: E402
 from kal.client import Kalshi  # noqa: E402
 from kal.strategies import date_ladder_arb as d  # noqa: E402
 from kal.strategies.base import Context, plain_payouts  # noqa: E402
-from kal.strategies.ladder_arb import own_markets, same_custom_strike  # noqa: E402
+from kal.strategies.ladder_arb import own_markets  # noqa: E402
 
 GAPS = ["KXBRIANCONF-26JUL08", "KXALBUMRELEASEDATE-NEWDRA", "KXHEGSETHOUT-26APR", "KXFISAEXTEND-26APR",
         "KXMLBDEBUT-KANDERSON", "KXMLBDEBUT-AMILLER"]
@@ -25,13 +25,16 @@ def why(ev):
         return f"mutually_exclusive={ev.get('mutually_exclusive')!r}"
     if not own_markets(ev):
         return "own_markets: tickers or plain payouts"
-    if not same_custom_strike(ev):
-        return "custom_strike differs"
     days = [d.deadline(m) for m in ms]
     if None in days:
         return "a subtitle isn't 'Before <date>'"
     if len(set(days)) != len(days):
         return "a deadline repeats"
+    about = {d._about(m) for m in ms}
+    if None in about:
+        return "custom_strike date disagrees with the wording"
+    if len(about) != 1:
+        return "custom_strike differs"
     rules = {d._rules(m) for m in ms}
     if None in rules:
         return "no rules"
