@@ -328,6 +328,8 @@ fetched = collections.Counter()
 for s_, _ in vol.most_common(40):
     got = {}
     for path, params in (("/markets", {"status": "settled"}), ("/historical/markets", {})):
+        import time as _time
+        _time.sleep(0.6)   # stay under Kalshi's public rate limit (the first run got 429s)
         code, d = get(path, series_ticker=s_, limit=200, **params)
         fetched[f"{path} {code}"] += 1
         if code == 200 and isinstance(d, dict):
@@ -339,6 +341,9 @@ for s_, _ in vol.most_common(40):
         by_event[m.get("event_ticker")].append(m)
     for ev, ms in by_event.items():
         flags = {m.get("can_close_early") for m in ms}
+        closes = sorted(t for t in (_ts(m.get("close_time")) for m in ms) if t)
+        if closes:
+            early[cat]["events whose markets closed within 10 min of each other"] += (closes[-1] - closes[0]) <= 600
         early[cat]["events, all markets can close early" if flags == {True} else
                    "events, some can't close early" if False in flags or None in flags else "events, other"] += 1
         for m in ms:
