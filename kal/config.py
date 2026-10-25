@@ -44,6 +44,7 @@ DEFAULTS = {
         "bracket_arb": {"mode": "paper", "verified": False},
         "favorites": {"mode": "paper"},
         "mentions": {"mode": "paper"},
+        "longshot_fade": {"mode": "paper"},
     },
     "disabled_reason": "",
 }
