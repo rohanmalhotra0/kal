@@ -23,6 +23,7 @@ import re
 import time
 from datetime import datetime, timezone
 
+from ..client import num
 from .. import config
 from ..strategies import favorites
 from . import backtest
@@ -103,6 +104,31 @@ def rotation(tickers, day, n, step=None):
         return []
     start = (day * (n if step is None else step)) % len(order)
     return [order[(start + i) % len(order)] for i in range(min(n, len(order)))]
+
+
+ACTIVE_POOL = 300  # rotate through the busiest series with open markets
+
+
+def active_series(client, pool=ACTIVE_POOL):
+    """Series with markets open right now, busiest first (by 24h volume).
+
+    Kalshi has 15,000+ series and most are tiny or finished. An edge only helps where
+    the bot can still trade, and busy series have the most settled history to test,
+    so research spends its daily budget there. Returns [] if the events call fails."""
+    try:
+        events = client.events(status="open", with_nested_markets="true")
+    except Exception as e:
+        log.warning("research: couldn't list open events: %s", e)
+        return []
+    volume = {}
+    for ev in events:
+        s = ev.get("series_ticker")
+        if not s or s.startswith("KXMVE"):  # combo bets: not a series we'd trade
+            continue
+        v = sum(num(m, "volume_24h") for m in ev.get("markets") or [])
+        volume[s] = volume.get(s, 0.0) + v
+    busy = sorted((s for s, v in volume.items() if v > 0), key=lambda s: (-volume[s], s))
+    return busy[:pool]
 
 
 def pick_series(tickers, edges, words, day, max_series, now):
@@ -217,6 +243,9 @@ def run(client, cfg, quick=False, now=None, series=None):
     all_series = {s["ticker"]: s for s in client.series() if isinstance(s, dict) and s.get("ticker")}
     # One-off series have a single event: never enough events to show an edge.
     testable = [t for t, s in all_series.items() if s.get("frequency") != "one_off"]
+    active = [t for t in active_series(client) if t in all_series and all_series[t].get("frequency") != "one_off"]
+    if active:
+        testable = active  # the busiest series we could actually trade
     day = datetime.fromtimestamp(now, timezone.utc).date().toordinal()
     picks = list(series) if series else pick_series(testable, edges, words, day, max_series, now)
 

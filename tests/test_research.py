@@ -531,3 +531,20 @@ class MentionsTests(TempHome):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ActiveSeriesTests(TempHome):
+    def test_busiest_open_series_first_and_combos_skipped(self):
+        c = FakeKalshi()
+        c.event_list = [
+            {"series_ticker": "QUIET", "markets": [{"volume_24h_fp": "5.00"}]},
+            {"series_ticker": "BUSY", "markets": [{"volume_24h_fp": "900.00"}, {"volume_24h_fp": "100.00"}]},
+            {"series_ticker": "KXMVECROSSCATEGORY", "markets": [{"volume_24h_fp": "99999.00"}]},
+            {"series_ticker": "DEAD", "markets": [{"volume_24h_fp": "0.00"}]},
+        ]
+        self.assertEqual(discover.active_series(c), ["BUSY", "QUIET"])
+
+    def test_falls_back_when_events_fail(self):
+        c = FakeKalshi()
+        c.events = lambda **p: (_ for _ in ()).throw(RuntimeError("down"))
+        self.assertEqual(discover.active_series(c), [])
