@@ -1,23 +1,42 @@
-# Prints how the real Kalshi API behaves (public data only: no key, no orders).
+# Side branch only (probe/weather), never merged. Public data only: no key, no orders.
 name: api-probe
 
 on:
   workflow_dispatch:
-  push:
-    branches: [main]
-    paths: ["tools/api_probe.py", ".github/workflows/api-probe.yml"]
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
   probe:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 200
+    env:
+      KAL_HOME: ./state
+      PYTHONUNBUFFERED: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install requests
-      - run: python tools/api_probe.py
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Reuse the forecasts the last run fetched (runs never change)
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: weather-research
+          path: state
+          run-id: 40185901654
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Weather backtest (NBM forecasts vs Kalshi prices), 18 and 30 hours before the end
+        run: python tools/weather_research.py --hours 18 30 --markets-per-series 450
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: weather-research
+          path: |
+            state/research/*.json
+            state/cache/*.json
+          retention-days: 30
