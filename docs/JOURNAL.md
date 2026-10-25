@@ -2,6 +2,30 @@
 
 Newest first. Each 2-hour check-in adds one entry: what it checked, what it found, links.
 
+## 2026-10-25 16:00 UTC — where arbitrage could grow, measured on 14,640 open events
+
+- **Review of #12** (independent agent) found 2 real gaps. Both fixed with tests:
+  - a live edge with nothing busy to re-test it kept betting on its old numbers;
+  - the coverage guard couldn't see the busy filter.
+  Real data on the branch: 336 busy markets in the guard's 3 series (floor 25).
+  https://github.com/rohanmalhotra0/kal/pull/12#issuecomment-6399822048
+- **New #13:** the gate sends two $0.01 test orders, but 4 places said one. Text fixed; a test ties them together.
+  https://github.com/rohanmalhotra0/kal/pull/13
+- **Arbitrage shapes** (probe, no orders):
+  - Fees: only ~43 open events (0.3%) charge less than the bot assumes. Using each
+    series' real fee isn't worth a money-path change.
+  - "Before <date>" ladders (AGI by 2030 vs 2031, ski openings, Trump runs) exist, but
+    none was mispriced. Every apparent gap was a false pair: different cities or
+    people, or "as of" dates (a state, not a deadline).
+  - **2,257 one-winner events (40%) are skipped by basket_arb** for one standard clause:
+    "if the game is cancelled or not started within 48 hours, the market resolves to a
+    fair price". That is nearly every sports game and weather bracket. 5 had YES bids
+    adding to $1.01-1.02, too little after fees. A watch (run 40209367984) counts
+    real after-fee baskets there until ~20:10 UTC. A cancelled game settles at a price
+    Kalshi picks, so any change stays paper-only unless the owner says otherwise.
+- Running: arbitrage watch (live rules, to ~20:15), taker reruns at 1/6/24 h (~17:55),
+  LIP research (agent), #9's before/after check at 21:05.
+
 ## 2026-10-25 14:50 UTC — check-in: weather test says the market knows more
 
 - Checked: CI green on main. No server yet, so no status report.
