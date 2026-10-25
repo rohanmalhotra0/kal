@@ -103,6 +103,12 @@ def reconcile(client):
             o = found[0]
             if resting(o):
                 client.cancel(o["order_id"])
+            if not fill_known(o):
+                # "canceled" alone can hide a part fill: never book it as nothing. It stays
+                # 'unknown', and the bot stops for a person to check it.
+                config.trip(f"can't tell how much order {r['client_order_id']} on {r['ticker']} filled "
+                            f"(Kalshi says only {o.get('status', 'nothing')!r}). Check it on Kalshi.")
+                raise Halted(f"{r['ticker']}: the order lookup doesn't say how much filled")
             n = filled(o, r["count"])
             db.execute("UPDATE orders SET status = ?, filled = ?, order_id = ? WHERE id = ?",
                        f"reconciled:{o.get('status', '?')}", n, o.get("order_id", ""), r["id"])

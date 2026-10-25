@@ -480,14 +480,15 @@ SWITCH_BUSY = "A trade run is still going. Try again in a minute."
 
 
 def _back_on_paper(before, cfg):
-    """Lines naming the strategies a switch to prod put back on paper (live was for demo)."""
-    if before["env"] == "prod" or cfg["env"] != "prod":
+    """Lines naming the strategies a switch to prod changed back to their real-money modes."""
+    moved = config.back_on_prod(before, cfg)
+    if not moved:
         return []
-    back = [n for n in config.practice_live(before) if cfg["strategies"].get(n, {}).get("mode") == "paper"]
-    if not back:
-        return []
-    return [f"Back on paper for real money: {', '.join(back)}. Live was for demo practice.",
-            f"To trade one with real money: {_cmd(f'set strategies.{back[0]}.mode live')}"]
+    lines = [config.back_on_prod_note(moved)]
+    off = [n for n, m in moved.items() if m != "live"]
+    if off:
+        lines.append(f"To trade one with real money: {_cmd(f'set strategies.{off[0]}.mode live')}")
+    return lines
 
 
 def _live_now(cfg):
