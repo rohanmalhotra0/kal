@@ -2,6 +2,25 @@
 
 Newest first. Each 2-hour check-in adds one entry: what it checked, what it found, links.
 
+## 2026-10-25 16:50 UTC — check-in: all green; interest can't stretch the $300 rule
+
+- Checked: CI and market-check green on main 0ec62f8 (with #13, #14, #15). Self-test
+  passes. Real-data scan: 0 trades in all six strategies, nothing suspicious. No server
+  yet, so no status report.
+- Merged since 16:00:
+  - #13: text says two test orders;
+  - #14: basket_arb sees game and weather events, paper only, as $10 bets, at most 25%
+    of paper money; the exact wordings cover 2,270 of 2,313 such events;
+  - #15: LIP research, verdict "not yet".
+- #14 caused a base.py conflict in #9, #10 and #11. It was additive, resolved by merge
+  commits; all four open PRs are green and mergeable.
+- **Idea #12 (interest on cash):** the books are built from the bot's own fills only, so
+  interest or a deposit never raises what it may spend. A new test pins it (it fails if the
+  books ever read the account balance). Kept as the owner's money: ~$10 a year isn't worth a
+  money-path change. https://github.com/rohanmalhotra0/kal/pull/16
+- Running: Polymarket study (agent), 2 arbitrage watches (to ~20:15), taker reruns
+  (~17:55), #9's before/after check (21:05).
+
 ## 2026-10-25 16:00 UTC — where arbitrage could grow, measured on 14,640 open events
 
 - **Review of #12** (independent agent) found 2 real gaps. Both fixed with tests:

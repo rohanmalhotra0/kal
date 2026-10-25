@@ -122,16 +122,20 @@ status: **testing** (add the PR link), **built**, or **rejected** (say why in on
 - Risk: high. Better-informed traders pick off resting orders. The engine can't cancel orders. LIP terms change often: check they still apply.
 - Test: paper only. Log would-be quotes. Count a fill when trades go through our price. Score at settlement, plus our LIP share.
 
-**11. Other venues as a fair-price guide** - untested
+**11. Other venues as a fair-price guide** - tested 2026-10-25: no edge, the prices match
 - What: use Polymarket or sportsbook prices to judge Kalshi's. Trade only Kalshi.
 - Evidence: weak-medium. A 2024 election study found Polymarket led Kalshi.
 - Risk: medium. Venues can settle the same event differently.
 - Test: log both prices. Which was closer to the result?
+- Result (`tools/xvenue_research.py`): 3,132 games in 13 leagues, 90 days, 6 h before the end. Same price (over 2c apart on 0.3% of markets), same skill (Brier 0.1984 Kalshi, 0.1985 Polymarket), same results on all 6,836 markets. Buying Kalshi on a 2-6c gap: 4-11 trades, all lost.
 
-**12. Interest on positions** - untested (accounting, not a strategy)
+**12. Interest on positions** - checked 2026-10-25: kept as the owner's money (accounting, not a strategy)
 - What: Kalshi pays variable interest (seen 3.25-4%) on cash and open positions. Monthly, $250+ only.
 - Evidence: strong (Kalshi help page). Small: ~$10 a year on $300. Risk: low.
 - Test: find it in account history. Ask for the ledger to count it. Never loosen risk rules for it.
+- Result: the ledger is built from the bot's own fills and settlements only, so interest (like
+  a deposit) never raises what the bot may spend. A test pins that. Counting it would add about
+  $10 a year to what the bot may reinvest: not worth a money-path change.
 
 **13. Longshot fade (NO on cheap YES)** - being built, paper only
 - What: buy NO where YES costs under 20c.
