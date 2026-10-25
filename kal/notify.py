@@ -14,18 +14,32 @@ import requests
 log = logging.getLogger(__name__)
 
 
+def topic():
+    """KAL_NTFY_TOPIC, or the topic `kal setup` saved in $KAL_HOME/ntfy_topic."""
+    t = os.environ.get("KAL_NTFY_TOPIC")
+    if t:
+        return t.strip()
+    try:
+        from . import config
+        with open(os.path.join(config.home(), "ntfy_topic")) as f:
+            return f.read().strip() or None
+    except OSError:
+        return None
+
+
 def enabled():
-    return bool(os.environ.get("KAL_NTFY_TOPIC"))
+    return bool(topic())
 
 
 def send(title, message, priority="default", tags=()):
     """Push one alert. Returns True if it was sent."""
-    topic = os.environ.get("KAL_NTFY_TOPIC")
-    if not topic:
+    t = topic()
+    if not t:
         return False
+    topic_name = t
     server = os.environ.get("KAL_NTFY_SERVER", "https://ntfy.sh").rstrip("/")
     try:
-        r = requests.post(f"{server}/{topic}", data=message.encode()[:4000], timeout=10, headers={
+        r = requests.post(f"{server}/{topic_name}", data=message.encode()[:4000], timeout=10, headers={
             "Title": title.encode("ascii", "replace").decode()[:200],
             "Priority": priority,
             "Tags": ",".join(tags),

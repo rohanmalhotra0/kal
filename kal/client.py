@@ -68,8 +68,13 @@ WRITE_PACER = _Pacer(0.11)
 # ---------- auth ----------
 
 def load_key(home=None):
-    """(key_id, private_key) from env vars or $KAL_HOME/kalshi.pem, or (None, None)."""
+    """(key_id, private_key) from env vars, or the files `kal setup` writes in $KAL_HOME
+    (kalshi_key_id, kalshi.pem), or (None, None)."""
     key_id = os.environ.get("KALSHI_API_KEY_ID")
+    id_path = home and os.path.join(home, "kalshi_key_id")
+    if not key_id and id_path and os.path.exists(id_path):
+        with open(id_path) as f:
+            key_id = f.read().strip()
     pem = os.environ.get("KALSHI_PRIVATE_KEY")
     path = os.environ.get("KALSHI_PRIVATE_KEY_PATH") or (home and os.path.join(home, "kalshi.pem"))
     if not pem and path and os.path.exists(path):
