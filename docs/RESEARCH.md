@@ -91,12 +91,13 @@ status: **testing** (add the PR link), **built**, or **rejected** (say why in on
 - Risk: medium-high. If the rules differ (source, time, rounding), both legs can lose.
 - Test: pick 3 pairs where the rules text proves the link. Log gaps on paper for 2 weeks.
 
-**7. Scheduled data releases (weather, CPI, jobs)** - weather backtest built
+**7. Scheduled data releases (weather, CPI, jobs)** - weather tested 2026-10-25: rejected
 - What: compare the price with a public forecast before the report comes out.
 - Evidence: medium-low. A Fed study found Kalshi macro prices about as good as expert surveys. Weather "edges" online come from sellers, not studies.
 - Risk: medium. Model error, thin markets, news moves first.
 - Test: daily high temps (settle on the NWS Daily Climate Report). Save forecast + price 6h before close for 60+ days. Compare with results.
 - Backtest: `tools/weather_research.py` (`kal/research/weather.py`). Daily highs in 7 cities. It uses the latest NBM forecast run published 2+ hours before the decision time (the Iowa Environmental Mesonet keeps every run). Each city's bias and spread are fitted only on earlier days. It buys where the forecast and the price disagree by 5c or 10c after the taker fee, and counts one day in all cities as one unit. It also compares how well the forecast and the market called the results (Brier score).
+- Result (4,686 markets, 112 days, 7 cities): Kalshi's prices beat the NBM forecast in every city (Brier 0.095 vs 0.121 at 18 h before the end; 0.098 vs 0.122 at 30 h). The market is calibrated at every level. The forecast is overconfident in the likeliest bracket: at 60%+ it won 50%. Every trading rule lost: YES about -50%, NO -11% to -17%. The brackets map right (every event tiles), and the tails aren't fat (2.7% of results beyond 2 spreads). Rejected: the public forecast knows less than the market.
 
 **8. Mention words** - built, paper
 - What: YES on words said more often than the price says. NO on less.
