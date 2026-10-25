@@ -20,6 +20,7 @@ from tests.fakes import FakeKalshi
 from tests.helpers import TempHome, orders_proven
 
 DAY = 86400
+LISTED = time.time() - 30 * DAY   # every market in the fixtures was listed together, 30 days ago
 RULES = "If Drake releases a new studio album before {d}, then the market resolves to Yes."
 
 
@@ -33,6 +34,7 @@ def market(ticker, ev, when, bid, ask, close=None, rules=RULES, status="active")
     stamp = datetime.datetime(when.year, when.month, when.day, 4, tzinfo=timezone.utc).timestamp()
     m = {"ticker": ticker, "event_ticker": ev, "status": status, "yes_sub_title": f"Before {words}",
          "close_time": iso(close or stamp), "rules_primary": rules.format(d=words), "can_close_early": True,
+         "open_time": iso(LISTED),
          "yes_bid_dollars": f"{bid:.4f}", "yes_ask_dollars": f"{ask:.4f}"}
     return m
 
@@ -195,8 +197,9 @@ class DateLadderTests(unittest.TestCase):
         for m in ev["markets"]:
             d = datetime.datetime.strptime(m["yes_sub_title"][len("Before "):], "%b %d, %Y").date()
             m["rules_primary"] = (f"If Drake releases a new studio album before {d:%B} {d.day}th, {d.year}, "
-                                  f"the market resolves to Yes. On or before {d - datetime.timedelta(days=1):%B} "
-                                  f"{(d - datetime.timedelta(days=1)).day}, {d.year} counts.")
+                                  f"the market resolves to Yes.")
+            m["rules_secondary"] = (f"A release on or before {d - datetime.timedelta(days=1):%B} "
+                                    f"{(d - datetime.timedelta(days=1)).day}, {d.year} counts.")
         self.assertEqual(len(self.scan(ev)), 1)
 
     def test_no_rules_no_trade(self):
@@ -297,7 +300,9 @@ class DateLadderTests(unittest.TestCase):
     def _listed(self, opens):
         ev = self._rules(date_event(), self.LISTED)   # the real Drake wording (KXALBUMRELEASEDATE-NEWDRA)
         for m, t in zip(ev["markets"], opens):
-            if t is not None:
+            if t is None:
+                del m["open_time"]
+            else:
                 m["open_time"] = iso(t)
         return ev
 
@@ -316,11 +321,78 @@ class DateLadderTests(unittest.TestCase):
         t = time.time() - 30 * DAY
         self.assertEqual(self.scan(self._listed((t, t + DAY, t + DAY))), [])
         self.assertEqual(self.scan(self._listed((None, None, None))), [])   # no listing time: no trade
-        for text in ("If a budget resolution passes since this market was issued and before {d}, then the "
-                     "market resolves to Yes.",
-                     "If Trump declares a national emergency after Issuance and before {d}, then the market "
-                     "resolves to Yes."):
+
+    def test_listing_order_counts_whatever_the_wording(self):
+        # The window can start at listing in words the rules hide anywhere: "after the contract
+        # opens", or a second paragraph. So every pair needs the later market listed no later.
+        t = time.time() - 30 * DAY
+        for text, extra in (
+                ("If Drake releases a new album after the contract opens and before {d}, then the market "
+                 "resolves to Yes.", ""),
+                ("If Drake releases a new album before {d}, then the market resolves to Yes.",
+                 "Only albums released after this market is issued count."),
+                ("If Drake releases a new album before {d}, then the market resolves to Yes.", "")):
+            ev = self._listed((t, t + DAY, t + DAY))
+            for m in ev["markets"]:
+                m["rules_primary"], m["rules_secondary"] = text.format(d=m["yes_sub_title"][len("Before "):]), extra
+            self.assertEqual(self.scan(ev), [], text + extra)
+            ev = self._listed((t, t, t))
+            for m in ev["markets"]:
+                m["rules_primary"], m["rules_secondary"] = text.format(d=m["yes_sub_title"][len("Before "):]), extra
+            self.assertEqual(len(self.scan(ev)), 1, text + extra)
+
+    def test_more_negations_and_short_windows_are_refused(self):
+        # Review round 2: each passed the first word list.
+        for text in ("If there is no new Drake studio album before {d}, then the market resolves to Yes.",
+                     "If Drake has yet to release a new album before {d}, then the market resolves to Yes.",
+                     "If Drake avoids releasing a new album before {d}, then the market resolves to Yes.",
+                     "If neither Drake nor his label releases an album before {d}, then the market resolves to Yes.",
+                     "If none of Drake's albums is released before {d}, then the market resolves to Yes.",
+                     "If Drake releases an album in the 7 days before {d}, then the market resolves to Yes.",
+                     "If Drake releases an album within the week before {d}, then the market resolves to Yes.",
+                     "If Drake releases an album on the day before {d}, then the market resolves to Yes."):
             self.assertEqual(self.scan(self._rules(date_event(), text)), [], text)
+
+    def test_nothing_may_follow_the_claim_or_undo_it(self):
+        # An outcome that can be undone ("retracted before expiration") gives a later market
+        # longer to undo it: an earlier YES with a later NO. The claim must be the whole first
+        # paragraph, and no paragraph may let it be undone.
+        claim = "If Drake announces a new album before {d}, then the market resolves to Yes."
+        undo = "If the announcement is retracted before expiration, the market resolves to No."
+        ev = self._rules(date_event(), claim + " " + undo)
+        self.assertEqual(self.scan(ev), [])
+        ev = self._rules(date_event(), claim)
+        for m in ev["markets"]:
+            m["rules_secondary"] = undo
+        self.assertEqual(self.scan(ev), [])
+        for word in ("rescinded", "repealed", "overturned", "withdrawn", "reversed"):
+            ev = self._rules(date_event(), claim)
+            for m in ev["markets"]:
+                m["rules_secondary"] = f"An announcement later {word} does not count."
+            self.assertEqual(self.scan(ev), [], word)
+        ev = self._rules(date_event(), claim + " Otherwise, the market resolves to No.")
+        self.assertEqual(len(self.scan(ev)), 1)   # the plain "otherwise No" is fine
+
+    def test_a_ladder_upside_down_nearly_everywhere_is_skipped(self):
+        # A question read the wrong way round looks upside down at every step; a real gap is
+        # one spot. (Two-market ladders can't be told apart this way.)
+        ev = date_event(quotes=((.80, .82), (.60, .62), (.40, .42), (.20, .22)), days=(10, 15, 20, 25))
+        self.assertEqual(self.scan(ev), [])
+        ev = date_event(quotes=((.40, .42), (.30, .32), (.50, .52), (.60, .62)), days=(10, 15, 20, 25))
+        self.assertEqual(len(self.scan(ev)), 1)   # one spot: kept
+
+    def test_the_day_before_counts_only_as_on_or_before(self):
+        ev = date_event()
+        for m in ev["markets"]:
+            d = datetime.datetime.strptime(m["yes_sub_title"][len("Before "):], "%b %d, %Y").date()
+            m["rules_secondary"] = f"Only a release on or after {(d - datetime.timedelta(days=1)):%b} " \
+                                   f"{(d - datetime.timedelta(days=1)).day}, {d.year} counts."   # one-day buckets
+        self.assertEqual(self.scan(ev), [])
+
+    def test_a_midnight_deadline_time_is_fine(self):
+        ev = self._rules(date_event(), "If Drake releases a new album before {d} at 12:00 AM ET, then the "
+                                       "market resolves to Yes.")
+        self.assertEqual(len(self.scan(ev)), 1)
 
     def test_a_fixed_start_date_the_same_for_all_still_pairs(self):
         ev = self._rules(date_event(), "If Young Thug and Gunna make a song together after Sep 30, 2025 and "
@@ -475,6 +547,65 @@ class EngineTests(TempHome):
         self.assertEqual([(o[0], o[1]) for o in c.orders],
                          [(ev["markets"][0]["ticker"], "no"), (ev["markets"][1]["ticker"], "yes")])
         self.assertEqual(c.orders[0][2], c.orders[1][2])
+
+    # ---- legging: the second leg can come up short ----
+
+    def _live_pair(self, fill):
+        """A live (and verified) run where the thin NO on the earlier date goes first, and
+        fill(ticker, side, count, price) says how much each order gets."""
+        config.update({"strategies": {"date_ladder_arb": {"mode": "live", "verified": True}}})
+        ev = date_event()
+        c = fake_for(ev)
+        early, mid = ev["markets"][0]["ticker"], ev["markets"][1]["ticker"]
+        set_book(c, early, .40, .42, bid_size=15)   # NO on the earlier date is the thin leg
+        c.fill = fill
+        return c, early, mid
+
+    def test_a_short_second_leg_stops_the_bot_and_the_naked_leg_fits_max_per_trade(self):
+        c, early, mid = self._live_pair(lambda t, side, n, p: n if not c.orders else n // 2)   # fill runs before the log
+        s = engine.run_once(c)
+        self.assertFalse(s["ok"])
+        self.assertIn("half-built", config.load()["disabled_reason"])   # tripped: nothing more trades
+        self.assertFalse(config.load()["enabled"])
+        rows = db.query("SELECT ticker, side, count, filled, price FROM orders ORDER BY id")
+        self.assertEqual([(r["ticker"], r["side"]) for r in rows], [(early, "no"), (mid, "yes")])
+        self.assertEqual(rows[1]["count"], rows[0]["filled"])            # leg 2 asked for what leg 1 got
+        self.assertEqual(rows[1]["filled"], rows[0]["filled"] // 2)
+        first = rows[0]
+        naked = first["filled"] * first["price"] + fee(first["filled"], first["price"])
+        self.assertLessEqual(naked, config.load()["max_per_trade"] + 1e-9)   # the most it can lose
+        self.assertTrue(db.query("SELECT status FROM signals")[0]["status"].startswith("stranded:"))
+
+    def test_a_second_leg_that_fills_nothing_stops_too(self):
+        c, early, mid = self._live_pair(lambda t, side, n, p: n if not c.orders else 0)
+        s = engine.run_once(c)
+        self.assertFalse(s["ok"])
+        self.assertIn("half-built", config.load()["disabled_reason"])
+
+    def test_a_part_filled_first_leg_shrinks_the_second(self):
+        c, early, mid = self._live_pair(lambda t, side, n, p: min(n, 5) if not c.orders else n)
+        s = engine.run_once(c)
+        self.assertTrue(s["ok"], s)
+        asked = [o[2] for o in c.orders]
+        self.assertGreater(asked[0], 5)
+        self.assertEqual(asked[1], 5)                                     # asked for what leg 1 got
+        self.assertEqual(config.load()["disabled_reason"], "")
+
+    def test_a_first_leg_that_fills_nothing_buys_nothing_else(self):
+        c, early, mid = self._live_pair(lambda t, side, n, p: 0)
+        s = engine.run_once(c)
+        self.assertTrue(s["ok"], s)
+        self.assertEqual(len(c.orders), 1)
+        self.assertEqual(config.load()["disabled_reason"], "")
+
+    def test_promotion_never_turns_it_live(self):
+        # promote.py lifts paper-only flags on research edges. It never writes the config, so
+        # only the owner's two switches (mode live + verified) can put this on real money.
+        from kal.research import promote
+        before = config.load()["strategies"]["date_ladder_arb"]
+        promote.apply(config.load())
+        self.assertEqual(config.load()["strategies"]["date_ladder_arb"], before)
+        self.assertEqual(config.DEFAULTS["strategies"]["date_ladder_arb"], {"mode": "paper", "verified": False})
 
     def test_money_locked_past_max_arb_days_is_refused(self):
         config.update({"strategies": {"date_ladder_arb": {"mode": "paper"}}})

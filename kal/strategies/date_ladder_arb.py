@@ -19,10 +19,13 @@ The deadline comes from each market's own wording ("Before Sep 1, 2026"), never 
 close_time: Kalshi rewrites close_time when a market settles early, and the order
 flips. We only trust an event where:
   - every market reads exactly "Before <date>", each with its own date;
-  - every market's rules say "If <it happens> before <that same date>, then the market
-    resolves to Yes", with no "not", "still", "in effect" and the like: those flip which
-    date implies which. "After issuance" windows pair only when the later market was listed
-    no later than the earlier one;
+  - every market's first rules paragraph is just "If <it happens> before <that same date>,
+    then the market resolves to Yes", with no "not", "no", "yet to", "still", "in effect",
+    "in the 7 days before" and the like: those flip or break which date implies which;
+  - nothing in the rules lets the outcome be undone (retracted, rescinded, repealed...);
+  - a pair counts only if the later market was listed no later than the earlier one ("after
+    issuance" windows start at each market's own listing);
+  - the ladder isn't upside down nearly everywhere (a question read the wrong way round is);
   - the rules and custom_strike match across markets once each market's own deadline is
     taken out (any other date must be the same everywhere).
 Anything odd and the event is skipped. The lock rests on reading rules text, so real money
@@ -116,25 +119,38 @@ def _rules(m):
     if not text:
         return None
     own = deadline(m)
-    near = {own, own - datetime.timedelta(days=1)} if own else set()
-    text = _DATES.sub(lambda g: "<deadline>" if _value_date(g.group(0)) in near else g.group(0), text)
+
+    def mine(g):
+        d = _value_date(g.group(0))
+        if d == own:
+            return "<deadline>"
+        lead = text[max(0, g.start() - 14):g.start()]
+        if own and d == own - datetime.timedelta(days=1) and re.search(r"(?:on or before|by|through)\s+$", lead):
+            return "<deadline>"   # "on or before Aug 31" is "before Sep 1"
+        return g.group(0)
+    text = _DATES.sub(mine, text)
     return re.sub(r"\s+", " ", text)
 
 
 # The one wording trusted: "If <it happens> before <this market's deadline>, then the market
 # resolves to Yes." A negation ("has not released") or a state ("is still", "in effect", "as
 # of") breaks which date implies which, so those are refused.
-_CLAIM = re.compile(r"^\s*if\s+(?P<thing>.+?)\s+before\s+(?P<date>[^,.]+(?:,\s*(?:19|20)\d\d)?)\s*[,.]\s*"
-                    r"(?:then\s+)?the market (?:will )?resolves? to yes\b", re.I | re.S)
-_NOT_A_HAPPENING = re.compile(r"\b(?:not|no longer|never|cannot|without|fails?|failed|still|remains?|remained"
-                              r"|continues?|continued|in effect|as of|until|unless)\b|n't\b", re.I)
-# "after issuance and before <deadline>": each market counts from when it was listed. That is
-# nested only if the later deadline's market was listed no later than the earlier one's. Any
-# word that could point at the market's own listing counts: a false alarm only adds that check.
-_FROM_LISTING = re.compile(r"\b(?:issuance|issued|issue date|listing|listed|launch(?:ed|es)?|creat(?:ion|ed)"
-                           r"|this market|the market)\b", re.I)
-
-
+_CLAIM = re.compile(r"^\s*if\s+(?P<thing>.+?)\s+before\s+(?P<date>[^,.]+(?:,\s*(?:19|20)\d\d)?)"
+                    r"(?:\s+at\s+12:00\s*am\s+(?:et|est|edt))?\s*[,.]\s*"
+                    r"(?:then\s+)?the market (?:will )?resolves? to yes"
+                    r"(?:\s*\.\s*otherwise,?\s+the market (?:will )?resolves? to no)?\s*\.?\s*$", re.I | re.S)
+# Anywhere in the rules: an outcome that can be undone. "Unless retracted before expiration"
+# gives a later market longer to undo it, so an earlier YES can come with a later NO.
+_UNDONE = re.compile(r"\b(?:retract|withdr[ae]w|revers|overturn|rescind|revok|repeal|annul|invalidat)", re.I)
+# Refused in <it happens>: negations ("not", "no new album", "yet to", "avoids"), states ("still",
+# "in effect", "as of"), and windows that end at each market's own date ("in the 7 days before",
+# "within the week before", "on the day before"): those don't nest either.
+_NOT_A_HAPPENING = re.compile(
+    r"\b(?:not|no|none|neither|nor|no longer|never|cannot|without|fails?|failed|yet to|avoids?|avoided"
+    r"|still|remains?|remained|continues?|continued|in effect|as of|until|unless"
+    r"|within (?:the |a |one |\d+ )?(?:last |past |final )?(?:hours?|days?|weeks?|months?|years?))\b|n't\b"
+    # "<it happens> in the 7 days | on the day | in the week" right before "before <date>"
+    r"|\b(?:the|a|one|few|last|final|\d+)\s+(?:hours?|days?|weeks?|months?|years?)\s*$", re.I)
 def _claim(m):
     g = _CLAIM.match(m.get("rules_primary") or "")
     if not g or _NOT_A_HAPPENING.search(g["thing"]) or _value_date(g["date"].strip()) != deadline(m):
@@ -148,12 +164,6 @@ def claims_it_happens_before(m):
     return _claim(m) is not None
 
 
-def counts_from_listing(m):
-    """True if the market only counts what happens after it was listed ("after issuance")."""
-    g = _claim(m)
-    return bool(g) and bool(_FROM_LISTING.search(g["thing"]))
-
-
 def _opened(m):
     try:
         return ts(m["open_time"])
@@ -162,11 +172,12 @@ def _opened(m):
 
 
 def nested(earlier, later):
-    """True if YES on `earlier` must mean YES on `later`. With "after issuance" windows, only when
-    the later market was listed no later than the earlier one: else something between the two
-    listings is YES on the earlier market only, and the pair pays nothing."""
-    if not (counts_from_listing(earlier) or counts_from_listing(later)):
-        return True
+    """True if YES on `earlier` must mean YES on `later`, whatever the rules say about when
+    counting starts: only when the later market was listed no later than the earlier one.
+    Rules like "after issuance and before <date>" count from each market's own listing, and
+    that wording can hide anywhere ("after the contract opens", the second rules paragraph).
+    If the later market was listed later, something between the two listings is YES on the
+    earlier market only, and the pair pays nothing. Real data: 410 of 3,864 pairs fail this."""
     a, b = _opened(earlier), _opened(later)
     return a is not None and b is not None and b <= a
 
@@ -186,9 +197,18 @@ def ladder(ev):
     rules = {_rules(m) for m in markets}
     if len(rules) != 1 or None in rules:
         return None   # the same question at every date, or no trade
+    if _UNDONE.search(rules.pop()):
+        return None   # an outcome that can be undone later
     if any(close_ts(m) is None for m in markets):
         return None
     return sorted(markets, key=deadline)
+
+
+def mostly_upside_down(rungs):
+    """True if most neighbouring deadlines look upside down. A real gap is one spot (a fresh
+    listing, a stale quote); a question read the wrong way round is upside down everywhere."""
+    pairs = list(zip(rungs, rungs[1:]))
+    return len(pairs) >= 2 and sum(looks_inverted(a, b) for a, b in pairs) * 2 > len(pairs)
 
 
 def settles_by(earlier, later):
@@ -237,7 +257,7 @@ class DateLadderArb(Strategy):
         now, candidates = time.time(), []
         for ev in ctx.client.events(status="open", with_nested_markets="true"):
             rungs = ladder(ev)
-            if not rungs:
+            if not rungs or mostly_upside_down(rungs):
                 continue
             hot = [(a, b) for i, a in enumerate(rungs) for b in rungs[i + 1:]
                    if min(close_ts(a), close_ts(b)) - now > MIN_TIME_LEFT and tradeable(a, ctx)

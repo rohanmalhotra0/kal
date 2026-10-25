@@ -80,6 +80,19 @@ class SetupTests(TempHome):
         self.assertIn("ntfy", text)
         self.assertIn("The bot is ON (REAL money, $300).", text)
 
+    def test_a_key_copy_made_elsewhere_gets_a_reminder_to_delete_it(self):
+        # A copy left in /tmp can be read by other users (and by the auto-update's test user).
+        code, text = self._run(["abcd-1234-efgh", self.src, "real", "300", "yes", "no"])
+        self.assertIn(f"Now delete the copy you gave it, so nothing else can read your key: sudo rm {self.src}", text)
+
+    def test_a_key_already_in_place_needs_no_reminder(self):
+        os.makedirs(config.home(), exist_ok=True)
+        shutil.copy(self.src, os.path.join(config.home(), "kalshi.pem"))   # sent straight to the bot's folder
+        code, text = self._run(["abcd-1234-efgh", "", "real", "300", "yes", "no"])   # Enter keeps it
+        self.assertIn("Saved. Only you can read it.", text)
+        self.assertNotIn("delete the copy", text)
+        self.assertEqual(stat.S_IMODE(os.stat(os.path.join(config.home(), "kalshi.pem")).st_mode), 0o600)
+
     def test_bad_answers_are_asked_again(self):
         junk = os.path.join(os.path.dirname(self.src), "junk.txt")
         with open(junk, "w") as f:
