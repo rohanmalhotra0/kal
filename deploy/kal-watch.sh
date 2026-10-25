@@ -16,6 +16,8 @@ ETC="${ETC:-/etc/kal}"
 KAL_USER="${KAL_USER:-kal}"
 
 say() { echo "kal-watch: $*"; }
+# `python -m kal` finds the code from the current folder, as the kal wrapper does.
+cd "$APP" || { say "no $APP"; exit 1; }
 
 kv() {  # file key -- read KEY=VALUE without running the file
   [ -r "$1" ] || return 0

@@ -19,10 +19,12 @@ VENV="${VENV:-/opt/kal-venv}"
 DATA="${DATA:-/var/lib/kal}"
 ETC="${ETC:-/etc/kal}"
 KAL_USER="${KAL_USER:-kal}"          # the service user; health runs as them
-STAGE_USER="${STAGE_USER:-nobody}"   # throwaway user that can't read DATA/ETC
+# The locked-down user the tests run as: kal-stage (install.sh makes it), else nobody.
+STAGE_USER="${STAGE_USER:-$(id kal-stage >/dev/null 2>&1 && echo kal-stage || echo nobody)}"
 STAGE_PYTHON="${STAGE_PYTHON:-python3}"
 WAIT="${KAL_UPDATE_WAIT:-120}"       # seconds to let the bot settle before the health check
 RESEARCH_LOCK="$DATA/.research.lock" # the file kal/research holds while a research run works
+RESEARCH_WAIT="${KAL_RESEARCH_WAIT:-3600}"  # longest wait for that run before restarting anyway
 
 say() { echo "kal-update: $*"; }     # goes to the journal: journalctl -u kal-update
 
@@ -98,7 +100,7 @@ for sha in $(git rev-list --first-parent "$before..$after"); do
 done
 if [ -n "$bad" ]; then
   echo "$after" > "$failed"
-  alert high "kal update refused" "Code reached main without a pull request (${bad:0:7}). Nothing changed."
+  alert high "kal update refused" "Code reached main without a pull request (${bad:0:7}). Nothing changed. If it's OK, update by hand: docs/DEPLOY.md."
   say "refused: ${bad:0:7} changed code but was not merged through a pull request"
   exit 1
 fi
@@ -115,8 +117,11 @@ systemctl is-active --quiet kal && was_active=1
 
 # Build and test the NEW code in a throwaway copy, as a locked-down user with its own venv.
 # This never touches the live venv or the live code, and the tests can't read DATA or ETC.
+# The copy belongs to that user; what root writes (the test log, the package list) goes in
+# a separate folder only root can open, so nothing the tests leave behind can steer root.
 stage=$(mktemp -d)
-cleanup() { rm -rf "$stage"; }
+work=$(mktemp -d)
+cleanup() { rm -rf "$stage" "$work"; }
 trap cleanup EXIT
 git archive "$after" | tar -x -C "$stage"
 cat > "$stage/.stage-run.sh" <<RUN
@@ -127,14 +132,18 @@ cd "$stage"
 venv/bin/pip install --quiet -r requirements.txt
 venv/bin/python -m unittest discover -s tests -t . -q
 RUN
-chmod -R a+rwX "$stage"
+if [ "$(id -u)" -eq 0 ]; then
+  chown -R "$STAGE_USER": "$stage" || { say "can't hand the test copy to $STAGE_USER"; exit 1; }
+fi
 if runuser -u "$STAGE_USER" -- env -i PATH=/usr/bin:/bin HOME="$stage" sh "$stage/.stage-run.sh" \
-     >"$stage/tests.log" 2>&1; then
+     >"$work/tests.log" 2>&1; then
   tests_ok=1
 else
   tests_ok=0
-  grep -E "^(FAIL|ERROR):|^Ran |^FAILED" "$stage/tests.log" | tail -n 20
+  grep -E "^(FAIL|ERROR):|^Ran |^FAILED" "$work/tests.log" | tail -n 20
 fi
+# Nothing the tests started may outlive them (only for our own user: nobody is shared).
+[ "$STAGE_USER" = kal-stage ] && pkill -KILL -u kal-stage 2>/dev/null
 if [ "$tests_ok" -ne 1 ]; then
   echo "$after" > "$failed"
   alert high "kal update failed its tests" "It stayed on the old version (${before:0:7}). Nothing changed."
@@ -143,7 +152,7 @@ if [ "$tests_ok" -ne 1 ]; then
 fi
 
 # Tests passed. Now, and only now, touch the live tree and the live venv.
-freeze="$stage/freeze-before.txt"
+freeze="$work/freeze-before.txt"
 "$VENV/bin/pip" freeze > "$freeze" 2>/dev/null || : > "$freeze"
 if ! git merge --quiet --ff-only "$after"; then
   alert high "kal update skipped" "The server's copy has its own changes. Nothing changed."
@@ -155,20 +164,27 @@ chmod -R a+rX "$APP"
 health_ok() {  # the same check the /usr/local/bin/kal wrapper uses, run as the kal user
   runuser -u "$KAL_USER" -- env KAL_HOME="$DATA" "$VENV/bin/python" -m kal health --alive >/dev/null 2>&1
 }
+restart() {
+  # Wait (up to an hour) for a research run to finish, so the restart doesn't kill it. The
+  # lock file must belong to the kal user: research opens it to write, and couldn't if root
+  # made it. Still running after an hour: restart anyway, research retries after a restart.
+  [ -e "$RESEARCH_LOCK" ] || runuser -u "$KAL_USER" -- touch "$RESEARCH_LOCK" 2>/dev/null
+  flock -w "$RESEARCH_WAIT" "$RESEARCH_LOCK" systemctl try-restart kal || systemctl try-restart kal
+}
 roll_back() {
   git reset --quiet --hard "$before"
   "$VENV/bin/pip" install --quiet -r requirements.txt
   [ -s "$freeze" ] && "$VENV/bin/pip" install --quiet -r "$freeze"   # exact old versions
   chmod -R a+rX "$APP"
-  [ "$was_active" = 1 ] && flock -w 3600 "$RESEARCH_LOCK" systemctl try-restart kal
+  [ "$was_active" = 1 ] && restart
+  echo "$after" > "$failed"   # don't try the same version again tomorrow
   alert high "kal update rolled back" "The new version wasn't healthy. Back on ${before:0:7}."
   say "rolled back ${after:0:7} -> ${before:0:7}"
 }
 
 if [ "$was_active" = 1 ]; then
   nbefore=$(systemctl show kal -p NRestarts --value 2>/dev/null || echo 0)
-  # Wait for any research run to finish before the restart would kill it.
-  flock -w 3600 "$RESEARCH_LOCK" systemctl try-restart kal
+  restart
   [ "$WAIT" -gt 0 ] 2>/dev/null && sleep "$WAIT"
   nafter=$(systemctl show kal -p NRestarts --value 2>/dev/null || echo 0)
   if ! health_ok || { [ "$nafter" -gt "$nbefore" ] 2>/dev/null; }; then

@@ -141,6 +141,10 @@ say "Making the kal user"
 if ! id kal >/dev/null 2>&1; then
   useradd --system --home-dir "$DATA" --shell /usr/sbin/nologin kal
 fi
+# The auto-update runs new code's tests as this user: it can't read the key or settings.
+if ! id kal-stage >/dev/null 2>&1; then
+  useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin kal-stage
+fi
 runuser -u kal -- test -r "$APP/kal/__main__.py" \
   || die "The kal user can't read $APP. Run: sudo chmod -R a+rX $APP"
 mkdir -p "$DATA" "$ETC"

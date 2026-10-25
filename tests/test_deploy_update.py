@@ -201,6 +201,9 @@ exit 0
         plog = _read(self.pip_log)
         self.assertIn("freeze", plog)                        # saved before updating (finding 4)
         self.assertLess(plog.index("freeze"), plog.index("install"))
+        # The research lock exists for the wait, made as the kal user (research opens it to
+        # write; a root-owned one would break research for good).
+        self.assertTrue(os.path.exists(os.path.join(self.data, ".research.lock")))
 
     def test_failed_tests_never_touch_the_live_tree_or_venv(self):
         self._active()
@@ -225,6 +228,8 @@ exit 0
         self.assertIn("rolled back", log)
         self.assertIn("Priority: high", log)                 # action needed: loud (finding 5)
         self.assertIn("freeze-before.txt", _read(self.pip_log))  # exact old versions (finding 4)
+        self.assertEqual(_read(os.path.join(self.data, "update_failed")).strip(),   # not retried daily
+                         self._git(self.app, "rev-parse", "origin/main"))
 
     def test_restart_loop_rolls_back(self):
         self._active()
@@ -235,6 +240,19 @@ exit 0
         self.assertEqual(r.returncode, 1)
         self.assertEqual(self._head(), before)
         self.assertIn("rolled back", _read(self.curl_log))
+
+    def test_a_long_research_run_delays_the_restart_but_never_skips_it(self):
+        import fcntl
+        self._active()
+        self._push_code()
+        lock = open(os.path.join(self.data, ".research.lock"), "w")
+        self.addCleanup(lock.close)
+        fcntl.flock(lock, fcntl.LOCK_EX)   # research is running
+        r = subprocess.run(["bash", UPDATE], env=dict(os.environ, **self._env(), KAL_RESEARCH_WAIT="1"),
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("try-restart kal", _read(self.sysctl_log))   # restarted anyway
+        self.assertIn("kal updated", _read(self.curl_log))
 
     def test_stopped_service_is_not_started_by_an_update(self):
         # Owner stopped it on purpose (no ACTIVE flag): update the code, leave it stopped.

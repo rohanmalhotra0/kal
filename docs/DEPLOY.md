@@ -301,7 +301,7 @@ To change it (the hour is in UTC): `sudo kal set summary_hour_utc 14`
 | **kal made 1 real trade(s)** | It bought something with real money. | Nothing. Look at the dashboard if you like. |
 | **kal yesterday: +$1.23** (silent, daily) | Yesterday's results. | Nothing. Just read it. |
 | **kal updated** (silent) | The daily auto-update moved to new code and the bot is alive. | Nothing. |
-| **kal update rolled back / failed / refused** (loud) | The daily auto-update stayed on the old code (bad tests, unhealthy restart, or code not merged through a pull request). | `sudo journalctl -u kal-update`. The check-in will look into it. |
+| **kal update rolled back / failed / refused** (loud) | The daily auto-update stayed on the old code (bad tests, unhealthy restart, or code not merged through a pull request). | `sudo journalctl -u kal-update`. "Refused" blocks updates until you look at that commit on GitHub; if it's fine, update by hand (see "Update to new code"). |
 | **kal warning: disk** | The disk is getting full. Under 200 MB it stops itself. | Free some space (see below). |
 | **kal warning: clock** | The server clock is off. Kalshi may refuse orders. | `timedatectl`. If it says not synchronized: `sudo systemctl restart chrony` |
 | **kal warning: trading** | Trade runs keep failing. Kalshi or the internet is down. It keeps trying. | Usually nothing. If it lasts a day: `sudo kal logs` |

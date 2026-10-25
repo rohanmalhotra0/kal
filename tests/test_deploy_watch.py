@@ -41,6 +41,7 @@ class WatchSandbox(unittest.TestCase):
         for p in (self.bin, os.path.join(self.venv, "bin"), self.data, self.etc):
             os.makedirs(p)
         _write(os.path.join(self.data, "ntfy_topic"), "kal-default\n")
+        _write(os.path.join(self.d, "app", "kal", "__main__.py"), "")
         self.curl_log = os.path.join(self.d, "curl.log")
         self.active = os.path.join(self.d, "ACTIVE")
         self.nrest = os.path.join(self.d, "nrest")
@@ -62,6 +63,7 @@ exit 0
         _write(os.path.join(self.venv, "bin", "python"), """#!/bin/sh
 case "$*" in
   *"-m kal health"*)
+     [ -f kal/__main__.py ] || exit 1   # like python -m kal: the code must be in this folder
      if [ -n "$KAL_HOME" ] && [ -e "$KAL_HOME/health_fail" ]; then exit 1; fi
      exit 0 ;;
   *) exit 0 ;;
@@ -74,7 +76,8 @@ esac
     def _run(self):
         env = dict(os.environ, APP=os.path.join(self.d, "app"), VENV=self.venv,
                    DATA=self.data, ETC=self.etc, PATH=self.bin + ":/usr/bin:/bin")
-        return subprocess.run(["bash", WATCH], env=env, capture_output=True, text=True)
+        # cwd: systemd starts it in /, not in the code folder.
+        return subprocess.run(["bash", WATCH], env=env, capture_output=True, text=True, cwd=self.d)
 
     def test_dead_service_alerts_high(self):
         r = self._run()
