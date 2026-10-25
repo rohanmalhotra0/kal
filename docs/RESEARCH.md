@@ -114,7 +114,7 @@ status: **testing** (add the PR link), **built**, or **rejected** (say why in on
 - Evidence: medium. Makers beat takers (Bürgi et al.). In single-name markets, makers earn ~2x per contract vs broad ones (Bartlett & O'Hara).
 - Risk: high. Better-informed traders pick off resting orders. The engine can't cancel orders. LIP terms change often: check they still apply.
 - Test: paper only. Log would-be quotes. Count a fill when trades go through our price. Score at settlement, plus our LIP share.
-- Backtest: `tools/maker_research.py` (`kal/research/maker.py`). At the decision time, rest a bid at the best bid (or 1c better). It fills only if a later trade went through its price, and every fill pays a maker fee. It reports ROI on fills and ROI if every bid had filled. The gap is the cost of being picked off.
+- Backtest: `tools/maker_research.py` (`kal/research/maker.py`). At the decision time, rest a one-contract bid at the best bid (or 1c better). It fills only when a later trade reached it, and every fill pays a maker fee. One contract is a maker's best case, so a price range that loses here loses at any size. A range that wins is only a lead: check it with real trade sizes first.
 
 **11. Other venues as a fair-price guide** - untested
 - What: use Polymarket or sportsbook prices to judge Kalshi's. Trade only Kalshi.
