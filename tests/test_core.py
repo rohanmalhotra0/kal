@@ -439,6 +439,24 @@ class LedgerTests(TempHome):
         self.assertEqual(ledger.settle(c), 0)
         self.assertAlmostEqual(ledger.realized(), 10 - 5 - client.fee(10, 0.5))
 
+    def test_position_the_books_cant_explain_trips(self):
+        config.update({"strategies": {"basket_arb": {"mode": "live"}}})
+        self._fill("A", "no", 10, 0.5)
+        c = FakeKalshi()
+        c.market_info["A"] = {"ticker": "A", "status": "active", "no_bid_dollars": "0.4900"}
+        c.position_list = [{"ticker": "A", "position": -10, "exposure": 5}]
+        engine.run_once(c)
+        self.assertEqual(config.load()["disabled_reason"], "")  # matches the books
+        c.position_list = [{"ticker": "A", "position": -25, "exposure": 12}]  # a lost fill
+        engine.run_once(c)
+        self.assertIn("books show", config.load()["disabled_reason"])
+
+    def test_owners_own_positions_are_ignored(self):
+        c = FakeKalshi()
+        c.position_list = [{"ticker": "MINE", "position": 50, "exposure": 20}]
+        engine.run_once(c)
+        self.assertEqual(config.load()["disabled_reason"], "")
+
     def test_capital_used_up_trips(self):
         c = FakeKalshi()
         self._fill("A", "yes", 303, 0.99)

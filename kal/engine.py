@@ -249,6 +249,14 @@ def _run(client, cfg, summary):
     if live:
         balance = client.balance()
         positions = client.positions()
+        odd = ledger.unexplained(positions)
+        if odd:
+            t, held, mine = odd[0]
+            reason = (f"Kalshi shows {held:+.0f} contracts on {t} but the bot's books show {mine:+.0f} "
+                      f"(+ = YES, - = NO). Check that market on Kalshi before resetting.")
+            config.trip(reason)
+            summary["notes"].append(f"STOPPED: {reason}")
+            return
         equity = ledger.equity(client, cfg)
         db.insert("equity", balance=balance, exposure=ledger.open_cost(), equity=equity,
                   paper_equity=paper.equity(cfg))

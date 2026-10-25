@@ -125,3 +125,26 @@ def open_directional():
 def peak_equity():
     rows = db.query("SELECT MAX(equity) AS p FROM equity WHERE balance > 0 OR exposure > 0 OR equity > 0")
     return rows[0]["p"] if rows and rows[0]["p"] is not None else None
+
+
+def unexplained(positions):
+    """Markets where Kalshi says we hold more than the bot's own books can explain.
+
+    The books are built from our order records; Kalshi's positions are the truth. If an
+    order's reply was lost and reconciliation missed it, the books would undercount and the
+    loss cap could be exceeded. So any market the bot traded where Kalshi shows a bigger (or
+    opposite) position than the books is a reason to stop. Markets the bot never traded are
+    the owner's own business and ignored. Returns [(ticker, kalshi_net, books_net)]."""
+    books = {}
+    for r in open_positions():
+        books[r["ticker"]] = books.get(r["ticker"], 0.0) + (r["count"] if r["side"] == "yes" else -r["count"])
+    traded = {r["ticker"] for r in db.query("SELECT DISTINCT ticker FROM orders")}
+    out = []
+    for p in positions:
+        t = p["ticker"]
+        if t not in traded:
+            continue
+        held, mine = p["position"], books.get(t, 0.0)
+        if abs(held) > abs(mine) + 0.5 or (held and mine and (held > 0) != (mine > 0)):
+            out.append((t, held, mine))
+    return out
