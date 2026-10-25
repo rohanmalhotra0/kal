@@ -351,6 +351,18 @@ def cmd_health(args):
     return 1 if fails else 0
 
 
+def cmd_doctor(args):
+    """Read-only checklist: key, money, test orders, strategies, alerts, then health."""
+    from . import doctor
+    rows = doctor.rows()
+    _show(rows)
+    fails = sum(r["level"] == "fail" for r in rows)
+    warns = sum(r["level"] == "warn" for r in rows)
+    say("", "Ready." if not fails else "Not ready: fix the FAIL lines above.",
+        *([f"{warns} warning(s): worth a look, but they don't stop it."] if warns else []))
+    return 1 if fails else 0
+
+
 def cmd_backup(args):
     from . import maintenance
     try:
@@ -633,6 +645,7 @@ def parser():
     sm.set_defaults(fn=cmd_summary)
 
     sub.add_parser("setup", help="set it up: five plain questions").set_defaults(fn=cmd_setup)
+    sub.add_parser("doctor", help="is it set up right? one checklist (sends no orders)").set_defaults(fn=cmd_doctor)
 
     on = sub.add_parser("on", help="turn the bot on")
     on.add_argument("--budget", type=_money, default=None, help="dollars it may use (and at most lose)")
