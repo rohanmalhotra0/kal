@@ -255,4 +255,21 @@ for m in busy:
     show(f"trades {m['ticker']}", {"code": code, "keys": list(d.keys()) if isinstance(d, dict) else str(d)[:200],
                                    "n": len(trades), "first": trades[:2],
                                    "taker_sides": dict(collections.Counter(t.get("taker_side") for t in trades))})
+# ---- Clock: is Kalshi's Date header fresh, or from a cache? (Age, cache headers)
+import time as _time
+from email.utils import parsedate_to_datetime as _pd
+for path, params in (("/markets", {"limit": 1}), ("/exchange/status", {}), ("/markets", {"limit": 1, "status": "open"})):
+    for i in range(3):
+        t0 = _time.time()
+        r = requests.get(BASE + path, params=params, timeout=30)
+        t1 = _time.time()
+        h = {k: v for k, v in r.headers.items() if k.lower() in (
+            "date", "age", "cache-control", "cf-cache-status", "x-cache", "via", "expires", "last-modified")}
+        try:
+            server = _pd(r.headers["Date"]).timestamp()
+            ahead = round((t0 + t1) / 2 - server, 1)
+        except Exception as e:
+            ahead = f"? {e}"
+        show(f"clock {path} {params} try {i + 1}", {"code": r.status_code, "local_minus_date_s": ahead, "headers": h})
+        _time.sleep(1)
 sys.exit(0)
