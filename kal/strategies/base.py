@@ -30,15 +30,23 @@ def plain_payouts(markets):
 # events on 2026-10-25), word for word: Kalshi picks the price only if a game is cancelled,
 # postponed or never started, or (weather) no data comes. Exact wording, not keywords: "if the
 # match is cancelled or a player dies ..." must not pass.
+_WHO = r"(?:the market|all markets|both markets)"
+_WINDOW = r"48 hours|2 days|two days"
 CANCELLATION_CLAUSES = [re.compile(p, re.I) for p in (
-    r"if the (?:game|match) is cancell?ed or rescheduled to over 48 hours away, (?:the market|all markets) "
+    rf"if the (?:game|match|race) is cancell?ed or rescheduled to over (?:{_WINDOW}) away, {_WHO} "
     r"will resolve to a fair price(?: in accordance with the rules)?\.",
-    r"if the (?:game|match) is (?:cancell?ed or )?not started within 48 hours(?: of its originally scheduled start)?, "
-    r"(?:the market|all markets) will resolve to a fair price(?: in accordance with the rules)?\.",
+    rf"if the (?:game|match|race|qualifying session) is (?:cancell?ed(?:, moved to a different circuit,)? or )?"
+    rf"not started within (?:{_WINDOW})(?: of its originally scheduled start)?, {_WHO} will resolve to a fair price"
+    r"(?: in accordance with the rules)?\.",
+    rf"if the cancell?ed (?:game|event) is not played or is rescheduled further than (?:{_WINDOW}|two weeks) "
+    rf"out, {_WHO} will resolve to a fair price(?: for each team)?(?: in accordance with the rules)?\.",
+    r"if the race is moved to a different circuit, rescheduled more than 48 hours later, or cancell?ed, "
+    r"all markets settle to a fair price\.",
+    r"if the match does not occur \(signaled by a ball being played\) due to a player injury, walkover, "
+    r"forfeiture, or any other cancellation \(all before the match starts\), the market will resolve to a fair "
+    r"price in accordance with the rules\.",
     r"if no data is available at the end of this period, all markets will resolve to the last fair price "
     r"determined by kalshi\.",
-    r"(?:in the event of|if there is) an? player injury, walkover, forfeiture, or any other cancellation "
-    r"\(all before the match starts\), the market will resolve to a fair price in accordance with the rules\.",
 )]
 
 
