@@ -6,6 +6,7 @@ Hourly candles of every "before <date>" family: open events, plus settled ones i
 same series. Counts hours with an after-fee gap, and how many pass the bot's own rules
 for locked-in trades (settle within max_arb_days, at least min_arb_apr a year).
 """
+import calendar
 import collections
 import json
 import os
@@ -20,8 +21,8 @@ from kal.client import Kalshi, fee, ts  # noqa: E402
 from kal.research.backtest import candle_close  # noqa: E402
 from kal.risk import yearly_return  # noqa: E402
 
-BEFORE = re.compile(r"^\s*before\b", re.I)
-DAYS_BACK = 60
+BEFORE = re.compile(r"^\s*before\s+(?:([a-z]{3})[a-z]*\.?\s+(\d{1,2}),\s*)?(\d{4})\s*$", re.I)
+MONTHS = {m: i + 1 for i, m in enumerate("jan feb mar apr may jun jul aug sep oct nov dec".split())}
 H = 3600
 
 
@@ -32,13 +33,29 @@ def close_of(m):
         return None
 
 
+def deadline(m):
+    """The date in "Before Sep 1, 2026" (or "Before 2028": Jan 1), as a sortable tuple, or None.
+    Not close_time: Kalshi rewrites it when a market settles early, and the order flips."""
+    g = BEFORE.match(m.get("yes_sub_title") or m.get("subtitle") or "")
+    if not g:
+        return None
+    month, day, year = g.groups()
+    if month and month.lower() not in MONTHS:
+        return None
+    return (int(year), MONTHS[month.lower()] if month else 1, int(day) if day else 1)
+
+
+def deadline_ts(m):
+    y, mo, d = deadline(m)
+    return calendar.timegm((y, mo, d, 0, 0, 0))   # UTC midnight: within a day of Kalshi's own cutoff
+
+
 def family(markets):
     ms = [m for m in markets if m.get("ticker")]
-    if len(ms) < 2 or not all(BEFORE.match(m.get("yes_sub_title") or m.get("subtitle") or "") for m in ms):
-        return None
-    if any(close_of(m) is None for m in ms) or len({close_of(m) for m in ms}) < 2:
-        return None
-    return sorted(ms, key=close_of)
+    days = [deadline(m) for m in ms]
+    if len(ms) < 2 or None in days or len(set(days)) < len(days) or any(close_of(m) is None for m in ms):
+        return None   # fail closed: every market's deadline readable, none repeated
+    return sorted(ms, key=deadline)
 
 
 def main():
@@ -73,17 +90,19 @@ def main():
             fams.append((s, ev, f, True))
             settled_n += 1
             res = [m.get("result") for m in f]
-            for a, b in zip(res, res[1:]):     # earlier YES but later NO breaks the nesting
-                if a == "yes" and b == "no":
-                    broken.append(ev)
+            if any(a == "yes" and b == "no" for a, b in zip(res, res[1:])):   # earlier YES, later NO
+                broken.append(ev)
+                continue   # not nested after all: never counted as a gap
     print(f"settled 'before' families: {settled_n}; results that break the nesting: {len(broken)} {broken[:5]}")
 
     hours = ok_hours = pass_hours = 0
     best, passing = [], collections.Counter()
     for s, ev, f, settled in fams:
         for a, b in zip(f, f[1:]):
-            end = min(close_of(a), now)
-            start = end - DAYS_BACK * 86400
+            end = min(close_of(a), close_of(b), now)
+            start = deadline_ts(a) - cfg["max_arb_days"] * 86400   # the bot holds an arbitrage 30 days at most
+            if end <= start:
+                continue
             try:
                 ca = {x["end_period_ts"]: x for x in c.candles(s, a["ticker"], int(start), int(end)) or []}
                 cb = {x["end_period_ts"]: x for x in c.candles(s, b["ticker"], int(start), int(end)) or []}
@@ -100,7 +119,7 @@ def main():
                 if edge <= 0:
                     continue
                 ok_hours += 1
-                days = max((close_of(a) - t) / 86400, 1 / 24)
+                days = max((deadline_ts(a) - t) / 86400, 1 / 24)   # $1 is locked in by the earlier deadline
                 apr = yearly_return(1 / cost, days)
                 good = days <= cfg["max_arb_days"] and apr >= cfg["min_arb_apr"] and edge / cost >= 0.01
                 if good:
