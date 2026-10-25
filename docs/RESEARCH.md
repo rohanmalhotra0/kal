@@ -26,8 +26,8 @@ status: **testing** (add the PR link), **built**, or **rejected** (say why in on
   the total at risk stays under a cap (Whitrow).
 - After losses, `drawdown_multiplier` cuts size: full at the peak, down in a straight
   line to 1/4 size at a 20% drop (after Grossman & Zhou).
-- **Not wired in yet:** the drawdown cut and the open-bets cap need the engine to pass
-  the equity peak and the money at risk. Until then they do nothing.
+- Both are wired in: the engine passes the equity peak (drawdown cut) and the money
+  already in open bets (`ctx.open_exposure`) to every strategy.
 
 ## Ideas, best first
 
@@ -37,27 +37,27 @@ status: **testing** (add the PR link), **built**, or **rejected** (say why in on
 - Risk: low. A basket can half-fill. The engine stops at the first leg that misses.
 - Test: count signals vs full fills in live logs. Many half fills? Buy the thinnest leg first.
 
-**2. Ladder arbitrage** - built, live
+**2. Ladder arbitrage** - built, paper (switch to live by hand once trusted)
 - What: if "above 70" wins, "above 60" wins too. Buy YES broad + NO narrow when under $1.
 - Evidence: strong (math). Risk: low. Odd-looking events are skipped.
 - Test: did every settled ladder trade pay at least its cost?
 
 **3. Favorites (favorite-longshot bias)** - built, paper until promoted
 - What: buy in price ranges that won more often than the price said.
-- Evidence: strong. Bürgi, Deng & Whelan (300,000+ Kalshi contracts): under 10c loses over 60%. Over 50c earns a small plus. Worse for takers. The gap is shrinking.
-- Risk: medium. The edge is a few cents. One upset wipes out many wins.
-- Test: built in (backtest, then 30 paper trades). Next: try other hours before close.
+- Evidence: strong that the bias exists; weak that a taker keeps much. Bürgi, Deng & Whelan (300,000+ Kalshi contracts): under 10c loses over 60%. But most of the bias goes to makers: a taker at the real ask keeps about 0-1% at 90-99c (research swarm, 2026-10-25). The gap is shrinking.
+- Risk: medium. The edge is a few cents. One upset wipes out many wins. Cancelled games pay a split ($0.33 each on a 3-way), now counted in backtests.
+- Test: built in (backtest, then 30 paper trades). Next: try 1, 3 and 24 hours before close (the research says the last 24 h is best); keep spreads at 2c or less.
 
 **4. Bracket arbitrage** - built, paper
 - What: brackets cover every value, so one must win. Buy YES on all when under $1.
 - Evidence: strong, if there's no gap. Risk: high if there is one. All is lost.
 - Test: a person checks 20+ settled events. One bracket won each time? Set "verified".
 
-**5. NO on over-bet YES, by market type** - untested
+**5. NO on over-bet YES, by market type** - untested (top pick for the next check-in)
 - What: people over-bet YES on "will X happen?" markets that mostly end NO. Buy NO.
 - Evidence: medium. Bartlett & O'Hara (41.6M Kalshi trades) found it, mostly in single-name markets (one person or company). A summary says YES was bought 61% of the time there, but won 32%.
 - Risk: medium-high. Those same markets have the most insiders.
-- Test: reuse `backtest.calibration`, split by market type and side. Need a lower bound above 0 after fees.
+- Test: reuse `backtest.calibration`, split by market type and side. Need a lower bound above 0 after fees. The research swarm ranks this the second most likely edge for a small taker, after near-resolution favorites.
 
 **6. Related markets that must agree** - untested
 - What: linked prices must fit. E.g. "Fed cuts in Dec" vs "rate below X in Jan".
@@ -76,13 +76,13 @@ status: **testing** (add the PR link), **built**, or **rejected** (say why in on
 - Evidence: weak-medium (our own backtest only). Risk: high. Capped at $5 a trade.
 - Test: needs 30 paper trades. Try `shrunk_p` with the series' base rate as the prior.
 
-**9. One-sided order flow guard** - untested (a filter, not a strategy)
-- What: skip a trade when recent trades all go one way. Someone may know something.
+**9. One-sided order flow guard** - built (`kal/flow.py`, a filter, not a strategy)
+- What: skip a bet when 70%+ of the last hour's volume took the other side, or one trade 5x the median ($50+) just did. Paper and live alike. Never for locked-in trades.
 - Evidence: medium. Bartlett & O'Hara: one-sided flow predicts maker losses in single-name markets.
-- Risk: low. It only removes trades. Test: did paper trades after one-sided flow do worse?
+- Risk: low. It only removes trades. Next test: did skipped trades do worse than taken ones? (Log the would-be result of each skip.)
 
 **10. Maker quotes + Liquidity Incentive Program** - untested, needs engine work
-- What: rest orders instead of taking. Maker fee is 1/4 of taker (0.0175 vs 0.07). Kalshi's LIP pays for resting orders near the best price, even unfilled.
+- What: rest orders instead of taking. Most series charge makers nothing; series with fee_type `quadratic_with_maker_fees` charge 0.0175 x M (a quarter of taker), combos 0.035. Kalshi's LIP pays for resting orders near the best price, even unfilled.
 - Evidence: medium. Makers beat takers (Bürgi et al.). In single-name markets, makers earn ~2x per contract vs broad ones (Bartlett & O'Hara).
 - Risk: high. Better-informed traders pick off resting orders. The engine can't cancel orders. LIP terms change often: check they still apply.
 - Test: paper only. Log would-be quotes. Count a fill when trades go through our price. Score at settlement, plus our LIP share.
@@ -97,6 +97,20 @@ status: **testing** (add the PR link), **built**, or **rejected** (say why in on
 - What: Kalshi pays variable interest (seen 3.25-4%) on cash and open positions. Monthly, $250+ only.
 - Evidence: strong (Kalshi help page). Small: ~$10 a year on $300. Risk: low.
 - Test: find it in account history. Ask for the ledger to count it. Never loosen risk rules for it.
+
+**13. Longshot fade (NO on cheap YES)** - being built, paper only
+- What: buy NO where YES costs under 20c.
+- Evidence: weak for a taker. The research swarm found it about break-even or worse after spread and fees in 2025-2026 Kalshi data; one niche (liquid weather brackets the evening before) didn't hold up elsewhere.
+- Risk: high. A NO at 95c loses 95c when the longshot hits.
+- Test: the backtest and 30 paper trades decide. Strict guards: spread 2c or less, real depth, within the tested hours of the scheduled close, $6 a market, 10% across one city or day.
+
+**14. Order book recorder** - untested (infrastructure)
+- What: save the order book of every market a strategy looks at, each run.
+- Why: Kalshi has no history of depth. Without it, backtests assume we could fill. 4-8 weeks of saved books makes fill and slippage tests honest.
+- Risk: none to money. Watch disk use (cap it, prune after 60 days).
+
+**15. What the research says not to build**
+- In-game sports momentum, economic-release tails, generic mention fading, parlays and combos (YES side), cross-venue arbitrage: about zero or negative after costs for a slow taker.
 
 ## Sources
 
@@ -116,3 +130,4 @@ Numbers come from abstracts and summaries. Check the paper before relying on one
 - Kalshi interest: https://help.kalshi.com/navigating-the-exchange/your-portfolio/apy-on-kalshi
 - Kalshi weather: https://help.kalshi.com/markets/popular-markets/weather-markets
 - Cross-venue summary: https://quantpedia.com/systematic-edges-in-prediction-markets/
+- Kalshi fee rounding: https://docs.kalshi.com/getting_started/fee_rounding
