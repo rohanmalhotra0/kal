@@ -302,4 +302,54 @@ markets_ps = collections.Counter(str(m.get("price_level_structure")) for e in ev
 show("price_level_structure on open markets", dict(markets_ps.most_common()))
 frac = collections.Counter(str(m.get("fractional_trading_enabled")) for e in events for m in e.get("markets") or [])
 show("fractional_trading_enabled on open markets", dict(frac.most_common()))
+# ---- Early close (kal/research/backtest.event_anchors): research times its "buy" only from
+# markets that can't close early. How much settled history is that, by category? And when a
+# market does close early, do expected/latest_expiration_time keep the schedule (then they
+# could anchor those events too, without peeking at the news)?
+from datetime import datetime as _dt
+
+
+def _ts(v):
+    try:
+        return _dt.fromisoformat(str(v).replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+cat_of = {s.get("ticker"): s.get("category") or "?" for s in ser}
+vol = collections.Counter()
+for e in events:
+    if e.get("series_ticker"):
+        vol[e["series_ticker"]] += sum(float(m.get("volume_24h_fp") or 0) for m in e.get("markets") or [])
+early = collections.defaultdict(collections.Counter)
+gaps = collections.defaultdict(list)
+samples = []
+for s_, _ in vol.most_common(40):
+    code, d = get("/markets", series_ticker=s_, status="settled", limit=200)
+    if code != 200 or not isinstance(d, dict):
+        continue
+    cat = cat_of.get(s_, "?")
+    by_event = collections.defaultdict(list)
+    for m in d.get("markets") or []:
+        by_event[m.get("event_ticker")].append(m)
+    for ev, ms in by_event.items():
+        flags = {m.get("can_close_early") for m in ms}
+        early[cat]["events, all markets can close early" if flags == {True} else
+                   "events, some can't close early" if False in flags or None in flags else "events, other"] += 1
+        for m in ms:
+            close, exp, latest = (_ts(m.get(k)) for k in ("close_time", "expected_expiration_time",
+                                                          "latest_expiration_time"))
+            early[cat][f"markets can_close_early={m.get('can_close_early')}"] += 1
+            if m.get("can_close_early") is True and close and exp and exp - close > 3600:
+                early[cat]["early closers (1h+ before expected expiration)"] += 1
+                gaps[cat].append(round((exp - close) / 3600, 1))
+                if len(samples) < 12:
+                    samples.append({k: m.get(k) for k in ("ticker", "open_time", "close_time",
+                                                          "expected_expiration_time", "latest_expiration_time",
+                                                          "result")})
+show("early close by category (40 busiest series, up to 200 settled markets each)",
+     {k: dict(v) for k, v in early.items()}, limit=8000)
+show("hours from an early close to expected_expiration_time, by category (min, median, max, n)",
+     {k: (min(v), sorted(v)[len(v) // 2], max(v), len(v)) for k, v in gaps.items()}, limit=4000)
+show("early closer samples", samples, limit=6000)
 sys.exit(0)
