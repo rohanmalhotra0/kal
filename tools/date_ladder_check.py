@@ -41,8 +41,12 @@ def why(ev):
         return "no rules"
     if len(rules) != 1:
         return "rules differ beyond dates"
+    if d._UNDONE.search(rules.pop()):
+        return "an outcome that can be undone (retracted, rescinded...)"
     if any(d.close_ts(m) is None for m in ms):
         return "close_time unreadable"
+    if d.mostly_upside_down(sorted(ms, key=d.deadline)):
+        return "upside down at most steps"
     return "ok"
 
 
@@ -116,7 +120,7 @@ def main():
                 for b in ms[i + 1:]:
                     pairs += 1
                     listed += not d.nested(a, b)
-    print(f"accepted ladders: {pairs} earlier/later pairs; {listed} refused for listing order (after issuance)")
+    print(f"accepted ladders: {pairs} earlier/later pairs; {listed} refused for listing order")
     # What stricter rules would cost (review round 2)
     always = unknown = 0
     words = collections.Counter()
@@ -226,7 +230,7 @@ def main():
         bad = [k for k, ok in checks.items() if not ok]
         print(f"  {ev_t} {a_s} -> {b_s} ({hours}): {'PASS' if not bad else 'REFUSED: ' + '; '.join(bad)}")
         print(f"      opened {a.get('open_time')} / {b.get('open_time')}; can_close_early {a.get('can_close_early')}"
-              f"/{b.get('can_close_early')}; counts from listing: {d.counts_from_listing(a)}")
+              f"/{b.get('can_close_early')}")
         print(f"      rules: {(a.get('rules_primary') or '')[:160]!r}")
         if not checks["plain payouts"]:
             print(f"      why not plain: {(a.get('rules_secondary') or '')[:240]!r}")
