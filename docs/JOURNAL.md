@@ -2,21 +2,6 @@
 
 Newest first. Each 2-hour check-in adds one entry: what it checked, what it found, links.
 
-## 2026-10-25 08:50 UTC — check-in: research fix in review (PR #9)
-
-- Checked: no server yet, so no status report. CI green on main (1ad9202). Real-market
-  check green (eccb8b3): self-test passed, 0 locked-in trades found, research 0 new edges.
-- Found: main's research is blind. Same settings on real data: 0 priced markets in all
-  12 categories (https://github.com/rohanmalhotra0/kal/actions/runs/40177134669).
-  Cause: #6's early-close rule; Kalshi marks every market as able to close early.
-- Fix: https://github.com/rohanmalhotra0/kal/pull/9. An independent review found a leak
-  in its first version (which markets got tested depended on when research ran); now
-  each market is timed from its own listed end. It also fixes a favorites cap bug that
-  is on main: one API error could add a bet past the day's 10% cap. 585 tests pass.
-- Waiting on: the coverage table (before #6 / after #6 / with #9), then a before/after
-  check of 6,851 markets recorded while open, after tonight's games. Then it merges.
-- Follow-up: markets that close after tonight get their before/after check later.
-
 ## 2026-10-25 10:47 UTC — check-in: two new backtests, each attacked by a reviewer
 
 - Checked: CI and market-check green on main. No server yet, so no status report.
@@ -33,6 +18,21 @@ Newest first. Each 2-hour check-in adds one entry: what it checked, what it foun
 - That volume filter is in the shared backtest too (main and #9). Fix after #9 merges.
 - Next: results posted on #10 and #11 by 13:00. #9's before/after check at 21:05.
   No new PRs until #9 merges.
+
+## 2026-10-25 08:50 UTC — check-in: research fix in review (PR #9)
+
+- Checked: no server yet, so no status report. CI green on main (1ad9202). Real-market
+  check green (eccb8b3): self-test passed, 0 locked-in trades found, research 0 new edges.
+- Found: main's research is blind. Same settings on real data: 0 priced markets in all
+  12 categories (https://github.com/rohanmalhotra0/kal/actions/runs/40177134669).
+  Cause: #6's early-close rule; Kalshi marks every market as able to close early.
+- Fix: https://github.com/rohanmalhotra0/kal/pull/9. An independent review found a leak
+  in its first version (which markets got tested depended on when research ran); now
+  each market is timed from its own listed end. It also fixes a favorites cap bug that
+  is on main: one API error could add a bet past the day's 10% cap. 585 tests pass.
+- Waiting on: the coverage table (before #6 / after #6 / with #9), then a before/after
+  check of 6,851 markets recorded while open, after tonight's games. Then it merges.
+- Follow-up: markets that close after tonight get their before/after check later.
 
 ## 2026-10-25 07:55 UTC — all 8 PRs merged; research now tests almost nothing
 
