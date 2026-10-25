@@ -68,9 +68,11 @@ def realized():
 
 
 def settle(client):
-    """Book P&L for bot positions whose markets have settled. Returns how many settled."""
+    """Book P&L for bot positions whose markets have settled. Returns how many settled.
+    Without a key it books nothing: it couldn't check Kalshi's fills for contracts sold
+    outside the bot, and a payout booked unchecked is never looked at again."""
     rows = open_positions()
-    if not rows:
+    if not rows or not getattr(client, "can_trade", False):
         return 0
     markets = client.markets_by_ticker({r["ticker"] for r in rows})
     by_ticker = {}
@@ -81,7 +83,7 @@ def settle(client):
         paid = yes_payout(markets.get(ticker, {}))  # raises UnknownSettlement: the engine trips
         if paid is None:
             continue
-        if getattr(client, "can_trade", False) and _write_off_sold_outside(client, ticker, legs):
+        if _write_off_sold_outside(client, ticker, legs):
             legs = [r for r in open_positions() if r["ticker"] == ticker]
         revenue = sum(r["count"] * (paid if r["side"] == "yes" else 1 - paid) for r in legs)
         revenue = max(0.0, revenue - _restored_gain(ticker, paid))
@@ -109,9 +111,12 @@ def _write_off_sold_outside(client, ticker, legs):
                 toward_yes += n if (side == "yes") == (action == "buy") else -n
     except CatchUpError as e:
         raise UnknownSettlement(f"{ticker}: can't read Kalshi's fills to check what the bot still held ({e})")
+    # A sale a run already saw in Kalshi's positions (engine._write_off_sold) is written off once.
+    done = {w["side"]: w["n"] for w in db.query("SELECT side, SUM(count) AS n FROM writeoffs WHERE ticker = ? "
+                                                  "GROUP BY side", ticker)}
     lost = 0.0
     for r in legs:
-        n = toward_yes if r["side"] == "no" else -toward_yes
+        n = (toward_yes if r["side"] == "no" else -toward_yes) - (done.get(r["side"]) or 0.0)
         if n > 0.5:
             lost += write_off(ticker, r["side"], n, "sold outside the bot before it settled (Kalshi's fills)")
     if lost:
@@ -126,12 +131,16 @@ def _write_off_sold_outside(client, ticker, legs):
     return lost > 0
 
 
-def _restored_gain(ticker, paid):
-    """What orders added after a restore (catch_up) make over their cost on a settled market.
-    Some may be the owner's own trades, so only their losses count, never their gains."""
+def _restored_gain(ticker, paid, side=None):
+    """What orders added after a restore (catch_up) are worth over their cost on a market,
+    at a YES value of `paid` (its payout, or for one side, that side's bid as 1 - paid on NO).
+    Some may be the owner's own trades, so only their losses count, never their gains: at
+    settlement and in equity alike, so a win settling never reads as a loss."""
     gain = 0.0
     for r in db.query("SELECT side, filled, price FROM orders WHERE ticker = ? AND strategy = 'restored' "
                       "AND filled > 0", ticker):
+        if side and r["side"] != side:
+            continue
         pay = r["filled"] * (paid if r["side"] == "yes" else 1 - paid)
         gain += max(0.0, pay - r["filled"] * r["price"] - fee(r["filled"], r["price"]))
     return gain
@@ -171,7 +180,11 @@ def equity(client, cfg):
     value = 0.0
     for r in rows:
         bid = price(markets.get(r["ticker"], {}), f"{r['side']}_bid")
-        value += r["count"] * bid if bid > 0 else r["cost"]
+        if bid > 0:
+            yes = bid if r["side"] == "yes" else 1 - bid
+            value += max(0.0, r["count"] * bid - _restored_gain(r["ticker"], yes, r["side"]))
+        else:
+            value += r["cost"]
     return capital(cfg) - open_cost() + value
 
 

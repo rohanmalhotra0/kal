@@ -606,7 +606,7 @@ class DemoPracticeTests(TempHome):
         config.update({"env": "demo", "budget": 300, "strategies": {"ladder_arb": {"mode": "live"}}})
         code, text = self.cli("on", "--env", "prod")
         self.assertEqual(code, 0)
-        self.assertIn("Back on paper for real money: ladder_arb", text)
+        self.assertIn("Back to the real-money modes: ladder_arb paper.", text)
         self.assertIn("Live (real money): basket_arb.", text)
 
 
@@ -742,3 +742,174 @@ class FairPriceWordingTests(TempHome):
                                 "Head-to-Head markets will resolve to Fair Market Value\n\nKalshi is not affiliated"}
         self.assertFalse(base.plain_payouts([m]))
         self.assertFalse(base.fair_price_only_if_cancelled([m]))
+
+
+# ---------- holes the PR #23 review found (2026-10-25) ----------
+
+def _fill(oid, action, side="no", n=20, p=0.9, ticker="S-1"):
+    return {"order_id": oid, "ticker": ticker, "side": side, "action": action, "count_fp": f"{n:.2f}",
+            f"{side}_price_dollars": f"{p:.4f}", "created_time": "2026-10-25T10:00:00Z"}
+
+
+class WrittenOffOnceTests(TempHome):
+    """A part sale a run saw in Kalshi's positions (market still open) was written off then.
+    At settlement, Kalshi's fills show the same sale: it must not be written off again."""
+
+    def setUp(self):
+        super().setUp()
+        config.update({"enabled": True, "budget": 300, "strategies": _all_off()})
+        db.insert("orders", ticker="S-1", side="no", count=20, price=0.9, filled=20,
+                  status="executed", order_id="o1", client_order_id="c1")
+        self.cost = 18 + client.fee(20, 0.9)
+        self.c = FakeKalshi(balance=1000)
+        self.c.fill_list = [_fill("o1", "buy")]
+        self.c.market_info["S-1"] = {"ticker": "S-1", "status": "active", "no_bid_dollars": "0.9000"}
+        self.c.position_list = [{"ticker": "S-1", "position": -20, "exposure": 18}]
+        engine.run_once(self.c)
+        self.assertEqual(config.load()["disabled_reason"], "")
+
+    def test_a_part_sale_seen_while_open_is_written_off_once(self):
+        self.c.fill_list.append(_fill("owner-1", "sell", n=5))   # the owner sells 5 of 20
+        self.c.position_list = [{"ticker": "S-1", "position": -15, "exposure": 13.5}]
+        engine.run_once(self.c)
+        self.assertAlmostEqual(sum(r["count"] for r in ledger.open_positions()), 15)
+        self.c.position_list = []
+        self.c.market_info["S-1"] = {"ticker": "S-1", "status": "finalized", "result": "no",
+                                     "settlement_value_dollars": "0.0000"}
+        engine.run_once(self.c)   # NO wins: Kalshi pays $15 for the 15 still held
+        self.assertAlmostEqual(db.query("SELECT SUM(count) AS n FROM writeoffs")[0]["n"], 5)
+        self.assertAlmostEqual(ledger.realized(), 15 - self.cost)
+
+
+class KeylessSettleTests(TempHome):
+    """With no key, a run can't read Kalshi's fills, so it books no live payout: it waits for
+    a run that can check them. A payout booked unchecked is never looked at again."""
+
+    def setUp(self):
+        super().setUp()
+        config.update({"enabled": True, "budget": 300, "strategies": _all_off()})
+        db.insert("orders", ticker="S-1", side="no", count=20, price=0.9, filled=20,
+                  status="executed", order_id="o1", client_order_id="c1")
+        self.cost = 18 + client.fee(20, 0.9)
+        self.c = FakeKalshi(can_trade=False, balance=1000)
+        self.c.market_info["S-1"] = {"ticker": "S-1", "status": "finalized", "result": "no",
+                                     "settlement_value_dollars": "0.0000"}
+
+    def test_it_waits_for_the_key(self):
+        engine.run_once(self.c)
+        self.assertAlmostEqual(ledger.realized(), 0)
+        self.assertAlmostEqual(ledger.open_cost(), self.cost)   # still counted as spent
+
+    def test_a_sale_while_the_key_was_missing_is_never_booked_as_paid(self):
+        self.c.fill_list = [_fill("o1", "buy"), _fill("owner-1", "sell")]
+        engine.run_once(self.c)
+        self.c.can_trade = True   # the key is back
+        engine.run_once(self.c)
+        self.assertAlmostEqual(ledger.realized(), -self.cost)   # not +$1.87: Kalshi paid nothing
+        self.assertLessEqual(ledger.capital(config.load()), 300 - self.cost + 1e-9)
+
+
+class RestoredMarksTests(TempHome):
+    """Imported (maybe the owner's) orders' gains never count, in equity as at settlement,
+    so their win settling doesn't read as a loss to the daily stop."""
+
+    def setUp(self):
+        super().setUp()
+        config.update({"enabled": True, "budget": 300, "strategies": _all_off()})
+        db.put("books_exist", True)
+        maintenance.backup()
+        maintenance.restore(maintenance.backups()[0][0])
+        self.c = FakeKalshi(balance=1000)
+        self.c.fill_list = [_fill("own1", "buy", side="yes", n=100, p=0.10, ticker="OWN-1")]
+        self.c.position_list = [{"ticker": "OWN-1", "position": 100, "exposure": 10}]
+        self.cost = 10 + client.fee(100, 0.10)
+
+    def _start(self, bid):
+        self.c.market_info["OWN-1"] = {"ticker": "OWN-1", "status": "active", "yes_bid_dollars": bid}
+        config.clear_trip()
+        config.update({"enabled": True})
+        engine.run_once(self.c)   # catch_up imports it; the UTC day starts here
+        self.assertEqual(config.load()["disabled_reason"], "")
+
+    def _settle(self, result):
+        self.c.market_info["OWN-1"] = {"ticker": "OWN-1", "status": "finalized", "result": result,
+                                       "settlement_value_dollars": "1.0000" if result == "yes" else "0.0000"}
+        self.c.position_list = []
+        engine.run_once(self.c)
+
+    def test_its_win_settling_is_not_a_daily_loss(self):
+        self._start("0.9500")
+        self.assertAlmostEqual(ledger.equity(self.c, config.load()), 300)   # never above its cost
+        self._settle("yes")
+        self.assertAlmostEqual(ledger.realized(), 0)
+        self.assertEqual(config.load()["disabled_reason"], "")
+
+    def test_its_loss_still_counts(self):
+        self._start("0.0500")
+        self.assertAlmostEqual(ledger.equity(self.c, config.load()), 300 - self.cost + 5)
+        self._settle("no")
+        self.assertAlmostEqual(ledger.realized(), -self.cost)
+
+
+class ReconcileUnreadableTests(TempHome):
+    """A lookup that says only "canceled" can hide a part fill, like a reply that does. It is
+    never booked as 0 filled: the order stays unknown and the bot stops for a person."""
+
+    def test_a_lookup_that_says_only_canceled_stops_the_bot(self):
+        config.update({"enabled": True, "budget": 300, "strategies": _all_off()})
+        db.insert("orders", ts=time.time(), ticker="T-1", side="no", count=5, price=0.9, filled=0,
+                  status="unknown", order_id="o1", client_order_id="c1")
+        c = FakeKalshi(balance=1000)
+        c.order_list = [{"order_id": "o1", "client_order_id": "c1", "ticker": "T-1", "status": "canceled"}]
+        c.market_info["T-1"] = {"ticker": "T-1", "status": "active", "no_bid_dollars": "0.9000"}
+        c.position_list = [{"ticker": "T-1", "position": -3, "exposure": 2.7}]   # 3 of 5 filled
+        engine.run_once(c)
+        row = db.query("SELECT status, filled FROM orders WHERE client_order_id = 'c1'")[0]
+        self.assertEqual(row["status"], "unknown")
+        self.assertIn("can't tell how much order c1 on T-1 filled", config.load()["disabled_reason"])
+
+
+class ProdModesTests(TempHome):
+    """Back on prod, each strategy gets the mode it had there. A demo round trip can't turn
+    real money on, or off, behind the owner's back."""
+
+    def test_basket_arb_set_to_paper_on_prod_stays_paper(self):
+        config.update({"strategies": {"basket_arb": {"mode": "paper"}}})   # no real money for now
+        config.switch({"env": "demo"})
+        config.update({"strategies": {"basket_arb": {"mode": "live"}}})    # fake-money practice
+        config.switch({"env": "prod"})
+        self.assertEqual(config.load()["strategies"]["basket_arb"]["mode"], "paper")
+
+    def test_a_strategy_chosen_live_on_prod_stays_live(self):
+        config.update({"strategies": {"ladder_arb": {"mode": "live"}}})    # on prod, on purpose
+        config.switch({"env": "demo"})
+        config.switch({"env": "prod"})
+        self.assertEqual(config.load()["strategies"]["ladder_arb"]["mode"], "live")
+
+    def test_off_on_prod_comes_back_off(self):
+        config.update({"strategies": {"mentions": {"mode": "off"}}})
+        config.switch({"env": "demo"})
+        config.update({"strategies": {"mentions": {"mode": "live"}}})
+        config.switch({"env": "prod"})
+        self.assertEqual(config.load()["strategies"]["mentions"]["mode"], "off")
+
+    def test_kal_set_env_says_what_changed(self):
+        config.update({"strategies": {"basket_arb": {"mode": "paper"}}})
+        config.switch({"env": "demo"})
+        config.update({"strategies": {"basket_arb": {"mode": "live"}}})
+        out = io.StringIO()
+        with redirect_stdout(out):
+            cli.main(["set", "env", "prod"])
+        self.assertIn("Back to the real-money modes: basket_arb paper.", out.getvalue())
+
+
+class GateVersionTests(TempHome):
+    def test_a_pass_from_before_fill_counts_were_needed_is_proved_again(self):
+        c = FakeKalshi()
+        gate.record(c, "prod", True, "passed under the old rule")
+        rec = db.get(gate.KEY)
+        db.put(gate.KEY, {**rec, "version": 2})
+        self.assertFalse(gate.passed(c, "prod"))
+        gate.record(c, "prod", True, "passed again")
+        self.assertTrue(gate.passed(c, "prod"))
+

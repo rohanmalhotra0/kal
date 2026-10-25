@@ -271,10 +271,9 @@ def run(input_fn=input, print_fn=print, selftest_fn=None, balance_fn=None, inter
         # A switch of exchange waits for a trade run to finish: each exchange has its own books.
         before = config.load()
         new = config.switch({"env": env, "budget": budget})
-        to_prod = before["env"] != "prod" and new["env"] == "prod"
-        back = [n for n in config.practice_live(before) if to_prod and new["strategies"][n]["mode"] == "paper"]
-        if back:
-            say("", f"Back on paper for real money: {', '.join(back)}. Live was for demo practice.")
+        note = config.back_on_prod_note(config.back_on_prod(before, new))
+        if note:
+            say("", note)
     except config.Busy:
         say("", f"A trade run is still going. Try again in a minute: {config.command('setup')}")
         return end(1)

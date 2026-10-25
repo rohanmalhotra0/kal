@@ -25,7 +25,8 @@ PROBE_MIN_ASK = 0.10      # YES test: only where the cheapest YES seller asks at
 PROBE_MAX_BID = 0.90      # NO test: only where the best YES buyer bids at most this much
 PROBE_TRIES = 10          # busy markets to look at
 RETRY_SECONDS = 3600      # after a failed probe, wait this long before the next one
-VERSION = 2               # a pass counts only from this version: 2 = YES and NO both tested
+VERSION = 3               # a pass counts only from this version: 2 = YES and NO both tested,
+                          # 3 = the replies said how much filled
 
 log = logging.getLogger(__name__)
 

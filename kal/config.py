@@ -255,15 +255,49 @@ def switch(changes, wait=None):
         if cur["enabled"]:
             raise ValueError("turn the bot off before you switch")
         if changes["env"] == "prod":
-            # Modes are one setting for both exchanges. A strategy turned live for practice
-            # on demo (fake money) goes back to paper, so real money is chosen on prod itself.
-            back = {name: {"mode": "paper"} for name in practice_live(cur)}
+            # Modes are one setting for both exchanges, so real money is chosen on prod itself:
+            # back on prod, each strategy gets the mode it had there (saved when leaving), and
+            # one turned live for practice on demo (fake money) goes back to paper.
+            back = {name: {"mode": mode} for name, mode in prod_modes(cur).items()
+                    if mode != (cur["strategies"].get(name) or {}).get("mode")}
             changes = _merge({"strategies": back}, changes)
+        elif cur["env"] == "prod":
+            modes = {name: (s or {}).get("mode") for name, s in cur["strategies"].items()}
+            changes = {**changes, "prod_modes": modes}   # for the way back
         return update(changes)
 
 
 def practice_live(cfg):
-    """Strategies a switch to prod puts back on paper: live now, but not live by default."""
+    """Strategies live now that aren't live by default (live for practice, if on demo)."""
     default = {name: (s or {}).get("mode") for name, s in DEFAULTS["strategies"].items()}
     return sorted(name for name, s in cfg["strategies"].items()
                   if (s or {}).get("mode") == "live" and default.get(name) != "live")
+
+
+def prod_modes(cfg):
+    """What each strategy's mode becomes on a switch to prod: the one it had on prod when it
+    last left (cfg["prod_modes"]), else paper if it's live only for practice, else as it is."""
+    saved = cfg.get("prod_modes") or {}
+    practice = set(practice_live(cfg))
+    return {name: saved.get(name) or ("paper" if name in practice else (s or {}).get("mode"))
+            for name, s in cfg["strategies"].items()}
+
+
+def back_on_prod(before, after):
+    """{name: new mode} for the strategies a switch from demo to prod changed."""
+    if before["env"] == "prod" or after["env"] != "prod":
+        return {}
+    out = {}
+    for name, s in sorted(before["strategies"].items()):
+        old, new = (s or {}).get("mode"), (after["strategies"].get(name) or {}).get("mode")
+        if old != new:
+            out[name] = new
+    return out
+
+
+def back_on_prod_note(moved):
+    """The owner's line for back_on_prod(), or ""."""
+    if not moved:
+        return ""
+    return (f"Back to the real-money modes: {', '.join(f'{n} {m}' for n, m in moved.items())}. "
+            f"Modes on demo were practice.")
