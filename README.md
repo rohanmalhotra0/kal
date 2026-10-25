@@ -89,7 +89,7 @@ The bot checks prices again first, and stops at the first order that doesn't fil
 - **Stays off** after a safety stop, until a person says so.
 - **Paper first.** New ideas never start with real money.
 - **Demo mode.** Practice on Kalshi's fake-money exchange.
-- **Zero-risk order test.** No real money until Kalshi accepts one $0.01 bid that can't fill.
+- **Zero-risk order test.** No real money until Kalshi accepts two $0.01 orders (one YES, one NO) that can't fill.
 - **Dashboard is never open to the internet.** You reach it with an SSH tunnel.
 - **Disk and clock checks.** Under 200 MB of disk, or a clock 30 s off Kalshi's, it stops itself.
 - **Phone alerts** (free ntfy app) when it stops itself, trades real money, or needs a look.

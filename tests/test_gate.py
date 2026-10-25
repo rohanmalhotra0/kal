@@ -34,7 +34,7 @@ class GateTests(TempHome):
     def probes(self, c):
         return [o for o in c.orders if o[0] == BUSY]
 
-    def test_first_live_run_sends_one_test_order_then_trades(self):
+    def test_first_live_run_sends_the_two_test_orders_then_trades(self):
         c = fake_with_probe_market()
         s = engine.run_once(c)
         self.assertTrue(s["ok"], s)
@@ -45,6 +45,20 @@ class GateTests(TempHome):
         self.assertTrue(gate.passed(c, "prod"))
         engine.run_once(c)
         self.assertEqual(len(self.probes(c)), 2)  # proven once per key, not every run
+
+    def test_what_the_owner_reads_matches_the_orders_sent(self):
+        # The probe sends a YES and a NO order. The CLI, its help and the README said one.
+        import argparse
+        from kal import __main__ as cli
+        c = fake_with_probe_market()
+        self.assertTrue(gate.probe(c, "prod")[0])
+        self.assertEqual([o[1] for o in self.probes(c)], ["yes", "no"])
+        self.assertIn("1 YES and 1 NO", cli.PROBE_TEXT)
+        sub = next(a for a in cli.parser()._actions if isinstance(a, argparse._SubParsersAction))
+        self.assertIn("two $0.01 orders", " ".join(sub.choices["selftest"].format_help().split()))
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        with open(os.path.join(root, "README.md")) as f:
+            self.assertIn("two $0.01 orders (one YES, one NO)", f.read())
 
     def test_a_refused_no_test_order_keeps_money_on_paper(self):
         # Baskets buy NO. If Kalshi refuses that shape, real baskets would fail at their 2nd leg.
