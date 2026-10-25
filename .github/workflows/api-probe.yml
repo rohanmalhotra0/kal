@@ -1,11 +1,10 @@
-# Prints how the real Kalshi API behaves (public data only: no key, no orders).
+# Side branch only, never merged: deep research on the busy-markets code at 1 h and
+# 24 h before the scheduled end (the deep-research workflow runs 6 h). Public data only:
+# no key, no orders. Its own workflow, so it can't cancel the deep-research run.
 name: api-probe
 
 on:
   workflow_dispatch:
-  push:
-    branches: [main]
-    paths: ["tools/api_probe.py", ".github/workflows/api-probe.yml"]
 
 permissions:
   contents: read
@@ -13,11 +12,18 @@ permissions:
 jobs:
   probe:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 200
+    strategy:
+      fail-fast: false
+      matrix:
+        hours: [1, 24]
+    env:
+      KAL_HOME: ./state
+      PYTHONUNBUFFERED: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install requests
-      - run: python tools/api_probe.py
+      - run: pip install -r requirements.txt
+      - run: python tools/deep_research.py --active --hours ${{ matrix.hours }} --series-per-category 25 --markets-per-series 300 --max-minutes 150
