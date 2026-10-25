@@ -349,13 +349,25 @@ def _tally():
     return {"trades": 0, "open": 0, "settled": 0, "wins": 0, "pnl": 0.0, "cost": 0.0, "open_cost": 0.0}
 
 
+def _paid(result, side):
+    """What one contract on `side` paid, once booked: 1, 0, or a split ("0.3300": a called-off
+    market). None while open, or when paper couldn't read the result ("unknown")."""
+    if result in (None, "", "unknown"):
+        return None
+    try:
+        return ledger.payout_of(result, side)
+    except (TypeError, ValueError):
+        return None
+
+
 def _count(t, cost, result, side, pnl):
     """Add one trade to a tally. `result` is set only once its market has settled."""
     t["trades"] += 1
     t["cost"] += cost or 0.0
-    if result in ("yes", "no"):
+    paid = _paid(result, side)
+    if paid is not None:
         t["settled"] += 1
-        t["wins"] += result == side
+        t["wins"] += paid == 1
         t["pnl"] += pnl or 0.0
     else:
         t["open"] += 1
@@ -369,9 +381,14 @@ def _fill_cost(n, p):
 
 def _live_pnl(filled, price, side, result):
     """Profit of one filled live order once its market settled, else None."""
-    if result not in ("yes", "no") or not filled > 0:
+    paid = _paid(result, side)
+    if paid is None or not filled > 0:
         return None
-    return filled * (result == side) - _fill_cost(filled, price)
+    return filled * paid - _fill_cost(filled, price)
+
+
+def _settled_state(paid):
+    return "won" if paid == 1 else "lost" if paid == 0 else "split"
 
 
 def _live_state(status, filled, result, side):
@@ -384,9 +401,8 @@ def _live_state(status, filled, result, side):
         return "never_placed"
     if not filled > 0:
         return "no_fill"
-    if result in ("yes", "no"):
-        return "won" if result == side else "lost"
-    return "open"
+    paid = _paid(result, side)
+    return "open" if paid is None else _settled_state(paid)
 
 
 def _live_trade(r):
@@ -399,11 +415,12 @@ def _live_trade(r):
 
 
 def _paper_trade(r):
-    settled = bool(r["settled"]) and r["result"] in ("yes", "no")
+    paid = _paid(r["result"], r["side"]) if r["settled"] else None
+    settled = paid is not None
     return {"kind": "paper", "id": r["id"], "ts": r["ts"], "strategy": r["strategy"], "title": r["title"] or "",
             "event": r["event"] or "", "ticker": r["ticker"], "side": r["side"], "price": r["price"],
             "count": _float(r["count"]), "filled": _float(r["count"]), "status": "settled" if settled else "open",
-            "state": ("won" if r["result"] == r["side"] else "lost") if settled else "open",
+            "state": _settled_state(paid) if settled else "unknown" if r["settled"] else "open",
             "cost": r["cost"], "pnl": r["pnl"] if settled else None, "error": ""}
 
 
@@ -430,11 +447,11 @@ def trade_totals():
             LEFT JOIN settlements st ON st.ticker = o.ticker WHERE o.filled > 0"""):
         _count(live[r["strategy"] or "?"], _fill_cost(r["filled"], r["price"]), r["result"], r["side"],
                _live_pnl(r["filled"], r["price"], r["side"], r["result"]))
-    done = "settled = 1 AND result IN ('yes', 'no')"
+    done = "settled = 1 AND pnl IS NOT NULL"   # booked: yes, no or a split; not "unknown"
     pap = {}
     for r in db.query(f"""SELECT COALESCE(strategy, '?') AS strategy, COUNT(*) AS trades,
             SUM(CASE WHEN {done} THEN 1 ELSE 0 END) AS settled,
-            SUM(CASE WHEN {done} AND result = side THEN 1 ELSE 0 END) AS wins,
+            SUM(CASE WHEN {done} AND result = side THEN 1 ELSE 0 END) AS wins,   -- a split is no win
             COALESCE(SUM(CASE WHEN {done} THEN pnl END), 0) AS pnl, COALESCE(SUM(cost), 0) AS cost,
             COALESCE(SUM(CASE WHEN NOT ({done}) THEN cost END), 0) AS open_cost
             FROM paper GROUP BY COALESCE(strategy, '?')"""):
@@ -471,7 +488,7 @@ def edge_results():
         t = out[str(eid)]["paper"]
         result = r["result"] if r["settled"] else None
         _count(t, r["cost"], result, r["side"], r["pnl"])
-        if result in ("yes", "no"):
+        if _paid(result, r["side"]) is not None:
             t["markets"].add(r["ticker"])
             t["events"].add(r["event"] or r["ticker"])
     for r in db.query("""SELECT o.side, o.filled, o.price, st.result, s.meta FROM orders o

@@ -14,7 +14,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 import kal.__main__ as cli
-from kal import client, config, db, report, selftest
+from kal import client, config, db, ledger, report, selftest
 from kal.strategies.base import Strategy
 from tests.fakes import FakeKalshi
 from tests.helpers import TempHome
@@ -876,6 +876,17 @@ class ReportTests(TempHome):
                 report.maybe_push()
         self.assertIn("403", str(e.exception))
         self.assertNotIn(SECRETS["KAL_GITHUB_TOKEN"], str(e.exception))
+
+    def test_split_payouts_count_in_the_report(self):
+        from tests.fakes import FakeKalshi
+        db.insert("orders", ts=time.time(), strategy="favorites", ticker="S", side="no", count=10, price=0.60,
+                  filled=10, status="executed", client_order_id="c-S")
+        c = FakeKalshi()
+        c.market_info = {"S": {"status": "finalized", "result": "scalar", "settlement_value_dollars": "0.3300"}}
+        ledger.settle(c)
+        live = report._live_stats()["favorites"]
+        self.assertEqual((live["settled"], live["wins"]), (1, 0))
+        self.assertAlmostEqual(live["pnl"], round(10 * 0.67 - 6 - client.fee(10, 0.60), 2))  # 0.53
 
     def test_public_repo_is_refused(self):
         gh = FakeGitHub(private=False)

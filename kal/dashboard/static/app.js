@@ -28,6 +28,8 @@ const TRADE_STATE = {
   open: ["Open", ""],
   won: ["Won", "good"],
   lost: ["Lost", "bad"],
+  split: ["Split payout", "warn"],
+  unknown: ["Unclear result", "warn"],
   no_fill: ["No fill", "off"],
   refused: ["Refused", "bad"],
   checking: ["Checking", "warn"],

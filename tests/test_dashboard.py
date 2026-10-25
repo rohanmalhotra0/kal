@@ -361,6 +361,30 @@ class TradesApiTests(Base):
         self.assertEqual((m["trades"], m["open"], m["settled"], m["wins"]), (2, 1, 1, 1))
         self.assertAlmostEqual(m["pnl"], 6.9)
 
+    def test_a_called_off_market_shows_its_split_payout(self):
+        # Real Kalshi: a cancelled 3-way match settled "scalar" at $0.33 on each outcome.
+        now = time.time()
+        order("S", "no", 10, 0.60, ts=now - 30, strategy="favorites")
+        c = FakeKalshi()
+        c.market_info = {"S": {"status": "finalized", "result": "scalar", "settlement_value_dollars": "0.3300"}}
+        ledger.settle(c)
+        db.insert("paper", ts=now - 20, strategy="mentions", event="PS", ticker="PS", side="yes", count=10,
+                  price=0.5, cost=5.1, settled=1, result="0.3300", pnl=3.3 - 5.1, settled_ts=now)
+        db.insert("paper", ts=now - 10, strategy="mentions", event="PU", ticker="PU", side="yes", count=1,
+                  price=0.5, cost=0.51, settled=1, result="unknown", pnl=None, settled_ts=now)
+        d = self.client.get("/api/trades").get_json()
+        by = {t["ticker"]: t for t in d["trades"]}
+        self.assertEqual((by["S"]["state"], by["PS"]["state"], by["PU"]["state"]), ("split", "split", "unknown"))
+        self.assertAlmostEqual(by["S"]["pnl"], 10 * 0.67 - 6 - fee(10, 0.60))
+        self.assertAlmostEqual(by["S"]["pnl"], ledger.realized())  # the same number as the books
+        self.assertAlmostEqual(by["PS"]["pnl"], -1.8)
+        self.assertIsNone(by["PU"]["pnl"])
+        fav, men = d["totals"]["live"]["favorites"], d["totals"]["paper"]["mentions"]
+        self.assertEqual((fav["settled"], fav["open"], fav["wins"]), (1, 0, 0))
+        self.assertAlmostEqual(fav["pnl"], ledger.realized())
+        self.assertEqual((men["settled"], men["wins"]), (1, 0))
+        self.assertAlmostEqual(men["pnl"], -1.8)
+
     def test_limit(self):
         self.seed()
         d = self.client.get("/api/trades?limit=3").get_json()

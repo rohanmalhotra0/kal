@@ -101,11 +101,11 @@ def _live_stats():
         cost = r["filled"] * r["price"] + fee(r["filled"], r["price"])
         st["fills"] += 1
         st["spent"] += cost
-        if r["result"] in ("yes", "no"):
-            won = r["result"] == r["side"]
+        if r["result"] not in (None, ""):
+            paid = ledger.payout_of(r["result"], r["side"])  # 1, 0, or a split (a called-off market)
             st["settled"] += 1
-            st["wins"] += won
-            st["pnl"] += r["filled"] * won - cost
+            st["wins"] += paid == 1
+            st["pnl"] += r["filled"] * paid - cost
     for st in out.values():
         st["spent"], st["pnl"] = round(st["spent"], 2), round(st["pnl"], 2)
     return out
