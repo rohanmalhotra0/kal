@@ -2,6 +2,22 @@
 
 Newest first. Each 2-hour check-in adds one entry: what it checked, what it found, links.
 
+## 2026-10-25 02:20 UTC — real-API facts and safety fixes
+
+- **Cancelled games really happen:** a called-off 3-way eSoccer match settled every outcome
+  at $0.33. Backtests now count these at what they paid (they had been left out, which
+  made favorites look better than they are). The dashboard shows them as "Split payout".
+- **Locked-in trades skip "last traded price" rules:** about 1% of markets in exclusive
+  events (death clauses on "leader leaves office") can settle at any price.
+- **Kalshi's market list is cached up to 15 s** (CloudFront). Order books are never
+  cached, so trades use fresh prices. The clock check had misread a cached reply as a
+  13 s clock error; fixed.
+- **New: skip a bet when the last hour of trades went 70%+ the other way** (or one big
+  trade did). Research says informed traders take liquidity on Kalshi.
+- Research swarm so far: plain longshot fading is about break-even after fees for us;
+  favorites close to the end and the NO side where people over-bet YES are the best
+  leads; arbitrage is rare. Status reports only go to a private repo now.
+
 ## 2026-10-25 01:35 UTC — test order before real money
 
 - **No real money until Kalshi accepts one $0.01 test order** for this key and exchange
