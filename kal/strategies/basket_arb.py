@@ -35,8 +35,10 @@ def no_basket(legs, budget):
 def to_signal(event, title, basket):
     # Biggest YES bid first: that's usually the mispriced one, most likely to vanish.
     legs = [Leg(t, "no", round(1 - b, 4), basket["count"]) for t, b in sorted(basket["legs"], key=lambda x: -x[1])]
+    c = basket["count"]
     sig = Signal("basket_arb", event, title, legs, payout_min=basket["payout"], note=(
-        f"buy {basket['count']} NO on {len(legs)} markets; pays at least ${basket['payout']:.2f}"))
+        f"buy {c} NO on {len(legs)} markets; pays at least ${basket['payout']:.2f}"),
+        prefix_payouts=[c * (k - 1) for k in range(1, len(legs))])  # k NO legs pay >= c*(k-1)
     sig.exp_profit = sig.payout_min - sig.cost
     return sig
 

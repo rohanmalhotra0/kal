@@ -61,3 +61,24 @@ def stats(strategy=None):
     for r in rows:
         r["roi"] = r["pnl"] / r["settled_cost"] if r["settled_cost"] else None
     return {r["strategy"]: r for r in rows}
+
+
+def open_by_event():
+    rows = db.query("SELECT event, COALESCE(SUM(cost), 0) AS c FROM paper WHERE settled = 0 GROUP BY event")
+    return {r["event"]: r["c"] for r in rows}
+
+
+def open_cost():
+    return db.query("SELECT COALESCE(SUM(cost), 0) AS c FROM paper WHERE settled = 0")[0]["c"]
+
+
+def peak_equity():
+    rows = db.query("SELECT MAX(paper_equity) AS p FROM equity")
+    return rows[0]["p"] if rows and rows[0]["p"] is not None else None
+
+
+def open_directional():
+    rows = db.query("""SELECT COALESCE(SUM(p.cost), 0) AS c FROM paper p
+        LEFT JOIN signals sg ON sg.id = p.signal_id
+        WHERE p.settled = 0 AND COALESCE(sg.guaranteed, 0) = 0""")
+    return rows[0]["c"]

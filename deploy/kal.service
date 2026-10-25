@@ -1,0 +1,40 @@
+# systemd unit for kal. deploy/install.sh copies this to /etc/systemd/system/.
+# Code: /opt/kal. Python: /opt/kal-venv. State: /var/lib/kal. Settings: /etc/kal/kal.env.
+[Unit]
+Description=kal Kalshi trading bot (dashboard + scheduler)
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=kal
+Group=kal
+WorkingDirectory=/opt/kal
+Environment=KAL_HOME=/var/lib/kal
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+EnvironmentFile=-/etc/kal/kal.env
+# 127.0.0.1 only: reach the dashboard with ssh -L 8787:localhost:8787
+ExecStart=/opt/kal-venv/bin/python -m kal app --host 127.0.0.1 --port 8787
+Restart=always
+RestartSec=10
+# On stop, a trade run in progress gets up to 5 minutes to finish its basket.
+KillSignal=SIGTERM
+TimeoutStopSec=330
+
+# Lock it down: it only needs to write its own state folder.
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+ReadWritePaths=/var/lib/kal
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

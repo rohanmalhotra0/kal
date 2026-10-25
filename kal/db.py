@@ -30,8 +30,10 @@ CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT);
 """
 
 
-def path():
-    return os.path.join(config.home(), "kal.db")
+def path(env=None):
+    """One database per exchange, so fake-money (demo) fills can never touch the real ledger."""
+    env = env or config.load().get("env", "prod")
+    return os.path.join(config.home(), "kal.db" if env == "prod" else f"kal-{env}.db")
 
 
 @contextmanager

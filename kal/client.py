@@ -7,6 +7,7 @@ integer fields, so a schema change can't silently zero out a price.
 import base64
 import math
 import os
+import threading
 import time
 import uuid
 from datetime import datetime
@@ -21,7 +22,33 @@ FEE_RATE = 0.07  # taker fee: ceil(0.07 * C * P * (1-P)) to the cent
 
 
 class KalshiError(RuntimeError):
-    pass
+    def __init__(self, message, status=None):
+        super().__init__(message)
+        self.status = status
+
+    @property
+    def rejected(self):
+        """True when Kalshi refused the request outright (4xx), so no order exists."""
+        return self.status is not None and 400 <= self.status < 500
+
+
+class _Pacer:
+    """One request pace shared by every client in the process (trade + research threads),
+    so together they stay under Kalshi's ~20 requests/second basic tier."""
+
+    def __init__(self, gap):
+        self.gap, self.next, self.lock = gap, 0.0, threading.Lock()
+
+    def wait(self):
+        with self.lock:
+            now = time.monotonic()
+            delay = self.next - now
+            self.next = max(now, self.next) + self.gap
+        if delay > 0:
+            time.sleep(delay)
+
+
+PACER = _Pacer(0.06)
 
 
 # ---------- auth ----------
@@ -76,7 +103,7 @@ class Kalshi:
                     "KALSHI-ACCESS-TIMESTAMP": ts_ms,
                     "KALSHI-ACCESS-SIGNATURE": sign(self.private_key, ts_ms, method, path),
                 }
-            time.sleep(0.07)  # stay under the basic tier's ~20 requests/second
+            PACER.wait()
             try:
                 r = self.s.request(method, self.base + path, params=params, json=body, headers=headers, timeout=30)
             except requests.RequestException:
@@ -93,7 +120,7 @@ class Kalshi:
     def get(self, endpoint, params=None):
         r = self._req("GET", endpoint, params=params)
         if r.status_code >= 400:
-            raise KalshiError(f"GET {endpoint} -> {r.status_code}: {r.text[:300]}")
+            raise KalshiError(f"GET {endpoint} -> {r.status_code}: {r.text[:300]}", r.status_code)
         return r.json()
 
     def paginate(self, endpoint, key, params=None, limit=None):
@@ -121,8 +148,8 @@ class Kalshi:
     def market(self, ticker):
         return self.get(f"/markets/{ticker}").get("market", {})
 
-    def events(self, **params):
-        return self.paginate("/events", "events", {"limit": 200, **params})
+    def events(self, limit=None, **params):
+        return self.paginate("/events", "events", {"limit": 200, **params}, limit)
 
     def series(self, category=None):
         return self.paginate("/series", "series", {"category": category} if category else {})
@@ -187,17 +214,34 @@ class Kalshi:
         params = {"limit": 1000, **({"min_ts": int(min_ts)} if min_ts else {})}
         return self.paginate("/portfolio/fills", "fills", params)
 
+    def orders(self, ticker=None, min_ts=None):
+        params = {"limit": 1000}
+        if ticker:
+            params["ticker"] = ticker
+        if min_ts:
+            params["min_ts"] = int(min_ts)
+        return self.paginate("/portfolio/orders", "orders", params)
+
+    def cancel(self, order_id):
+        r = self._req("DELETE", f"/portfolio/orders/{order_id}")
+        if r.status_code >= 400:
+            raise KalshiError(f"cancel {order_id} -> {r.status_code}: {r.text[:300]}", r.status_code)
+        return r.json() if r.text else {}
+
     def buy(self, ticker, side, count, limit_price, client_order_id=None):
-        """Immediate-or-cancel limit buy; returns the order dict. Tries the fixed-point
-        body first, then the legacy integer body. A 400 creates no order, and the shared
-        client_order_id stops a double fill either way."""
+        """Immediate-or-cancel limit buy; returns the order dict.
+
+        Tries the fixed-point body first. Only if Kalshi rejects that (400) and the price is a
+        whole cent does it try the legacy integer body, so the limit is never rounded up.
+        A rejection creates no order, and the shared client_order_id stops a double fill.
+        Any other failure raises KalshiError with rejected=False: the order MAY exist."""
         coid = client_order_id or str(uuid.uuid4())
         base = {"ticker": ticker, "client_order_id": coid, "action": "buy", "side": side,
                 "time_in_force": "immediate_or_cancel"}
-        bodies = [
-            {**base, "count_fp": f"{count:.2f}", f"{side}_price_dollars": f"{limit_price:.4f}"},
-            {**base, "count": int(count), "type": "limit", f"{side}_price": round(limit_price * 100)},
-        ]
+        bodies = [{**base, "count_fp": f"{count:.2f}", f"{side}_price_dollars": f"{limit_price:.4f}"}]
+        cents = limit_price * 100
+        if abs(cents - round(cents)) < 1e-6 and count == int(count):
+            bodies.append({**base, "count": int(count), "type": "limit", f"{side}_price": int(round(cents))})
         r = None
         for body in bodies:
             r = self._req("POST", "/portfolio/orders", body=body)
@@ -206,7 +250,7 @@ class Kalshi:
                 return d.get("order", d)
             if r.status_code != 400:
                 break
-        raise KalshiError(f"Order rejected ({r.status_code}): {r.text[:300]}")
+        raise KalshiError(f"Order failed ({r.status_code}): {r.text[:300]}", r.status_code)
 
 
 # ---------- field helpers ----------
@@ -226,10 +270,24 @@ def price(d, field):
 
 
 def filled(order, requested):
-    """Contracts an immediate-or-cancel order actually bought."""
+    """Contracts an order actually bought. Prefers Kalshi's fill count; falls back to
+    initial - remaining; then to the status. Never reports more than was asked for."""
     if "fill_count_fp" in order or "fill_count" in order:
-        return num(order, "fill_count")
-    return requested if order.get("status") == "executed" else 0
+        n = num(order, "fill_count")
+    elif ("initial_count_fp" in order or "initial_count" in order) and \
+            ("remaining_count_fp" in order or "remaining_count" in order):
+        n = num(order, "initial_count") - num(order, "remaining_count")
+    else:
+        n = requested if order.get("status") == "executed" else 0
+    return max(0.0, min(float(requested), n))
+
+
+DONE = ("executed", "canceled", "cancelled")
+
+
+def resting(order):
+    """True if the order is still on the book (it should never be, for immediate-or-cancel)."""
+    return order.get("status") not in DONE
 
 
 def candle_close(candle, field):

@@ -1,0 +1,54 @@
+# Checks the bot against the REAL Kalshi API, with no secrets and no orders.
+# The selftest catches renamed fields; the scan shows what each strategy sees today;
+# research --quick proves backtests still parse real settled markets.
+name: market-check
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ["kal/**"]
+  schedule:
+    - cron: "17 13 * * *"   # once a day
+
+permissions:
+  contents: read
+
+concurrency:
+  group: market-check
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      KAL_HOME: ./state
+      PYTHONUNBUFFERED: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+
+      - name: Self-test (real API shape)
+        run: python -m kal selftest
+
+      - name: Scan (dry run, never trades)
+        if: success() || failure()
+        run: python -m kal scan
+
+      - name: Research (quick)
+        if: success() || failure()
+        run: python -m kal research --quick
+
+      - name: Save research results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: research
+          path: state/research/*.json
+          if-no-files-found: warn
+          retention-days: 14

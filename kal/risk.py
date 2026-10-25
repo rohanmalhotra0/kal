@@ -32,10 +32,13 @@ def run_lock():
 class Limits:
     """Tracks spending within one run so no signal can push past a limit."""
 
-    def __init__(self, cfg, budget_left):
+    def __init__(self, cfg, budget_left, open_by_event=None, directional_open=0.0, capital=None):
         self.cfg = cfg
         self.budget_left = budget_left
-        self.per_event = defaultdict(float)
+        # Start from what's already open, so caps hold across runs, not just within one.
+        self.per_event = defaultdict(float, open_by_event or {})
+        self.directional_open = directional_open
+        self.capital = capital
 
     def refuse(self, sig):
         """A reason to refuse this signal, or None if it's within every limit."""
@@ -47,6 +50,8 @@ class Limits:
                 return f"bad leg {leg}"
         if sig.cost > self.budget_left + 1e-9:
             return f"over budget (${sig.cost:.2f} > ${self.budget_left:.2f} left)"
+        if len(sig.legs) > 1 and sig.partial_loss > cfg["max_per_trade"] + 1e-9:
+            return f"a half-filled basket could lose ${sig.partial_loss:.2f}, over max_per_trade"
         if sig.guaranteed:
             if sig.cost > cfg["max_per_arb"] + 1e-9:
                 return f"arbitrage cost ${sig.cost:.2f} over max_per_arb"
@@ -55,12 +60,17 @@ class Limits:
                 return f"could lose ${sig.max_loss:.2f}, over max_per_trade"
             if self.per_event[sig.event] + sig.cost > cfg["max_per_event"] + 1e-9:
                 return "over max_per_event"
+            if self.capital is not None and \
+                    self.directional_open + sig.cost > cfg["max_exposure"] * self.capital + 1e-9:
+                return "over max_exposure (too much already riding on bets)"
         return None
 
     def spend(self, sig, amount=None):
         amount = sig.cost if amount is None else amount
         self.budget_left -= amount
         self.per_event[sig.event] += amount
+        if not sig.guaranteed:
+            self.directional_open += amount
 
 
 def mark_to_market(client, positions):

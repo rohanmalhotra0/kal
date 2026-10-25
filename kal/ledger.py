@@ -87,3 +87,34 @@ def equity(client, cfg):
     markets = client.markets_by_ticker({r["ticker"] for r in rows})
     value = sum(r["count"] * price(markets.get(r["ticker"], {}), f"{r['side']}_bid") for r in rows)
     return capital(cfg) - open_cost() + value
+
+
+def open_by_event():
+    """Dollars in open bot positions per event (from the signal each order belonged to)."""
+    rows = db.query("""SELECT COALESCE(sg.event, o.ticker) AS event, o.filled, o.price
+        FROM orders o LEFT JOIN settlements s ON s.ticker = o.ticker
+        LEFT JOIN signals sg ON sg.id = o.signal_id
+        WHERE o.filled > 0 AND s.ticker IS NULL""")
+    out = {}
+    for r in rows:
+        out[r["event"]] = out.get(r["event"], 0.0) + r["filled"] * r["price"] + fee(r["filled"], r["price"])
+    return out
+
+
+def unresolved_orders():
+    """Orders whose outcome we don't know: the send may or may not have reached Kalshi."""
+    return db.query("SELECT * FROM orders WHERE status IN ('sending', 'unknown')")
+
+
+def open_directional():
+    """Dollars in open bot positions that came from bets, not locked-in arbitrage."""
+    rows = db.query("""SELECT o.filled, o.price FROM orders o
+        LEFT JOIN settlements s ON s.ticker = o.ticker
+        LEFT JOIN signals sg ON sg.id = o.signal_id
+        WHERE o.filled > 0 AND s.ticker IS NULL AND COALESCE(sg.guaranteed, 0) = 0""")
+    return sum(r["filled"] * r["price"] + fee(r["filled"], r["price"]) for r in rows)
+
+
+def peak_equity():
+    rows = db.query("SELECT MAX(equity) AS p FROM equity WHERE balance > 0 OR exposure > 0 OR equity > 0")
+    return rows[0]["p"] if rows and rows[0]["p"] is not None else None

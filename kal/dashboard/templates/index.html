@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>kal</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+  <!-- chart.umd.js is a real file in the npm package (already minified), so it can be
+       pinned with an integrity hash. The .min.js name is made on the fly by the CDN. -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.js"
+          integrity="sha384-dug+JxfBvklEQdJ4AYuBBAIScUz0bVN73xpy273gcAwHjb3qI0fXmuYNaNfdyYJG"
+          crossorigin="anonymous" defer></script>
+  <script src="{{ url_for('static', filename='app.js') }}" defer></script>
+</head>
+<body>
+<main>
+  <header class="top">
+    <h1>kal</h1>
+    <span id="where" class="pill"></span>
+  </header>
+
+  <div id="offline" class="banner warn" role="alert" hidden>
+    <p>Can't reach the bot. Trying again.</p>
+  </div>
+
+  <div id="trip" class="banner danger" role="alert" hidden>
+    <div>
+      <p class="banner-title">The bot stopped itself.</p>
+      <p id="trip-reason"></p>
+    </div>
+    <button id="reset" class="btn" type="button">Reset</button>
+  </div>
+
+  <div id="nokey" class="banner warn" hidden>
+    <p>No Kalshi key. Every trade is practice.</p>
+  </div>
+
+  <div id="problems" class="banner warn" hidden>
+    <p id="problems-text"></p>
+  </div>
+
+  <section class="panel control" aria-label="Controls">
+    <div class="switch-row">
+      <button id="power" class="switch" type="button" role="switch" aria-checked="false"
+              aria-labelledby="power-label">
+        <span class="switch-text" id="power-word">OFF</span>
+        <span class="knob" aria-hidden="true"></span>
+      </button>
+      <div>
+        <p id="power-label" class="big">The bot is off</p>
+        <p id="next" class="muted"></p>
+      </div>
+    </div>
+
+    <form id="budget-form" class="field">
+      <label for="budget" class="label">How much money can the bot use?</label>
+      <div class="input-row">
+        <div class="money-input">
+          <span aria-hidden="true">$</span>
+          <input id="budget" type="number" min="0" step="any" inputmode="decimal" autocomplete="off">
+        </div>
+        <button class="btn" type="submit">Save</button>
+      </div>
+      <p id="budget-note" class="muted"></p>
+    </form>
+
+    <fieldset class="field" id="env-group">
+      <legend class="label">Which Kalshi?</legend>
+      <div class="seg">
+        <label><input type="radio" name="env" value="prod"> <span>Real money</span></label>
+        <label><input type="radio" name="env" value="demo"> <span>Practice (demo)</span></label>
+      </div>
+      <p id="env-note" class="muted"></p>
+    </fieldset>
+
+    <button id="check-now" class="btn ghost" type="button">Check markets now</button>
+  </section>
+
+  <p id="msg" class="msg" role="status" aria-live="polite"></p>
+
+  <section class="cards" aria-label="Money">
+    <div class="card"><h2>Cash</h2><p id="c-cash" class="num">—</p><p id="c-cash-sub" class="muted small"></p></div>
+    <div class="card"><h2>Bot value</h2><p id="c-value" class="num">—</p><p id="c-value-sub" class="muted small"></p></div>
+    <div class="card"><h2>In bets</h2><p id="c-bets" class="num">—</p><p id="c-bets-sub" class="muted small"></p></div>
+    <div class="card"><h2>Today</h2><p id="c-today" class="num">—</p><p class="muted small">Real money</p></div>
+    <div class="card"><h2>Practice profit</h2><p id="c-paper" class="num">—</p><p id="c-paper-sub" class="muted small"></p></div>
+  </section>
+
+  <section class="panel">
+    <h2>Value over time</h2>
+    <div class="chart-box"><canvas id="chart" role="img" aria-label="Chart of value over time"></canvas></div>
+    <p id="chart-note" class="muted" hidden></p>
+  </section>
+
+  <section class="panel">
+    <h2>Strategies</h2>
+    <table class="list" id="strategies">
+      <thead><tr><th>Strategy</th><th>Type</th><th>Mode</th><th>Practice results</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head">
+      <h2>Research</h2>
+      <button id="research-now" class="btn ghost" type="button">Run research now</button>
+    </div>
+    <p id="research-last" class="muted"></p>
+    <ul id="research-counts" class="chips"></ul>
+    <p id="research-words" class="muted"></p>
+    <table class="list" id="edges">
+      <thead><tr><th>Series</th><th>Price range</th><th>Past result</th><th>Status</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </section>
+
+  <section class="panel">
+    <h2>Recent trades</h2>
+    <table class="list" id="trades">
+      <thead><tr><th>When</th><th>Strategy</th><th>What</th><th>Money</th><th>Cost</th><th>Result</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </section>
+
+  <section class="panel">
+    <h2>Run log</h2>
+    <table class="list" id="runs">
+      <thead><tr><th>When</th><th>Job</th><th>How it went</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head">
+      <h2>Self-test</h2>
+      <button id="selftest" class="btn ghost" type="button">Run self-test</button>
+    </div>
+    <ul id="selftest-out" class="checks"></ul>
+  </section>
+</main>
+</body>
+</html>

@@ -27,6 +27,10 @@ class Signal:
     exp_profit: float = 0.0    # expected profit in dollars, after fees
     note: str = ""
     meta: dict = field(default_factory=dict)
+    # Worst-case payout if execution stops after the first k legs (k = 1 .. len(legs) - 1).
+    # None means "assume $0", the safe default. A NO basket sets it, since a partial NO
+    # basket still pays at least c * (k - 1).
+    prefix_payouts: list = None
 
     @property
     def cost(self):
@@ -40,6 +44,16 @@ class Signal:
     def max_loss(self):
         return max(0.0, self.cost - self.payout_min)
 
+    @property
+    def partial_loss(self):
+        """Worst loss if a multi-leg signal stops part way (a leg doesn't fill)."""
+        worst, spent = 0.0, 0.0
+        for k, leg in enumerate(self.legs[:-1], start=1):
+            spent += leg.cost
+            payout = self.prefix_payouts[k - 1] if self.prefix_payouts else 0.0
+            worst = max(worst, spent - payout)
+        return worst
+
 
 @dataclass
 class Context:
@@ -48,10 +62,11 @@ class Context:
     cfg: dict
     mode: str                  # "paper" or "live" for this scan
     budget_left: float         # dollars this strategy may still spend this run
-    bankroll: float            # dollars for bet sizing (budget, or paper bankroll)
+    bankroll: float            # dollars for bet sizing (capital, cut after drawdowns)
     held: set                  # tickers already held (live) or open (paper)
     research: dict             # outputs of kal.research, keyed by file name
     params: dict               # this strategy's settings from config
+    open_exposure: float = 0.0  # dollars already in open directional bets (for sizing caps)
 
 
 class Strategy:

@@ -62,14 +62,27 @@ class SizingTests(unittest.TestCase):
 
 
 class ConfigTests(TempHome):
-    def test_trip_beats_env(self):
-        import os
+    def test_trip_latch_beats_enabled(self):
         config.update({"enabled": True, "budget": 50})
-        os.environ["KAL_ENABLED"] = "true"
         config.trip("test")
         self.assertFalse(config.load()["enabled"])
+        config.update({"enabled": True})
+        self.assertFalse(config.load()["enabled"])  # still latched
         config.clear_trip()
+        self.assertFalse(config.load()["enabled"])  # Reset doesn't turn it back on by itself
+        config.update({"enabled": True})
         self.assertTrue(config.load()["enabled"])
+
+    def test_trip_works_with_invalid_file(self):
+        import json, os
+        config.update({"enabled": True, "budget": 50})
+        path = os.path.join(config.home(), "config.json")
+        data = json.load(open(path))
+        data["strategies"]["basket_arb"]["mode"] = "Live"
+        json.dump(data, open(path, "w"))
+        config.trip("emergency")
+        self.assertFalse(config.load()["enabled"])
+        self.assertEqual(config.load()["disabled_reason"], "emergency")
 
     def test_validation(self):
         with self.assertRaises(ValueError):
@@ -114,22 +127,98 @@ class EngineTests(TempHome):
         cost = sum(r["count"] * r["price"] for r in db.query("SELECT * FROM orders"))
         self.assertLessEqual(cost, 30)
 
-    def test_partial_basket_stops_and_counts_error(self):
+    def test_half_built_basket_stops_the_bot(self):
         c = fake_with_arb()
         c.fill = lambda t, side, n, p: 0 if t == "EV1-1" else n
         s = engine.run_once(c)
         self.assertFalse(s["ok"])
         self.assertEqual(len(c.orders), 2)  # stopped after the leg that didn't fill
-        self.assertEqual(db.get("consecutive_errors"), 1)
+        self.assertIn("half-built", config.load()["disabled_reason"])
 
     def test_three_failures_trip_the_bot(self):
         c = fake_with_arb()
-        c.fill = lambda t, side, n, p: 0 if t == "EV1-1" else n
+        c.events = lambda **p: (_ for _ in ()).throw(RuntimeError("boom"))
+        c.balance = lambda: (_ for _ in ()).throw(RuntimeError("api down"))
         for _ in range(3):
             engine.run_once(c)
         cfg = config.load()
         self.assertFalse(cfg["enabled"])
         self.assertIn("failed runs", cfg["disabled_reason"])
+
+    def test_first_leg_partial_shrinks_the_rest(self):
+        c = fake_with_arb()
+        c.fill = lambda t, side, n, p: 3 if t == "EV1-0" else n
+        s = engine.run_once(c)
+        self.assertTrue(s["ok"], s)
+        self.assertEqual([o[2] for o in c.orders][1:], [3, 3, 3])
+
+    def test_lost_reply_is_reconciled_next_run(self):
+        from kal.client import KalshiError
+        c = fake_with_arb()
+        real_buy = c.buy
+
+        def flaky(ticker, side, count, price, client_order_id=None):
+            real_buy(ticker, side, count, price, client_order_id)
+            c.sent = {"client_order_id": client_order_id, "order_id": "o1", "status": "executed",
+                      "fill_count_fp": f"{count:.2f}", "ticker": ticker}
+            raise KalshiError("timeout", None)
+        c.buy = flaky
+        s = engine.run_once(c)
+        self.assertFalse(s["ok"])
+        self.assertEqual(db.query("SELECT status FROM orders")[0]["status"], "unknown")
+        c.order_list = [c.sent]
+        c.buy = real_buy
+        c.event_list = []
+        s = engine.run_once(c)
+        self.assertEqual(s.get("reconciled"), 1, s)
+        row = db.query("SELECT * FROM orders")[0]
+        self.assertGreater(row["filled"], 0)
+        from kal import ledger
+        self.assertGreater(ledger.open_cost(), 0)  # the lost fill now counts against capital
+
+    def test_resting_order_is_cancelled_and_trips(self):
+        c = fake_with_arb()
+        c.buy = lambda t, side, n, p, client_order_id=None: {"order_id": "r1", "status": "resting",
+                                                            "fill_count_fp": "0.00"}
+        engine.run_once(c)
+        self.assertEqual(c.cancelled, ["r1"])
+        self.assertIn("stayed on the book", config.load()["disabled_reason"])
+
+    def test_bad_mode_never_trades(self):
+        import json, os
+        path = os.path.join(config.home(), "config.json")
+        data = json.load(open(path))
+        data["strategies"]["basket_arb"]["mode"] = "Live"
+        json.dump(data, open(path, "w"))
+        c = fake_with_arb()
+        s = engine.run_once(c)
+        self.assertEqual(c.orders, [])
+        self.assertFalse(s["ok"])
+
+    def test_zero_budget_means_no_real_trades(self):
+        config.update({"budget": 0})
+        c = fake_with_arb()
+        engine.run_once(c)
+        self.assertEqual(c.orders, [])
+
+    def test_off_mid_run_stops_trading(self):
+        c = fake_with_arb()
+        c.event_list = [arb_event("EV1"), arb_event("EV3")]
+        for ev in c.event_list:
+            for m in ev["markets"]:
+                b = float(m["yes_bid_dollars"])
+                c.books[m["ticker"]] = {"yes": [(b, 40)], "no": []}
+                c.market_info[m["ticker"]] = {"ticker": m["ticker"], "status": "active",
+                                              "yes_bid_dollars": f"{b:.4f}", "no_bid_dollars": f"{1 - b - .01:.4f}"}
+        real_buy = c.buy
+
+        def buy_then_off(*a, **k):
+            r = real_buy(*a, **k)
+            config.turn_off()
+            return r
+        c.buy = buy_then_off
+        engine.run_once(c)
+        self.assertEqual(len({o[0].split("-")[0] for o in c.orders}), 1)  # only the first event
 
     def test_first_leg_miss_is_harmless(self):
         c = fake_with_arb()
@@ -146,7 +235,6 @@ class EngineTests(TempHome):
         self.assertTrue(0 < spent <= 5)
         config.update({"budget": 1})
         c = fake_with_arb()
-        c.position_list = []
         engine.run_once(c)
         self.assertEqual(c.orders, [])
 

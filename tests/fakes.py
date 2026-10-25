@@ -1,6 +1,18 @@
 """An in-memory stand-in for kal.client.Kalshi. Tests set its fields directly."""
 
 
+class _OrderLog(list):
+    """The list of buy() calls, which can also be called like Kalshi.orders() to look up
+    orders (returns FakeKalshi.order_list)."""
+
+    def __init__(self, owner):
+        super().__init__()
+        self._owner = owner
+
+    def __call__(self, ticker=None, min_ts=None):
+        return [o for o in self._owner.order_list if ticker in (None, o.get("ticker"))]
+
+
 class FakeKalshi:
     def __init__(self, can_trade=True, balance=100.0):
         self.can_trade = can_trade
@@ -13,7 +25,9 @@ class FakeKalshi:
         self.settled = {}             # series -> [market dicts]
         self.candle_data = {}         # ticker -> [candles]
         self.series_list = []
-        self.orders = []              # every buy() call
+        self.orders = _OrderLog(self)  # every buy() call; also callable as the orders() lookup
+        self.order_list = []          # what the orders() lookup returns (for reconciliation)
+        self.cancelled = []
         self.fill = lambda ticker, side, count, price: count  # override to simulate partial fills
 
     def events(self, **params):
@@ -61,3 +75,7 @@ class FakeKalshi:
         self.orders.append((ticker, side, count, limit_price))
         return {"order_id": f"o{len(self.orders)}", "status": "executed" if n == count else "canceled",
                 "fill_count_fp": f"{n:.2f}"}
+
+    def cancel(self, order_id):
+        self.cancelled.append(order_id)
+        return {}

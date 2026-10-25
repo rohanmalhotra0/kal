@@ -1,76 +1,104 @@
-# Kalshi bot
+# kal
 
-## Which strategy? (ranked by safety)
+A bot that trades on [Kalshi](https://kalshi.com), a US prediction market.
+It runs on a small server, day and night.
 
-| # | Strategy | Risk | File |
-|---|----------|------|------|
-| 1 | **Basket arbitrage**: profit locked in by math | Very low | `arb.py` |
-| 2 | Favorites: buy what history shows is underpriced | Medium | `bot.py` |
-| 3 | Mention words ("What will Trump say?") | High | `bot.py --mentions` |
+**Profits are not guaranteed.** Only give it money you can afford to lose.
 
-Skipped after research: weather bots (market wins after fees),
-sportsbook comparisons (Kalshi is as sharp as Pinnacle), cross-site
-arbitrage (rules can differ), and settlement sniping (fast bots win).
+## What it does
 
-Free money tip: Kalshi pays ~3.5–4% interest on cash and open positions,
-but only on balances of **$250+**.
+- **Every 5 minutes:** looks for trades. Makes the ones its rules allow.
+- **Every day:** tests new ideas on past markets (research).
+- **Every hour:** writes a short report to the `status` branch on GitHub.
+- **Dashboard:** turn it on or off, set the budget, see what it did.
 
-## 1. Arbitrage (`arb.py`)
+## Strategies, safest first
 
-When at most one outcome can win, buying NO on every outcome pays at
-least N-1 dollars. If that costs less after fees, the profit is locked in.
+| Strategy | What it does | Risk | Starts as |
+|---|---|---|---|
+| `basket_arb` | Only one outcome can win, so NO on several outcomes pays a known amount. Buys when that costs less. | Very low. Profit is locked in. | Live |
+| `ladder_arb` | "Above 60" can't win unless "above 50" wins. Buys when that pair costs less than $1. | Very low. Profit is locked in. | Live |
+| `bracket_arb` | Ranges that cover every result: one must win. Buys all when they cost less than $1. | Low, once checked. | Paper, until a person checks it |
+| `favorites` | Buys price ranges that won more often than their price in past markets. | Medium. A bet, not a sure thing. | Paper |
+| `mentions` | "Will X say Y?" markets. Uses how often each word was said before. | Higher. | Paper |
 
-```bash
-python arb.py                  # dry run: shows locked-in profits right now
-python arb.py --live --loop 60 # buy them, re-scan every minute
-```
+**Paper** means pretend trades: no money, real results.
 
-These chances are rare and small (usually cents to a dollar). The only
-risk: a price moves between orders. The bot re-checks prices first and
-stops at the first order that doesn't fill.
+For `favorites` and `mentions`, each new idea is **promoted from paper by itself**,
+but only after it makes money on paper (at least 30 settled trades, and a cautious
+test says the profit is real). It goes back to paper if it starts to lose.
+Real money also needs **you** to set that strategy to `live` on the dashboard.
+Even then, only promoted ideas use real money.
 
-## 2–3. Backtested strategies (`bot.py`)
+"Locked in" still has one small risk: a price can move between two orders.
+The bot checks prices again first, and stops at the first order that doesn't fill.
 
-**Test first, trade second.** `backtest.py` checks a strategy on Kalshi's
-settled markets. `bot.py` refuses to trade live unless that test shows
-a real edge after fees.
+## Safety
 
-## The two strategies
+- **Master switch.** Off until you turn it on.
+- **Budget.** The most it can ever lose, in total. It may reinvest its own profits.
+- **Caps per trade.** $10 a bet, $30 an arbitrage, $20 per event (you can change these).
+- **Daily loss limit.** Lose over 10% of the budget in a day, and it turns itself off.
+- **3 failed runs in a row** and it turns itself off.
+- **Stays off** after a safety stop, until a person says so.
+- **Paper first.** New ideas never start with real money.
+- **Demo mode.** Practice on Kalshi's fake-money exchange.
+- **Zero-risk order test.** `selftest --order-probe` sends one $0.01 bid that can't fill.
+- **Dashboard is never open to the internet.** You reach it with an SSH tunnel.
 
-1. **Favorites:** buy contracts in price ranges that historically won more often
-   than their price implied. (Research on Kalshi data: cheap longshots lose
-   money; favorites do slightly better.)
-2. **Mentions** (e.g. "What will Trump say?"): look up how often each word
-   was said in past events. Buy YES if the price is far below that rate,
-   NO if far above.
+## Quick start (on your computer)
 
-## Steps
+You need Python 3.11 or newer.
 
 ```bash
 pip install -r requirements.txt
-
-python backtest.py --find trump          # 1. find series tickers
-python backtest.py --series <TICKERS>    # 2. test them (no API key needed)
-python bot.py --mentions                 # 3. dry run: see what it would buy
-
-export KALSHI_API_KEY_ID="your-key-id"
-export KALSHI_PRIVATE_KEY_PATH="/path/to/kalshi-key.pem"
-python bot.py --check                    # 4. test your key
-python bot.py --live --mentions          # 5. real orders (only if step 2 found an edge)
+python -m kal selftest     # does Kalshi's API look right?
+python -m kal scan         # what would it buy right now? (never trades)
+python -m kal app          # dashboard: http://127.0.0.1:8787
 ```
 
-Drop `--mentions` to use the favorites strategy.
+None of these need a key. To trade, add your Kalshi API key:
 
-## How to read the backtest
+```bash
+export KALSHI_API_KEY_ID=your-key-id
+mkdir -p state && cp ~/Downloads/YOUR-KEY-FILE state/kalshi.pem && chmod 600 state/kalshi.pem
+python -m kal set env demo           # fake money first
+python -m kal selftest --order-probe
+python -m kal on --budget 300
+python -m kal app
+```
 
-- **ROI**: profit per $1 bet, after fees.
-- **Worst-case ROI**: a cautious 95% lower bound. If it is below 0,
-  the "profit" could just be luck. The bot will not trade it.
+## Run it on a server
 
-## Safety limits (top of `bot.py`)
+See **[docs/DEPLOY.md](docs/DEPLOY.md)**. About $5 to $6 a month.
 
-- $10 per favorite, $5 per mention, $15 per event, $50 total
-- Always keeps $40 as cash
-- Stops at the first error
+## Commands
 
-Not financial advice. Past results don't promise future ones. Never commit your `.pem` key.
+| Command | What it does |
+|---|---|
+| `python -m kal app` | Dashboard + scheduler. The normal way to run it. |
+| `python -m kal daemon` | Scheduler only, no dashboard. |
+| `python -m kal run` | One trading run now. |
+| `python -m kal scan` | Dry run. Shows what it would buy. Never trades. |
+| `python -m kal research` | Look for new edges now. `--quick` for a short one. |
+| `python -m kal selftest` | Check Kalshi's API. `--order-probe` also tests orders. |
+| `python -m kal status` | A few lines on how it's doing. |
+| `python -m kal report` | The full report. `--push` puts it on GitHub. |
+| `python -m kal on --budget 300` | Turn it on. |
+| `python -m kal off` | Turn it off. |
+
+## Good to know
+
+- Kalshi pays interest on balances of **$250 or more**.
+- Arbitrage chances are rare and small: cents to a few dollars each.
+- Bets (`favorites`, `mentions`) can lose, even after they pass every test.
+- Never commit your key (`kalshi.pem`), `.env` files, or tokens.
+
+## For developers
+
+- Map of the code: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). Rules: [CLAUDE.md](CLAUDE.md).
+- Tests: `python -m unittest discover -s tests -t .`
+- CI runs the tests on every push. `market-check` runs `selftest`, `scan` and a
+  quick research against the real Kalshi API every day (no keys, no orders).
+- The old files at the top (`arb.py`, `bot.py`, `backtest.py`, `kalshi.py`) are
+  the first prototype. The `kal` package replaces them.
