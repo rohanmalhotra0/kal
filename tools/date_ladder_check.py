@@ -117,6 +117,49 @@ def main():
                     pairs += 1
                     listed += not d.nested(a, b)
     print(f"accepted ladders: {pairs} earlier/later pairs; {listed} refused for listing order (after issuance)")
+    # What stricter rules would cost (review round 2)
+    always = unknown = 0
+    words = collections.Counter()
+    one_sentence = ends_otherwise = 0
+    WORDS = ["retract", "withdraw", "revers", "overturn", "rescind", "revoke", "repeal", "annul", "invalidat",
+             "expiration", "expiry", "expire", "within", "yet to", "avoid", " no ", "none", "neither", " nor ",
+             "days before", "weeks before", "day before", "open", "trading begins", "contract", "issu", "listed"]
+    accepted = [ev for ev in events if before_family(ev) and why(ev) == "ok"]
+    import re as _re
+    for ev in accepted:
+        ms = sorted(ev["markets"], key=d.deadline)
+        for i, a in enumerate(ms):
+            for b in ms[i + 1:]:
+                oa, ob = d._opened(a), d._opened(b)
+                if oa is None or ob is None:
+                    unknown += 1
+                elif ob > oa:
+                    always += 1
+        text = " ".join(f" {(m.get('rules_primary') or '')} {(m.get('rules_secondary') or '')} " for m in ms).lower()
+        for w in WORDS:
+            if w in text:
+                words[w] += 1
+        prim = (ms[0].get("rules_primary") or "").strip()
+        g = d._CLAIM.match(prim)
+        rest = prim[g.end():].strip() if g else "?"
+        if rest in ("", "."):
+            one_sentence += 1
+        elif _re.fullmatch(r"\.?\s*otherwise,? the market resolves to no\.?", rest, _re.I):
+            ends_otherwise += 1
+    print(f"if every pair needed listing order: {always} of {pairs} pairs refused ({unknown} with no open_time)")
+    print(f"accepted events whose rules_primary is just the claim: {one_sentence}; claim + 'Otherwise ... No': "
+          f"{ends_otherwise}; of {len(accepted)}")
+    print("accepted events whose rules (primary+secondary) contain:", sorted(words.items(), key=lambda x: -x[1]))
+    tails = collections.Counter()
+    for ev in accepted:
+        prim = (sorted(ev["markets"], key=d.deadline)[0].get("rules_primary") or "").strip()
+        g = d._CLAIM.match(prim)
+        rest = prim[g.end():].strip() if g else "?"
+        if rest not in ("", "."):
+            tails[rest[:90]] += 1
+    print("what follows the claim in rules_primary (top):")
+    for t, n in tails.most_common(12):
+        print(f"   {n:3d}  {t!r}")
     gaps = []
     for ev in events:
         if before_family(ev) and why(ev) == "ok":
