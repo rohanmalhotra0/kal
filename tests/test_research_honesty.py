@@ -399,6 +399,41 @@ class AnchorTests(TempHome):
         self.assertTrue(all(o["decided"] == o["close"] - 6 * H for o in obs))
 
 
+class CoverageGuardTests(TempHome):
+    """tools/coverage_check.py runs in market-check on real data. #6 skipped every real
+    market and all unit tests still passed; this check would have gone red that day."""
+
+    def tool(self):
+        import importlib.util
+        path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tools", "coverage_check.py")
+        spec = importlib.util.spec_from_file_location("coverage_check", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def test_research_that_prices_nothing_fails_the_check(self):
+        tool = self.tool()
+        c = FakeKalshi(can_trade=False)
+        for i in range(30):
+            close = M0 + (i + 10) * DAY
+            tk = f"S-{i}"
+            c.settled.setdefault("S", []).append({
+                "ticker": tk, "event_ticker": tk, "open_time": iso(close - 2 * DAY), "close_time": iso(close),
+                "status": "finalized", "result": "no", "volume_fp": "500.00", "can_close_early": True,
+                "occurrence_datetime": iso(close)})
+            c.candle_data[tk] = [{"end_period_ts": close - 7 * H, "yes_ask": {"close": "0.3100"},
+                                  "yes_bid": {"close": "0.3000"}}]
+        ok, lines = tool.check(c, {"S": 25})
+        self.assertTrue(ok, lines)
+        for m in c.settled["S"]:
+            del m["occurrence_datetime"]  # what #6 did to real markets: nothing anchors them
+        ok, lines = tool.check(c, {"S": 25})
+        self.assertFalse(ok)
+        self.assertIn("LOW  S: 0 priced markets", lines[0])
+        c.settled_markets = mock.Mock(side_effect=KalshiError("down", 503))
+        self.assertFalse(tool.check(c, {"S": 25})[0])  # an API failure fails it too
+
+
 # ---------- 4. one false-promotion budget for every candidate, ever ----------
 
 class PromotionBudgetTests(TempHome):
