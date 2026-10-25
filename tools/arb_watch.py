@@ -20,7 +20,33 @@ from kal import config  # noqa: E402
 from kal.__main__ import scan_all  # noqa: E402
 from kal.risk import Limits  # noqa: E402
 
-ARBS = ["basket_arb", "ladder_arb", "bracket_arb"]
+ARBS = ["basket_arb"]
+
+# This copy of the watch also counts one-winner events whose only fair-price wording is
+# a cancellation or no-data clause ("if the game is cancelled or not started within 48
+# hours, the market will resolve to a fair price"). The live rule skips them all; this
+# measures what that costs. Measurement only: nothing here trades.
+import re  # noqa: E402
+
+from kal.strategies import basket_arb as _basket  # noqa: E402
+from kal.strategies import base as _base  # noqa: E402
+
+CANCEL = re.compile(r"cancel|postpone|reschedul|not (?:be )?started|walkover|forfeit|no data|abandon|suspend", re.I)
+
+
+def _only_cancellation_clauses(markets):
+    for m in markets:
+        if m.get("market_type", "binary") != "binary" or m.get("settlement_bounds_type", "default") != "default":
+            return False
+        rules = f"{m.get('rules_primary') or ''} {m.get('rules_secondary') or ''}"
+        for sentence in re.split(r"(?<=[.!?])\s+", rules):
+            low = sentence.lower()
+            if any(w in low for w in _base.FAIR_PRICE_WORDS) and not CANCEL.search(sentence):
+                return False
+    return True
+
+
+_basket.plain_payouts = _only_cancellation_clauses
 
 
 def clock(t=None):
