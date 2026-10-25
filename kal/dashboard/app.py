@@ -498,11 +498,12 @@ def edge_results():
     through the signal that made it (signals.meta["edge"]), as promote matches them.
     Practice also counts the distinct markets and events that settled, since that is
     what promotion needs (re-buying one market proves nothing new)."""
-    out = collections.defaultdict(lambda: {"paper": {**_tally(), "markets": set(), "events": set()},
+    out = collections.defaultdict(lambda: {"paper": {**_tally(), "markets": set(), "events": []},
                                            "live": _tally()})
-    for r in db.query("""SELECT p.ticker, p.event, p.side, p.cost, p.settled, p.result, p.pnl, s.meta
+    for r in db.query("""SELECT p.ts, p.ticker, p.event, p.side, p.cost, p.settled, p.result, p.pnl, s.meta
             FROM paper p JOIN signals s ON s.id = p.signal_id WHERE p.strategy = ?""", EDGE_STRATEGY):
-        eid = _json(r["meta"]).get("edge")
+        meta = _json(r["meta"])
+        eid = meta.get("edge")
         if not eid:
             continue
         t = out[str(eid)]["paper"]
@@ -510,7 +511,7 @@ def edge_results():
         _count(t, r["cost"], result, r["side"], r["pnl"])
         if _paid(result, r["side"]) is not None:
             t["markets"].add(r["ticker"])
-            t["events"].add(r["event"] or r["ticker"])
+            t["events"].append({"event": r["event"] or r["ticker"], "ts": r["ts"], "meta": meta})
     for r in db.query("""SELECT o.side, o.filled, o.price, st.result, s.meta FROM orders o
             JOIN signals s ON s.id = o.signal_id LEFT JOIN settlements st ON st.ticker = o.ticker
             WHERE o.strategy = ? AND o.filled > 0""", EDGE_STRATEGY):
@@ -519,8 +520,17 @@ def edge_results():
             _count(out[str(eid)]["live"], _fill_cost(r["filled"], r["price"]), r["result"], r["side"],
                    _live_pnl(r["filled"], r["price"], r["side"], r["result"]))
     for v in out.values():
-        v["paper"]["markets"], v["paper"]["events"] = len(v["paper"]["markets"]), len(v["paper"]["events"])
+        v["paper"]["markets"], v["paper"]["events"] = len(v["paper"]["markets"]), _groups(v["paper"]["events"])
     return out
+
+
+def _groups(trades):
+    """How many independent groups promotion counts these trades as: a series closing on one
+    day wins or loses together (promote._clusters), so its trades count once."""
+    try:
+        return len(set(_module("research.promote")._clusters(trades)))
+    except Exception:
+        return len({t["event"] for t in trades})
 
 
 def _verdict(results):
