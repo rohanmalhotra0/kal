@@ -46,21 +46,42 @@ def ts(v):
         return None
 
 
-def snap():
-    now, cursor, n_events, kept = time.time(), None, 0, 0
-    for _ in range(60):
+TARGETS = ["KXNFLGAME", "KXNFLSPREAD", "KXNFLTOTAL", "KXNFLANYTD", "KXNFLTD", "KXMLBGAME", "KXMLBTOTAL",
+           "KXHIGHNY", "KXHIGHCHI", "KXHIGHLAX", "KXHIGHMIA", "KXHIGHDEN", "KXRAIN", "KXBTCD", "KXETHD",
+           "KXTRUMPAPPROVE", "KXDJI", "KXINX", "KXFEDMENTION", "KXEPLGAME", "KXNHLGAME"]
+
+
+def event_pages(series=None, pages=60):
+    cursor = None
+    for _ in range(pages):
         params = {"status": "open", "with_nested_markets": "true", "limit": 200}
+        if series:
+            params["series_ticker"] = series
         if cursor:
             params["cursor"] = cursor
         code, d = get("/events", **params)
-        evs = (d or {}).get("events") or []
-        n_events += len(evs)
+        yield from (d or {}).get("events") or []
+        cursor = (d or {}).get("cursor")
+        if code != 200 or not cursor:
+            break
+
+
+def snap(targeted=False):
+    now, n_events, kept = time.time(), 0, 0
+    if targeted:
+        _, d = get("/series", category="Mentions")
+        mentions = [x.get("ticker") for x in (d or {}).get("series") or [] if x.get("ticker")][:40]
+        sources = [event_pages(s, pages=3) for s in TARGETS + mentions]
+    else:
+        sources = [event_pages()]
+    for evs in sources:
         for e in evs:
+            n_events += 1
             if str(e.get("event_ticker", "")).startswith("KXMVE"):
                 continue
             ms = [m for m in e.get("markets") or [] if isinstance(m, dict)]
-            due = [ts(m.get("occurrence_datetime") or m.get("close_time")) for m in ms]
-            if not any(t and now < t < now + 30 * 3600 for t in due):
+            due = [ts(e.get("strike_date") or m.get("occurrence_datetime") or m.get("close_time")) for m in ms]
+            if not any(t and now < t < now + 40 * 3600 for t in due):
                 continue
             for m in ms:
                 kept += 1
@@ -70,9 +91,6 @@ def snap():
                     "can_close_early": m.get("can_close_early"),
                     "early_close_condition": str(m.get("early_close_condition"))[:70],
                     **{f: m.get(f) for f in FIELDS}}, separators=(",", ":")))
-        cursor = (d or {}).get("cursor")
-        if code != 200 or not cursor:
-            break
     print(f"\nsnapshot: {kept} markets from {n_events} open events, at {datetime.now(timezone.utc).isoformat()}")
     print(json.dumps(dict(calls)))
 
@@ -134,4 +152,7 @@ def compare(path):
 
 
 if __name__ == "__main__":
-    compare(sys.argv[2]) if len(sys.argv) > 2 and sys.argv[1] == "compare" else snap()
+    if len(sys.argv) > 2 and sys.argv[1] == "compare":
+        compare(sys.argv[2])
+    else:
+        snap(targeted=sys.argv[1:] == ["targeted"])
