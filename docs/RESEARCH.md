@@ -79,11 +79,12 @@ status: **testing** (add the PR link), **built**, or **rejected** (say why in on
 - Evidence: strong, if there's no gap. Risk: high if there is one. All is lost.
 - Test: a person checks 20+ settled events. One bracket won each time? Set "verified".
 
-**5. NO on over-bet YES, by market type** - untested (top pick for the next check-in)
+**5. NO on over-bet YES, by market type** - tested 2026-10-25: no edge for a taker
 - What: people over-bet YES on "will X happen?" markets that mostly end NO. Buy NO.
 - Evidence: medium. Bartlett & O'Hara (41.6M Kalshi trades) found it, mostly in single-name markets (one person or company). A summary says YES was bought 61% of the time there, but won 32%.
 - Risk: medium-high. Those same markets have the most insiders.
 - Test: reuse `backtest.calibration`, split by market type and side. Need a lower bound above 0 after fees. The research swarm ranks this the second most likely edge for a small taker, after near-resolution favorites.
+- Result (deep research on PR #9, 24,878 markets, 12 categories, 6 h before the end): no NO range has an edge in any category. Best: NO 95c+ with spreads of 2c or less, +0.2% (worst case -2.7%); politics NO 95c+, +0.7% (worst -4.1%).
 
 **6. Related markets that must agree** - untested
 - What: linked prices must fit. E.g. "Fed cuts in Dec" vs "rate below X in Jan".
@@ -109,12 +110,14 @@ status: **testing** (add the PR link), **built**, or **rejected** (say why in on
 - Evidence: medium. Bartlett & O'Hara: one-sided flow predicts maker losses in single-name markets.
 - Risk: low. It only removes trades. Next test: did skipped trades do worse than taken ones? (Log the would-be result of each skip.)
 
-**10. Maker quotes + Liquidity Incentive Program** - backtest built, needs engine work to trade
+**10. Maker quotes + Liquidity Incentive Program** - tested 2026-10-25: no lead
 - What: rest orders instead of taking. Most series charge makers nothing; series with fee_type `quadratic_with_maker_fees` charge 0.0175 x M (a quarter of taker), combos 0.035. Kalshi's LIP pays for resting orders near the best price, even unfilled.
 - Evidence: medium. Makers beat takers (Bürgi et al.). In single-name markets, makers earn ~2x per contract vs broad ones (Bartlett & O'Hara).
 - Risk: high. Better-informed traders pick off resting orders. The engine can't cancel orders. LIP terms change often: check they still apply.
 - Test: paper only. Log would-be quotes. Count a fill when trades go through our price. Score at settlement, plus our LIP share.
 - Backtest: `tools/maker_research.py` (`kal/research/maker.py`). At the decision time, rest a one-contract bid at the best bid (or 1c better). It fills only when a later trade reached it, and every fill pays a maker fee. One contract is a maker's best case, so a price range that loses here loses at any size. A range that wins is only a lead: check it with real trade sizes first.
+- Result (4,103 markets, 216 category-days, 6 h before the end): no lead. Best: NO bids at 90-95c, +2.3% (worst case -20%). Most ranges lose even in this best case. Fills come when the price runs through the bid (a 95c+ NO bid filled 9% of the time). Not worth the engine work now.
+- LIP (checked 2026-10-25): still running. An amended version starts 2026-10-28 (CFTC filing). It takes a snapshot every second and scores resting orders by size and distance from the best price. A snapshot counts only with qualifying YES and NO bids. The exact formula and pool sizes weren't found. It's the one thing that could change the verdict above.
 
 **11. Other venues as a fair-price guide** - untested
 - What: use Polymarket or sportsbook prices to judge Kalshi's. Trade only Kalshi.

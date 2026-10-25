@@ -22,11 +22,14 @@ price. Small dips (often in markets that go on to win) fill a little of it; news
 per dollar. A price range that loses money here loses at any size. One that makes money
 is a lead, not an edge: it needs a check with real trade sizes before any strategy.
 
-Every fill pays the maker fee Kalshi charges on series that charge makers (a quarter of
-the taker rate). Most series charge nothing.
+Every fill pays what its series charges makers. On series that charge them (a quarter of
+the taker rate), a one-contract fill pays that fee rounded up to the cent: a whole cent
+at most prices. Most series charge makers nothing. A series whose fees can't be read
+pays the maker rate.
 """
 import json
 import logging
+import math
 import os
 import re
 import time
@@ -36,6 +39,8 @@ from ..client import price
 from . import backtest
 
 MAKER_FEE_RATE = 0.0175   # Kalshi's maker rate on series that charge one (taker: 0.07)
+MAKER_RATES = {"quadratic": 0.0, "quadratic_with_maker_fees": MAKER_FEE_RATE,
+               "quadratic_with_combo_maker_fees": 0.035}   # by series fee_type
 TICK = 0.01
 PERIOD = 3600             # hourly candles, which end on the hour
 RULES = ("join", "improve")
@@ -43,9 +48,23 @@ RULES = ("join", "improve")
 log = logging.getLogger(__name__)
 
 
-def maker_fee(p):
-    """Maker fee for one contract at p, before rounding (the most any series charges)."""
-    return MAKER_FEE_RATE * p * (1 - p)
+def maker_rate(client, series):
+    """What a series charges makers (rate x multiplier), 0 if nothing. A fee type we don't
+    know, or fees we can't read, pay the maker rate: research never guesses in our favour."""
+    try:
+        info = client.series_info(series) or {}
+        mult = float(info.get("fee_multiplier") or 1)
+    except Exception:
+        return MAKER_FEE_RATE
+    return MAKER_RATES.get(info.get("fee_type"), MAKER_FEE_RATE) * mult
+
+
+def maker_fee(p, rate=MAKER_FEE_RATE):
+    """Kalshi's maker fee for a one-contract fill at p: rate x p x (1 - p), rounded up to
+    the cent. 0 on a series that doesn't charge makers."""
+    if rate <= 0:
+        return 0.0
+    return math.ceil(round(rate * p * (1 - p) * 100, 6)) / 100
 
 
 def window_end(o):
@@ -120,6 +139,7 @@ def load(client, series, hours_before_close=6, max_markets=1500, refresh=False, 
                                      refresh=refresh)[-max_markets:]
     path = cache_path(series, hours_before_close)
     cache = {} if refresh else _read(path)
+    rate = maker_rate(client, series)
     out, new, errors, last_error = [], 0, 0, None
     try:
         for o in obs:
@@ -139,7 +159,7 @@ def load(client, series, hours_before_close=6, max_markets=1500, refresh=False, 
                     continue
                 hit = cache[tk] = {"lo": got[0], "hi": got[1], **when}
                 new += 1
-            out.append({**o, "lo": hit["lo"], "hi": hit["hi"]})
+            out.append({**o, "lo": hit["lo"], "hi": hit["hi"], "maker_rate": rate})
     finally:
         if new:
             listed = {o["ticker"] for o in obs}
@@ -177,9 +197,9 @@ def filled(o, side, p, at_price=False):
     return hi is not None and (hi > a + eps or (at_price and hi >= a - eps))
 
 
-def maker_trade(unit, p, won):
+def maker_trade(unit, p, won, rate=MAKER_FEE_RATE):
     """(unit, cost, pnl, fair_var) for one filled one-contract bid."""
-    cost = p + maker_fee(p)
+    cost = p + maker_fee(p, rate)
     return unit, cost, won - cost, p * (1 - p)
 
 
@@ -193,7 +213,8 @@ def table(obs, rule="join", z=2.0):
             key = (side, backtest.bucket_of(p))
             posted[key] += 1
             if filled(o, side, p, at_price=rule == "improve"):
-                fills[key].append(maker_trade(o.get("unit") or backtest.group(o), p, backtest.paid(o, side)))
+                fills[key].append(maker_trade(o.get("unit") or backtest.group(o), p, backtest.paid(o, side),
+                                              o.get("maker_rate", MAKER_FEE_RATE)))
     rows = []
     for side, b in sorted(posted):
         t = fills[(side, b)]
