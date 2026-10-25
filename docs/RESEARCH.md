@@ -82,7 +82,7 @@ status: **testing** (add the PR link), **built**, or **rejected** (say why in on
 - Risk: medium-high. Those same markets have the most insiders.
 - Test: reuse `backtest.calibration`, split by market type and side. Need a lower bound above 0 after fees. The research swarm ranks this the second most likely edge for a small taker, after near-resolution favorites.
 
-**6. Related markets that must agree** - date ladders built, paper (`date_ladder_arb`); other links untested
+**6. Related markets that must agree** - date ladders built, paper until checked (`date_ladder_arb`); other links untested
 - What: linked prices must fit. E.g. "Fed cuts in Dec" vs "rate below X in Jan".
 - Evidence: medium. Saguillo et al. found this on Polymarket. Finding the links is the hard part.
 - Risk: medium-high. If the rules differ (source, time, rounding), both legs can lose.
@@ -95,8 +95,17 @@ status: **testing** (add the PR link), **built**, or **rejected** (say why in on
   - 1 of the 8 (29c, 41% return) is refused by the "too good to be true" cap of 25%.
   - The rest: a Drake album ladder at about 15c for 3 hours, and 1-2c gaps in 3 others.
   - 0 of 131 settled events broke the order (an earlier date YES, a later one NO).
-  - So: rare but real. Built as `date_ladder_arb` on paper. Live is the owner's call,
-    like `ladder_arb`. Next: count its paper signals for 4 weeks.
+  - Those are a ceiling: the count used the written deadlines and none of the strategy's
+    checks. With them (open events, 2026-10-25): 307 of 405 ladders pass. Skipped: 46 with a
+    "fair price if the person dies" rule, 36 whose rules don't say plainly "if it happens
+    before <date>" (e.g. "resolved ... and not retracted before expiration"), 9 whose rules
+    differ between dates ("meet (including phone calls)" vs "meet"), 7 with mixed data.
+    4 of the 5 events with gaps pass (the 5th has the death rule).
+  - "After issuance" windows (the Drake ladder) pair only when the later market was listed
+    no later than the earlier one: 161 of 3,864 pairs fail that.
+  - So: rare but real. Built as `date_ladder_arb` on paper. Real money also needs a person
+    to check it (`strategies.date_ladder_arb.verified`), like `bracket_arb`. Next: count its
+    paper signals for 4 weeks.
 
 **7. Scheduled data releases (weather, CPI, jobs)** - untested
 - What: compare the price with a public forecast before the report comes out.
