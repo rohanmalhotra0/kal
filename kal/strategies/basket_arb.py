@@ -9,7 +9,8 @@ happens because people overpay for longshots.
 Nearly every game and weather event says a cancelled game (or missing data) settles
 at a "fair price". Those baskets are found too, but go on paper only, as bets: if that
 happens, Kalshi picks the price, so the profit isn't locked in. They are sized and
-checked like any bet (worst case $0, max_per_trade), not like an arbitrage.
+checked like any bet (worst case $0, max_per_trade), not like an arbitrage, and together
+may hold at most PAPER_SHARE of the paper money, so other ideas still get practice.
 """
 import time
 
@@ -18,6 +19,7 @@ from .base import Leg, Signal, Strategy, fair_price_only_if_cancelled, plain_pay
 from .ladder_arb import MIN_TIME_LEFT, yearly
 
 MIN_PROFIT = 0.05   # dollars per basket, after fees
+PAPER_SHARE = 0.25  # most of the paper money the not-locked-in (cancellation clause) baskets may hold
 MIN_ROI = 0.01
 MAX_CONTRACTS = 500
 
@@ -97,6 +99,8 @@ class BasketArb(Strategy):
             first = first_close(markets)
             if not time_left(first):
                 continue
+            if not plain and any(m["ticker"] in ctx.held_paper for m in markets):
+                continue  # already open on paper: found again, it would only be logged again
             legs = [(m["ticker"], *ctx.client.best_bid(m["ticker"], "yes")) for m in markets
                     if m["ticker"] not in ctx.held]
             budget = self._budget(ctx) if plain else min(self._budget(ctx), ctx.cfg["max_per_trade"])
@@ -109,9 +113,10 @@ class BasketArb(Strategy):
                     # A cancelled game settles at a price Kalshi picks: not locked in. So it's
                     # a bet with $0 as its worst case, checked like one (flow guard, bet and
                     # exposure caps), and paper only, to learn how often these come and fill.
-                    sig.meta.update(paper_only=True, pays_if_played=sig.payout_min)
+                    sig.meta.update(paper_only=True, pays_if_played=sig.payout_min,
+                                    paper_kind="cancel_clause_basket", paper_share=PAPER_SHARE)
                     sig.payout_min, sig.prefix_payouts = 0.0, None
-                    sig.note += "; paper only: a cancelled game settles at a price Kalshi picks"
+                    sig.note += "; paper only: if the game is cancelled or data is missing, Kalshi picks the price"
                 found.append(sig)
         return sorted(found, key=lambda s: -yearly(s))  # money back soonest, per dollar, first
 

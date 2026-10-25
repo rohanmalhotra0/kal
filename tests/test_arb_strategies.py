@@ -651,6 +651,30 @@ class PlainPayoutTests(unittest.TestCase):
         self.assertFalse(fair_price_only_if_cancelled([{"rules_primary": self.GAME, "settlement_bounds_type": "floor"}]))
         self.assertFalse(fair_price_only_if_cancelled([{"rules_primary": self.GAME, "market_type": "scalar"}]))
 
+    def test_only_the_exact_cancellation_wordings_pass(self):
+        # Wordings an independent review showed slipping past a keyword check.
+        sneaky = [
+            "If the match is cancelled or a player dies, the market will resolve to the last traded price.",
+            "Kalshi may, at its sole discretion, cancel the market and resolve it to a fair price.",
+            "Even if the game is not cancelled, Kalshi may resolve the market to a fair price for any reason.",
+            self.GAME + "; in the event of death, the market will resolve to the last traded price",
+            self.GAME + "\nIn the event of death, the market will resolve to the last traded price",
+            "If a player is suspended by the league, the market will resolve to a fair price.",
+            self.GAME[:-1] + " unless Kalshi decides otherwise.",
+        ]
+        for rule in sneaky:
+            self.assertFalse(fair_price_only_if_cancelled([{"rules_primary": rule}]), rule)
+        # A death clause at the end of one field must not merge with the next field's clause.
+        self.assertFalse(fair_price_only_if_cancelled([{
+            "rules_primary": "If X wins, Yes. In the event of death the market resolves to the last traded price",
+            "rules_secondary": self.GAME}]))
+        # The real variants (2026-10-25) still pass.
+        for rule in ("If the game is cancelled or not started within 48 hours of its originally scheduled "
+                     "start, all markets will resolve to a fair price.",
+                     "If the game is cancelled or not started within 48 hours of its originally scheduled "
+                     "start, the market will resolve to a fair price."):
+            self.assertTrue(fair_price_only_if_cancelled([{"rules_primary": "If X wins, Yes. " + rule}]), rule)
+
     def test_a_cancellation_clause_basket_is_found_but_kept_on_paper(self):
         from tests.test_core import fake_with_arb
         c = fake_with_arb()
