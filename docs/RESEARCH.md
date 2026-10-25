@@ -72,6 +72,12 @@ status: **testing** (add the PR link), **built**, or **rejected** (say why in on
   trade on paper only, as $10 bets, using at most 25% of the paper money. Paper counts every leg
   as filled at the prices it saw: it shows how often they come up and what they'd make, not real
   fills. Real money for them is the owner's call.
+- 2026-10-25 audit (PR #23): 224 more one-winner events say "fair market price", which the old
+  exact-text check missed, so they counted as locked in. Most are elections ("postponed beyond
+  one year or cancelled entirely"); also golf and cricket. Now off real money. Elections trade
+  on paper like games. About 550 game events (esports, some tennis) have "fair market price"
+  clauses not yet on the cancel-only list, so they're skipped, even on paper. Next: add those
+  sentences word for word.
 
 **2. Ladder arbitrage** - built, paper (switch to live by hand once trusted)
 - What: if "above 70" wins, "above 60" wins too. Buy YES broad + NO narrow when under $1.
