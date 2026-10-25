@@ -82,6 +82,18 @@ show("settled (no combos) sample", {"code": code, "statuses": [m.get("status") f
                                      "results": [m.get("result") for m in d6.get("markets", [])]
                                      if isinstance(d6, dict) else None})
 
+# Price ticks: which markets accept sub-cent prices?
+structs = collections.Counter()
+examples = {}
+for e in evs:
+    for m in e.get("markets", []):
+        key = json.dumps(m.get("price_level_structure"), sort_keys=True, default=str)[:200]
+        structs[key] += 1
+        examples.setdefault(key, {"ticker": m.get("ticker"), "price_ranges": m.get("price_ranges"),
+                                  "yes_bid": m.get("yes_bid_dollars"), "yes_ask": m.get("yes_ask_dollars")})
+show("price_level_structure counts", dict(structs.most_common(10)))
+show("price_level_structure examples", examples, 4000)
+
 # Ladders: events with >= 3 'greater' markets, show wording and tickers
 ladders = [e for e in evs if sum(m.get("strike_type") in ("greater", "greater_or_equal") for m in e.get("markets", [])) >= 3]
 for e in ladders[:4]:
