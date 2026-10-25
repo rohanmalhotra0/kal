@@ -709,6 +709,34 @@ class FairPriceWordingTests(TempHome):
         self.assertFalse(base.plain_payouts([m]))
         self.assertTrue(base.fair_price_only_if_cancelled([m]))
 
+    def test_esports_and_darts_cancel_clauses_are_paper_only(self):
+        # Word for word from real events (2026-10-25): the match or map never happens.
+        for text in ("If the relevant match is cancelled before play begins, the market will resolve to the fair "
+                     "market price.",
+                     "If the relevant match or map is postponed and not started within 48 hours of its originally "
+                     "scheduled start time, the market will resolve to the fair market price.",
+                     "If the relevant map is cancelled before play begins, the market will resolve to the fair "
+                     "market price.",
+                     "If a match is forfeited before any play occurs, the market will resolve to the fair market "
+                     "price.",
+                     "If a map is forfeited before any play occurs in the map, the market will resolve to the fair "
+                     "market price.",
+                     "If the relevant match is forfeited before any play occurs, the market will resolve to the fair "
+                     "market price.",
+                     "If the cancelled match is not played, rescheduled, or declared a tie, the market will resolve "
+                     "to the fair market price."):
+            with self.subTest(text=text):
+                m = {"rules_secondary": "The market refers to the full match.\n" + text}
+                self.assertFalse(base.plain_payouts([m]))
+                self.assertTrue(base.fair_price_only_if_cancelled([m]))
+
+    def test_the_exchanges_discretion_is_not_trusted(self):
+        # Real tennis rules: Kalshi decides what "can't be settled" means.
+        m = {"rules_secondary": "Any markets that cannot be unconditionally settled will resolve to fair market "
+                                "price, as determined at the sole discretion of the exchange."}
+        self.assertFalse(base.plain_payouts([m]))
+        self.assertFalse(base.fair_price_only_if_cancelled([m]))
+
     def test_golf_fair_market_value_is_not_trusted(self):
         m = {"rules_secondary": "If a golfer withdraws:\nTournament Winner markets will resolve to No\n"
                                 "Head-to-Head markets will resolve to Fair Market Value\n\nKalshi is not affiliated"}
