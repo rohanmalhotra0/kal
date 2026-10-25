@@ -85,6 +85,8 @@ CANCELLATION_CLAUSES = [re.compile(p, re.I) for p in (
     r"price in accordance with the rules\.",
     r"if no data is available at the end of this period, all markets will resolve to the last fair price "
     r"determined by kalshi\.",
+    r"if the election is postponed beyond one year from the original date or cancell?ed entirely, the market "
+    r"resolves to the last fair market price\.",
 )]
 
 
@@ -96,17 +98,21 @@ def fair_price_only_if_cancelled(markets):
     """True if every market is binary with no payout floor or cap, and every sentence of its
     rules that names a fair or last traded price is one of CANCELLATION_CLAUSES, word for
     word. Such a market pays $0 or $1 unless a game is cancelled or never played (or no data
-    comes); then Kalshi picks the price, so a basket of them is not locked in. Fails closed:
-    any other fair-price sentence (a death clause, the exchange's discretion) means no."""
+    comes, or an election is called off); then Kalshi picks the price, so a basket of them is
+    not locked in. Fails closed: any other fair-price sentence (a death clause, the
+    exchange's discretion), or one split across a line break, means no."""
     for m in markets:
         if m.get("market_type", "binary") != "binary":
             return False
         if m.get("settlement_bounds_type", "default") != "default":
             return False
         for field in ("rules_primary", "rules_secondary"):   # apart: never one run-on sentence
-            for sentence in _sentences(_plain(m.get(field))):
-                if FAIR_PRICE.search(sentence) and not any(c.fullmatch(sentence) for c in CANCELLATION_CLAUSES):
-                    return False
+            text = m.get(field)
+            # Split first: many rules end lines with no full stop, and joining lines would
+            # glue a clause to the line before it.
+            clauses = [s for s in map(_plain, _sentences(text)) if any(c.fullmatch(s) for c in CANCELLATION_CLAUSES)]
+            if len(FAIR_PRICE.findall(_plain(text))) != sum(len(FAIR_PRICE.findall(s)) for s in clauses):
+                return False
     return True
 
 
