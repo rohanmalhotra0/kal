@@ -1,8 +1,8 @@
 """Side-branch probe (probe/xvenue, never merged). Public data only: no key, no orders.
 
-Round 2: collect settled game-winner markets on both venues for the last ~100 days,
-so the matching can be built on real names and dates. Writes compact JSON to
-probe-data/ (pushed back to this branch) and prints samples and counts.
+Round 3: why were some big college games missing? Try /markets with the moneyline
+filter (lighter than /events), without the event endDate window. Collect every
+moneyline market per league listed since ~5 months ago, closed or not, plus teams.
 """
 import gzip
 import json
@@ -14,21 +14,18 @@ from datetime import datetime, timezone
 import requests
 
 GAMMA = "https://gamma-api.polymarket.com"
-KALSHI = "https://api.elections.kalshi.com/trade-api/v2"
 NOW = int(time.time())
-DAYS = 100
-SINCE = NOW - DAYS * 86400
 S = requests.Session()
 S.headers["User-Agent"] = "kal-research-probe/1.0"
 calls = Counter()
 
 
-def get(base, path, **params):
+def get(path, **params):
     code, body = None, None
     for attempt in range(4):
-        time.sleep(0.12 + attempt * 1.5)
+        time.sleep(0.1 + attempt * 1.5)
         try:
-            r = S.get(base + path, params=params, timeout=40)
+            r = S.get(GAMMA + path, params=params, timeout=40)
         except requests.RequestException as e:
             code, body = type(e).__name__, str(e)[:300]
             continue
@@ -40,7 +37,7 @@ def get(base, path, **params):
         if code in (429, 500, 502, 503, 504):
             continue
         break
-    calls[f"{base.split('//')[1].split('.')[0]} {code}"] += 1
+    calls[code] += 1
     return code, body
 
 
@@ -66,163 +63,82 @@ def save(name, rows):
     print(f"saved {name}: {len(rows)} rows, {os.path.getsize(f'probe-data/{name}.json.gz')} bytes")
 
 
-code, sports = get(GAMMA, "/sports")
+code, sports = get("/sports")
 by_code = {s.get("sport"): s for s in sports}
 LEAGUES = ["nfl", "nba", "mlb", "nhl", "cfb", "wnba", "mls", "epl", "lal", "bun", "sea", "fl1", "ucl"]
 for c in LEAGUES:
-    print(c, short(by_code.get(c), 300))
-
-# ---------- A. filters that skip props events ----------
-section("A. /markets filter by sports_market_types")
-for c in ("nhl", "mlb", "epl"):
     s = by_code[c]
-    tags = [t for t in str(s.get("tags") or "").split(",") if t and t not in ("1", "100639", "100350")]
-    for name, params in [
-        ("tag+type", {"tag_id": tags[0] if tags else "", "sports_market_types": "moneyline", "closed": "true",
-                      "limit": 5, "end_date_min": iso(SINCE)}),
-        ("series+type", {"series_id": str(s.get("series")), "sports_market_types": "moneyline", "closed": "true",
-                         "limit": 5, "end_date_min": iso(SINCE)}),
-        ("type only", {"sports_market_types": "moneyline", "closed": "true", "limit": 5,
-                       "end_date_min": iso(NOW - 3 * 86400)}),
-    ]:
-        code, d = get(GAMMA, "/markets", **params)
-        if isinstance(d, list):
-            print(f"{c} {name} {params.get('tag_id', '')}: {code} {len(d)} markets; types",
-                  Counter(m.get("sportsMarketType") for m in d), [m.get("slug") for m in d][:5])
-            if d:
-                print("   keys:", sorted(d[0].keys())[:80])
-                print("   events field:", short(d[0].get("events"), 600))
-        else:
-            print(f"{c} {name}: {code} {short(d, 300)}")
+    print(c, "primaryTagId", s.get("primaryTagId"), "tags", s.get("tags"), "series", s.get("series"))
 
-section("A2. /events/keyset")
-code, d = get(GAMMA, "/events/keyset", series_id=str(by_code["mlb"].get("series")), closed="true", limit=3)
-print(code, short(d if not isinstance(d, dict) else {k: (v if k != "events" else [e.get("slug") for e in v])
-                                                    for k, v in d.items()}, 800))
+section("1. where is Alabama vs Tennessee (Oct 17)? event endDate vs market dates")
+for q in ("Alabama Tennessee", "Texas Ole Miss", "Georgia Auburn"):
+    code, d = get("/public-search", q=q, limit_per_type=5, events_status="all")
+    evs = (d or {}).get("events") if isinstance(d, dict) else None
+    print(q, code, [(e.get("slug"), e.get("endDate"), e.get("startTime"), e.get("closed"),
+                     [str(x.get("id")) for x in e.get("series") or []][:2]) for e in evs or []][:5])
 
-section("A3. event teams field")
-code, d = get(GAMMA, "/events", series_id=str(by_code["nhl"].get("series")), closed="true", limit=2,
-              order="startDate", ascending="false")
-for e in d if isinstance(d, list) else []:
-    print(e.get("slug"), short(e.get("teams"), 1500))
-code, d = get(GAMMA, "/events", series_id=str(by_code["epl"].get("series")), closed="true", limit=60,
-              order="startDate", ascending="false")
-for e in d if isinstance(d, list) else []:
-    ml = [m for m in e.get("markets") or [] if m.get("sportsMarketType") == "moneyline"]
-    if ml:
-        print("EPL", e.get("slug"), e.get("title"), e.get("eventDate"), e.get("startTime"))
-        print("   teams:", short(e.get("teams"), 800))
-        for m in ml:
-            print("   ML", short({k: m.get(k) for k in ("question", "slug", "outcomes", "outcomePrices",
-                                                         "groupItemTitle", "gameStartTime", "negRisk")}, 500))
-        break
-
-
-# ---------- B. all moneyline markets per league, week by week ----------
-section("B. Polymarket closed moneyline markets per league")
-
-
-def compact_team(t):
-    return {k: t.get(k) for k in ("id", "name", "abbreviation", "alias", "league")} if isinstance(t, dict) else t
-
-
-poly = []
+section("2. /markets moneyline per league, by listing-date windows")
+rows, teams_all = [], []
 for c in LEAGUES:
-    s = by_code.get(c)
-    if not s:
-        continue
-    series_id = str(s.get("series") or "").split(",")[0]
-    n_events, n_ml, seen = 0, 0, set()
-    t = SINCE
-    while t < NOW + 86400:
-        offset = 0
-        while True:
-            code, page = get(GAMMA, "/events", series_id=series_id, closed="true", limit=100, offset=offset,
-                             end_date_min=iso(t), end_date_max=iso(t + 4 * 86400))
-            if code != 200 or not isinstance(page, list):
-                print(c, iso(t), "->", code, short(page, 200))
-                break
-            for e in page:
-                if e.get("id") in seen:
-                    continue
-                seen.add(e.get("id"))
-                n_events += 1
-                for m in e.get("markets") or []:
-                    if m.get("sportsMarketType") != "moneyline":
-                        continue
-                    n_ml += 1
-                    poly.append({
-                        "league": c, "event_id": e.get("id"), "event_slug": e.get("slug"), "title": e.get("title"),
-                        "eventDate": e.get("eventDate"), "startTime": e.get("startTime"), "endDate": e.get("endDate"),
-                        "teams": [compact_team(x) for x in e.get("teams") or []],
-                        "id": m.get("id"), "slug": m.get("slug"), "question": m.get("question"),
-                        "outcomes": m.get("outcomes"), "clobTokenIds": m.get("clobTokenIds"),
-                        "outcomePrices": m.get("outcomePrices"), "groupItemTitle": m.get("groupItemTitle"),
-                        "gameStartTime": m.get("gameStartTime"), "umaResolutionStatus": m.get("umaResolutionStatus"),
-                        "closedTime": m.get("closedTime"), "createdAt": m.get("createdAt"),
-                        "startDate": m.get("startDate"), "negRisk": m.get("negRisk"), "volumeNum": m.get("volumeNum")})
-            if len(page) < 100:
-                break
-            offset += 100
-            if offset >= 2000:
-                print(c, iso(t), "window too big")
-                break
-        t += 4 * 86400
-    print(f"{c}: {n_events} closed events, {n_ml} moneyline markets", flush=True)
-for p in poly[:3]:
-    print("PM", short(p, 1200))
-save("poly_moneyline", poly)
-
-section("C. Polymarket teams")
-teams = []
-for c in LEAGUES:
+    s = by_code[c]
+    tag = s.get("primaryTagId") or [t for t in str(s.get("tags")).split(",") if t not in ("1", "100639", "100350")][0]
+    got, capped = {}, 0
+    for closed in ("true", "false"):
+        start = NOW - 150 * 86400
+        while start < NOW:
+            end = start + 15 * 86400
+            offset = 0
+            while True:
+                code, page = get("/markets", tag_id=tag, sports_market_types="moneyline", closed=closed, limit=100,
+                                 offset=offset, start_date_min=iso(start), start_date_max=iso(end))
+                if code != 200 or not isinstance(page, list):
+                    print(c, closed, iso(start), "->", code, short(page, 200))
+                    break
+                for m in page:
+                    got.setdefault(m.get("id"), m)
+                if len(page) < 100:
+                    break
+                offset += 100
+                if offset >= 2000:
+                    capped += 1
+                    break
+            start = end
+    games = [m for m in got.values() if m.get("gameStartTime")]
+    recent = [m for m in games if (m.get("gameStartTime") or "") >= iso(NOW - 100 * 86400)[:10]]
+    print(f"{c} tag {tag}: {len(got)} moneyline markets, {len(games)} with gameStartTime, {len(recent)} since 100 days; "
+          f"capped windows {capped}", flush=True)
+    if got:
+        m = next(iter(got.values()))
+        ev = (m.get("events") or [{}])[0]
+        print("   event keys in /markets:", sorted(ev.keys()))
+    for m in recent:
+        ev = (m.get("events") or [{}])[0]
+        rows.append({"league": c, "id": m.get("id"), "slug": m.get("slug"), "question": m.get("question"),
+                     "outcomes": m.get("outcomes"), "clobTokenIds": m.get("clobTokenIds"),
+                     "outcomePrices": m.get("outcomePrices"), "groupItemTitle": m.get("groupItemTitle"),
+                     "gameStartTime": m.get("gameStartTime"), "startDate": m.get("startDate"),
+                     "endDate": m.get("endDate"), "closed": m.get("closed"),
+                     "umaResolutionStatus": m.get("umaResolutionStatus"),
+                     "event_id": ev.get("id"), "event_slug": ev.get("slug"), "title": ev.get("title"),
+                     "eventDate": ev.get("eventDate"), "startTime": ev.get("startTime"),
+                     "event_endDate": ev.get("endDate"),
+                     "teams": [{k: t.get(k) for k in ("id", "name", "abbreviation", "alias")} for t in ev.get("teams") or []]})
+    # the games round 2 missed
+    for want in ("ala", "tenn", "aub"):
+        hit = [m.get("slug") for m in recent if f"-{want}-" in (m.get("slug") or "")][:6]
+        if c == "cfb":
+            print("   ", want, hit)
     offset = 0
     while True:
-        code, page = get(GAMMA, "/teams", league=c, limit=500, offset=offset)
-        if code != 200 or not isinstance(page, list):
-            print(c, "teams ->", code, short(page, 200))
+        code, page = get("/teams", league=c, limit=100, offset=offset)
+        if code != 200 or not isinstance(page, list) or not page:
             break
-        teams += [{**compact_team(x), "league": c} for x in page]
-        if len(page) < 500:
+        teams_all += [{"league": c, **{k: t.get(k) for k in ("id", "name", "abbreviation", "alias")}} for t in page]
+        offset += 100
+        if offset > 3000:
             break
-        offset += 500
-    print(c, sum(1 for x in teams if x["league"] == c), "teams")
-save("poly_teams", teams)
-
-# ---------- D. Kalshi settled game markets ----------
-section("D. Kalshi settled game markets")
-KS = ["KXNFLGAME", "KXNBAGAME", "KXMLBGAME", "KXNHLGAME", "KXNCAAFGAME", "KXWNBAGAME", "KXMLSGAME", "KXEPLGAME",
-      "KXLALIGAGAME", "KXBUNDESLIGAGAME", "KXSERIEAGAME", "KXLIGUE1GAME", "KXUCLGAME"]
-KEYS = ("ticker", "event_ticker", "title", "yes_sub_title", "open_time", "close_time", "occurrence_datetime",
-        "expected_expiration_time", "can_close_early", "result", "settlement_value_dollars", "settlement_value",
-        "volume_fp", "volume", "status", "market_type")
-kal = []
-for tk in KS:
-    got = {}
-    for path, extra in (("/markets", {"status": "settled", "min_close_ts": SINCE}), ("/historical/markets", {})):
-        cursor, pages = None, 0
-        while pages < 40:
-            params = {"series_ticker": tk, "limit": 1000, **extra}
-            if cursor:
-                params["cursor"] = cursor
-            code, page = get(KALSHI, path, **params)
-            pages += 1
-            if code != 200 or not isinstance(page, dict):
-                print(tk, path, "->", code, short(page, 200))
-                break
-            ms = page.get("markets") or []
-            for m in ms:
-                if m.get("ticker") and m["ticker"] not in got:
-                    got[m["ticker"]] = {k: m.get(k) for k in KEYS}
-            cursor = page.get("cursor")
-            if not cursor or not ms:
-                break
-        print(f"{tk} {path}: {pages} pages, {len(got)} markets so far", flush=True)
-    recent = [m for m in got.values() if (m.get("close_time") or "") >= iso(SINCE)]
-    print(f"{tk}: {len(got)} markets fetched, {len(recent)} closed since {iso(SINCE)[:10]}")
-    kal += recent
-for m in kal[:2]:
-    print("KM", short(m, 800))
-save("kalshi_games", kal)
+    print(f"   teams: {sum(1 for t in teams_all if t['league'] == c)}")
+save("poly_markets", rows)
+save("poly_teams_all", teams_all)
 print("\ncalls:", dict(calls))
 print("DONE", flush=True)
