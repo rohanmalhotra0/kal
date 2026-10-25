@@ -100,6 +100,18 @@ for s in SERIES:
                                    else "...and strike_date is not the earliest close"] += 1
             else:
                 out["strike_date"]["events whose markets closed together"] += 1
+    # A time set after the fact looks like 19:56:17 (seconds), a minute after the real close.
+    # A listing time looks like 03:15:00. Count both shapes per field.
+    for f in ("occurrence_datetime", "expected_expiration_time"):
+        for m in ms.values():
+            v, close = ts(m.get(f)), ts(m.get("close_time"))
+            if not v or not close:
+                continue
+            out[f + " shape"]["has seconds" if v % 60 else "whole minute"] += 1
+            if 0 <= v - close <= 300:
+                out[f + " shape"]["0-5 min after the close"] += 1
+                if v % 60:
+                    out[f + " shape"]["0-5 min after the close, with seconds"] += 1
     per_series[s] = {f: dict(c) for f, c in out.items()}
     for f, c in out.items():
         total[f].update(c)
