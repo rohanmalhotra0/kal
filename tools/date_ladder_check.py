@@ -145,6 +145,48 @@ def main():
                           f" | custom_strike={m.get('custom_strike')!r} | plain={plain_payouts([m])}")
         except Exception as ex:
             print(f"  {t}: lookup failed: {ex}")
+    # The 7 real gap pair-hours that passed the bot's money rules (after the 25% cap), by pair.
+    PAIRS = [("KXALBUMRELEASEDATE-NEWDRA", "26SEP26", "26OCT01", "4 hours: 09-04 01-03h (14-15c), 09-18 17h (2c)"),
+             ("KXHEGSETHOUT-26APR", "MAY01", "JUN01", "1 hour: 04-07 01h (2c)"),
+             ("KXFISAEXTEND-26APR", "MAY02", "MAY03", "1 hour: 04-30 01h (2c)"),
+             ("KXMLBDEBUT-KANDERSON", "26SEP01", "26OCT01", "1 hour: 08-19 10h (1c)")]
+
+    def market(t):
+        for path in (f"/markets/{t}", f"/historical/markets/{t}"):
+            try:
+                got = c.get(path).get("market")
+                if got:
+                    return got
+            except Exception:
+                pass
+        return None
+
+    print("\nthe 7 gap hours, pair by pair, through the strategy's checks:")
+    for ev_t, a_s, b_s, hours in PAIRS:
+        a, b = market(f"{ev_t}-{a_s}"), market(f"{ev_t}-{b_s}")
+        if not a or not b:
+            print(f"  {ev_t} {a_s}/{b_s} ({hours}): market not found ({bool(a)}, {bool(b)})")
+            continue
+        try:
+            evd = c.get(f"/events/{ev_t}").get("event") or {}
+        except Exception:
+            evd = {}
+        checks = {
+            "mutually_exclusive is False": evd.get("mutually_exclusive") is False,
+            "plain payouts": plain_payouts([a, b]),
+            "wording 'Before <date>'": bool(d.deadline(a) and d.deadline(b)),
+            "rules claim 'if it happens before <its date>'": d.claims_it_happens_before(a) and d.claims_it_happens_before(b),
+            "rules match (own deadline out)": d._rules(a) == d._rules(b),
+            "custom_strike matches": d.same_about([a, b]),
+            "listing order nests": d.nested(a, b),
+        }
+        bad = [k for k, ok in checks.items() if not ok]
+        print(f"  {ev_t} {a_s} -> {b_s} ({hours}): {'PASS' if not bad else 'REFUSED: ' + '; '.join(bad)}")
+        print(f"      opened {a.get('open_time')} / {b.get('open_time')}; can_close_early {a.get('can_close_early')}"
+              f"/{b.get('can_close_early')}; counts from listing: {d.counts_from_listing(a)}")
+        print(f"      rules: {(a.get('rules_primary') or '')[:160]!r}")
+        if not checks["plain payouts"]:
+            print(f"      why not plain: {(a.get('rules_secondary') or '')[:240]!r}")
     cfg = config.load()
     ctx = Context(c, cfg, "paper", 300.0, 300.0, set(), {}, {})
     sigs = d.STRATEGY.scan(ctx)
