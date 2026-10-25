@@ -2,6 +2,20 @@
 
 Newest first. Each 2-hour check-in adds one entry: what it checked, what it found, links.
 
+## 2026-10-25 21:10 UTC — anchors hold after closes; 9 hours of arbitrage watches found nothing
+
+- PR #23 merged (8ce7926). CI and market-check green on it.
+- Anchor check ([run](https://github.com/rohanmalhotra0/kal/actions/runs/40233993719)): of 6,851 markets
+  recorded while open this morning, 1,441 have closed (121 early, 1h+ before their anchor). No
+  anchor field changed on any of them (occurrence_datetime, expected/latest expiration,
+  strike_date). So research keeps using them.
+  https://github.com/rohanmalhotra0/kal/pull/9#issuecomment-6403310583
+- Arbitrage watches (public data, no orders, a scan every 5 min):
+  - live rules, 300 min, 60 scans: 0 gaps in basket, ladder or bracket;
+  - paper-only cancel-clause baskets too, 250 min, 50 scans: 0 baskets.
+  So live arbitrage is rare. Expect the bot to trade real money seldom, and only when a gap passes every rule.
+  https://github.com/rohanmalhotra0/kal/pull/14#issuecomment-6403311361
+
 ## 2026-10-25 21:00 UTC — check-in: all green; fresh money-path audit, 5 holes fixed (PR #23)
 
 - Checked: CI green on main 84f0d0d. market-check green on f793218 (19:05): self-test passes,
