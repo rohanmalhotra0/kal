@@ -10,6 +10,8 @@ after fees. Research only: it places nothing.
 No peeking:
 - the price is the backtest's usual one: the last hourly candle that ended by the
   decision time, H hours before the market's scheduled end;
+- every market counts, even quiet ones: the backtest's usual volume filter uses volume
+  known only after a market settles, and dead brackets (mostly losers) are the quiet ones;
 - the forecast is the latest NBM run that started 2+ hours before the decision time
   (a run takes about an hour to publish);
 - a city's forecast bias and spread are fitted only on days that settled before the
@@ -25,7 +27,7 @@ import statistics
 from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
 
-from ..client import fee_per_contract
+from ..client import UnknownSettlement, fee_per_contract, num, yes_payout
 from . import backtest
 
 # Kalshi series -> the station its rules settle on (CLINYC is Central Park, CLIMDW Midway).
@@ -33,6 +35,7 @@ STATIONS = {"KXHIGHNY": "KNYC", "KXHIGHCHI": "KMDW", "KXHIGHMIA": "KMIA", "KXHIG
             "KXHIGHDEN": "KDEN", "KXHIGHAUS": "KAUS", "KXHIGHPHIL": "KPHL"}
 IEM_MOS = "https://mesonet.agron.iastate.edu/cgi-bin/request/mos.py"
 LATENCY = 2 * 3600        # use a run only once it's surely published
+LOOK_BACK = 6 * 3600      # if that run isn't archived, the latest one up to 6 hours older
 FIT_DAYS, MIN_FIT = 120, 20   # bias and spread from up to 120 earlier days; skip a day with under 20
 
 log = logging.getLogger(__name__)
@@ -77,23 +80,41 @@ def run_for(decided):
     return t - t % 3600
 
 
-def parse_max(text, day):
-    """(forecast high, spread) for `day` from one NBS run's IEM CSV, or None. The day's high
-    is the txn/xnd pair valid at 00 UTC after it (the 12 daytime hours ending then)."""
+def _utc(text):
+    try:
+        return int(datetime.strptime((text or "")[:16], "%Y-%m-%d %H:%M").replace(tzinfo=timezone.utc).timestamp())
+    except ValueError:
+        return None
+
+
+def parse_max(text, day, latest):
+    """(forecast high, spread or None, run start) for `day`, from the latest run in an IEM
+    NBS CSV that started by `latest` (unix time), or None. The day's high is the txn valid
+    at 00 UTC after it (the 12 daytime hours ending then); xnd is its spread."""
     want = (datetime(day.year, day.month, day.day, tzinfo=timezone.utc) + timedelta(days=1)).strftime("%Y-%m-%d %H:%M")
+    best = None
     for row in csv.DictReader(io.StringIO(text)):
-        if (row.get("ftime") or "").startswith(want):
-            try:
-                mu, sd = float(row["txn"]), float(row["xnd"])
-            except (KeyError, TypeError, ValueError):
-                return None
-            return (mu, sd) if -60 < mu < 140 and 0 < sd < 30 else None
-    return None
+        run = _utc(row.get("runtime"))
+        if not (row.get("ftime") or "").startswith(want) or run is None or run > latest:
+            continue  # another time, or a run that started too late to use
+        try:
+            mu = float(row.get("txn") or "")
+        except ValueError:
+            continue
+        try:
+            sd = float(row.get("xnd") or "")
+        except ValueError:
+            sd = None
+        if -60 < mu < 140 and (best is None or run > best[2]):
+            best = (mu, sd if sd and 0 < sd < 30 else None, run)
+    return best
 
 
 def forecasts(fetch, station, wants, cache_file=None):
-    """{(runtime, day): (high, spread) or None} for each wanted pair, via fetch(url, params)
-    -> CSV text. Cached in cache_file (runs never change)."""
+    """{(runtime, day): (high, spread, run) or None} for each wanted pair: the latest
+    archived run that started by `runtime` (up to LOOK_BACK older), via fetch(url, params)
+    -> CSV text. Cached in cache_file (runs never change). An empty reply isn't cached:
+    it may be a hiccup, so it's asked again next time."""
     cache = {}
     if cache_file and os.path.exists(cache_file):
         try:
@@ -107,13 +128,16 @@ def forecasts(fetch, station, wants, cache_file=None):
             key = f"{runtime}|{day}"
             if key not in cache:
                 stamp = datetime.fromtimestamp(runtime, timezone.utc).strftime("%Y-%m-%dT%H:%MZ")
+                since = datetime.fromtimestamp(runtime - LOOK_BACK, timezone.utc).strftime("%Y-%m-%dT%H:%MZ")
                 try:
-                    text = fetch(IEM_MOS, {"station": station, "model": "NBS", "sts": stamp, "ets": stamp,
+                    text = fetch(IEM_MOS, {"station": station, "model": "NBS", "sts": since, "ets": stamp,
                                            "format": "csv"})
                 except Exception as e:  # one failed run: skip that day, try again next time
                     log.warning("NBM %s %s: %s", station, stamp, e)
                     continue
-                got = parse_max(text, day)
+                if len((text or "").strip().splitlines()) < 2:
+                    continue  # no rows at all: not cached
+                got = parse_max(text, day, runtime)
                 cache[key] = list(got) if got else None
                 new += 1
             out[(runtime, day)] = tuple(cache[key]) if cache[key] else None
@@ -136,18 +160,44 @@ def winners(markets):
 
 def fit(days):
     """(bias, spread) in °F that best explain past days, by likelihood: a coarse grid (bias
-    -4..4, spread 1..6), then a finer one around the best. days: [(mu, (lo, hi))]."""
+    -8..8, spread 1..10), then a finer one around the best. days: [(mu, (lo, hi))]."""
     def ll(a):
         return sum(math.log(max(prob(rng, mu + a[0], a[1]), 1e-9)) for mu, rng in days)
-    b0, s0 = max(((b, s / 2) for b in range(-4, 5) for s in range(2, 13)), key=ll)
+    b0, s0 = max(((b, s / 2) for b in range(-8, 9) for s in range(2, 21)), key=ll)
     return max(((b0 + i / 4, round(s0 + j / 10, 2)) for i in range(-3, 4) for j in range(-4, 5)
                 if s0 + j / 10 >= 0.5), key=ll)
 
 
+def quiet(client, series, obs, markets, hours_before_close):
+    """The markets load_observations skipped for low lifetime volume, priced the same way.
+    That filter uses volume known only after settling, and the brackets far from the
+    result (the losers) are the quiet ones, so leaving them out flatters YES."""
+    have, anchor = {o["ticker"] for o in obs}, {o["event"]: o["anchor"] for o in obs}
+    out = []
+    for m in markets:
+        tk, ev = m.get("ticker"), m.get("event_ticker")
+        if not tk or tk in have or ev not in anchor or num(m, "volume") >= backtest.MIN_VOLUME:
+            continue
+        try:
+            value = yes_payout(m)
+        except UnknownSettlement:
+            continue
+        if value is None or m.get("result") not in ("yes", "no"):
+            continue
+        t = backtest.decision_time(m, hours_before_close, anchor=anchor[ev])
+        snap = t and backtest.snapshot(client, series, m, hours_before_close, anchor=anchor[ev])
+        if snap:
+            out.append({"series": series, "event": ev, "ticker": tk, "close": backtest._close(m) or anchor[ev],
+                        "anchor": anchor[ev],
+                        "decided": t, "yes_ask": snap[0], "yes_bid": snap[1], "result": m["result"],
+                        "yes_value": value})
+    return out
+
+
 def priced(obs, markets, fc):
     """Each priced market with its forecast chance of YES, from fits on earlier days only.
-    obs: backtest.load_observations rows for one series. markets: its settled markets.
-    fc: {event: (mu, spread_nbm) or None}. Returns rows with "p" (and "mu", "bias", "s")."""
+    obs: price rows for one series (load_observations plus quiet). markets: its settled
+    markets. fc: {event: (mu, ...) or None}. Returns rows with "p" (and "mu", "bias", "s")."""
     info = {m["ticker"]: m for m in markets}
     won = winners(markets)
     days = {}   # event -> (day, mu)
@@ -189,7 +239,8 @@ def trades(rows, margin):
 
 
 def scores(rows):
-    """Brier scores of the forecast and of the market (its mid price) on the same markets."""
+    """Brier scores of the forecast and of the market's mid price on the same markets. Only a
+    guide to who called the results better: a trade has to beat the ask, not the mid."""
     if not rows:
         return None
     won = [backtest.paid(o, "yes") for o in rows]

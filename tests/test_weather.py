@@ -47,30 +47,43 @@ class PricingTests(unittest.TestCase):
 
     def test_forecast_for_the_day_and_run_timing(self):
         day = date(2026, 10, 20)
-        self.assertEqual(weather.parse_max(nbs_csv(day, "66.0", "1.0"), day), (66.0, 1.0))
-        self.assertIsNone(weather.parse_max(nbs_csv(day, "", "1.0"), day))       # missing
-        self.assertIsNone(weather.parse_max(nbs_csv(day, "66.0", "0"), day))     # no spread
-        self.assertIsNone(weather.parse_max("runtime,ftime\n", day))
+        run = ts(day, 9)
+        self.assertEqual(weather.parse_max(nbs_csv(day, "66.0", "1.0"), day, run), (66.0, 1.0, run))
+        self.assertIsNone(weather.parse_max(nbs_csv(day, "", "1.0"), day, run))                 # no high
+        self.assertEqual(weather.parse_max(nbs_csv(day, "66.0", ""), day, run), (66.0, None, run))   # spread optional
+        self.assertIsNone(weather.parse_max("runtime,ftime\n", day, run))
         decided = ts(day, 11) + 59 * 60
         self.assertEqual(weather.run_for(decided), ts(day, 9))   # published by then, with room to spare
         self.assertEqual(weather.day_of(ts(day + timedelta(days=1), 5)), day)   # New York: ends 05 UTC next day
         self.assertEqual(weather.day_of(ts(day + timedelta(days=1), 8)), day)   # Los Angeles: 08 UTC
 
+    def test_a_later_run_is_never_used(self):
+        # A reply holding a run that started after the decision must not leak into it.
+        day = date(2026, 10, 20)
+        text = nbs_csv(day, "66.0", "1.0", runtime="2026-10-20 07:00:00") + \
+            nbs_csv(day, "71.0", "1.0", runtime="2026-10-20 21:00:00").split("\n", 1)[1]
+        self.assertEqual(weather.parse_max(text, day, ts(day, 9))[0], 66.0)
+        self.assertIsNone(weather.parse_max(text, day, ts(day, 6)))   # nothing that early
+
     def test_forecast_runs_are_cached_and_failures_retried(self):
         day, calls = date(2026, 10, 20), []
 
         def fetch(url, params):
-            calls.append(params["sts"])
+            calls.append((params["sts"], params["ets"]))
             if len(calls) == 1:
                 raise OSError("timeout")
-            return nbs_csv(day, "66.0", "1.0")
+            if len(calls) == 2:
+                return "runtime,ftime,txn,xnd\n"   # an empty reply
+            return nbs_csv(day, "66.0", "1.0", runtime="2026-10-20 07:00:00")   # 09Z isn't archived: 07Z is
         path = os.path.join(self._tmp(), "nbm.json")
         want = [(ts(day, 9), day)]
-        self.assertEqual(weather.forecasts(fetch, "KNYC", want, path), {})            # failed: not cached
-        self.assertEqual(weather.forecasts(fetch, "KNYC", want, path), {want[0]: (66.0, 1.0)})
-        self.assertEqual(weather.forecasts(fetch, "KNYC", want, path), {want[0]: (66.0, 1.0)})
-        self.assertEqual(len(calls), 2)                                               # the third came from the cache
-        self.assertEqual(calls[-1], "2026-10-20T09:00Z")
+        got = {want[0]: (66.0, 1.0, ts(day, 7))}
+        self.assertEqual(weather.forecasts(fetch, "KNYC", want, path), {})   # failed: not cached
+        self.assertEqual(weather.forecasts(fetch, "KNYC", want, path), {})   # empty: not cached
+        self.assertEqual(weather.forecasts(fetch, "KNYC", want, path), got)  # the latest older run
+        self.assertEqual(weather.forecasts(fetch, "KNYC", want, path), got)
+        self.assertEqual(len(calls), 3)                                      # the fourth came from the cache
+        self.assertEqual(calls[-1], ("2026-10-20T03:00Z", "2026-10-20T09:00Z"))
 
     def _tmp(self):
         import tempfile
@@ -88,6 +101,10 @@ class PricingTests(unittest.TestCase):
         b, s = weather.fit(days)
         self.assertAlmostEqual(b, 2.0, delta=0.6)
         self.assertAlmostEqual(s, 2.6, delta=0.6)
+        far = [(mu + 5.0, rng) for mu, rng in days]   # a forecast 7°F too warm still fits
+        self.assertAlmostEqual(weather.fit(far)[0], -3.0, delta=0.6)
+        wide = [(mu, (lo - 6, lo + 1)) for mu, (lo, _) in days[:40]] + days[40:]
+        self.assertLessEqual(weather.fit(wide)[1], 10.0)
 
 
 def city_days(n, bias_of=lambda i: 0.0, start=date(2026, 3, 1), seed=5, price_of=None):
@@ -140,7 +157,8 @@ class NoPeekingTests(unittest.TestCase):
         z = backtest.z_for(8)
         for seed in range(6):
             markets, obs, fc = city_days(200, seed=seed, price_of=truth)
-            noisy = {e: (mu + random.Random(seed + 99).gauss(0, 3), s) for e, (mu, s) in fc.items()}
+            noise = random.Random(seed + 99)   # fresh noise for every event, not one shared offset
+            noisy = {e: (mu + noise.gauss(0, 3), s) for e, (mu, s) in fc.items()}
             rows = weather.priced(obs, markets, noisy)
             for margin in (0.05, 0.10):
                 for side, t in weather.trades(rows, margin).items():
@@ -155,6 +173,25 @@ class NoPeekingTests(unittest.TestCase):
         t = weather.trades(rows, 0.10)["no"]
         roi, lo = backtest.roi_stats(t, backtest.z_for(8))
         self.assertGreater(lo, 0)
+
+    def test_quiet_markets_are_priced_too(self):
+        # The backtest drops markets under 100 lifetime volume, known only after settling.
+        # Dead brackets are the quiet ones, so weather prices them back in.
+        markets, obs, fc = city_days(3)
+        for m in markets:
+            m.update({"status": "finalized", "volume_fp": "40.00" if m["result"] == "no" else "900.00",
+                      "settlement_value_dollars": "1.0000" if m["result"] == "yes" else "0.0000",
+                      "open_time": "2026-01-01T00:00:00Z", "close_time": "2026-12-31T00:00:00Z"})
+        kept = [o for o in obs if o["result"] == "yes"]   # what load_observations would return
+        c = FakeKalshi(can_trade=False)
+        for o in obs:
+            c.candle_data[o["ticker"]] = [{"end_period_ts": o["decided"] - 1800,
+                                           "yes_bid": {"close": "0.2000"}, "yes_ask": {"close": "0.2200"}}]
+        back = weather.quiet(c, "KXHIGHNY", kept, markets, 18)
+        self.assertEqual(len(back), len(obs) - len(kept))
+        self.assertTrue(all(o["result"] == "no" and o["yes_ask"] == 0.22 for o in back))
+        lone = dict(markets[0], event_ticker="KXHIGHNY-ELSEWHERE", ticker="X")
+        self.assertEqual(weather.quiet(c, "KXHIGHNY", kept, [lone], 18), [])   # no anchor known: skipped
 
     def test_scores_compare_forecast_and_market(self):
         markets, obs, fc = city_days(60)
@@ -175,9 +212,10 @@ class ToolTests(TempHome):
         by_day = {weather.day_of(o["anchor"]): fc[o["event"]] for o in obs}
 
         def fetch(url, params):
-            d = datetime.strptime(params["sts"], "%Y-%m-%dT%H:%MZ").date()
-            mu, s = by_day.get(d, (None, None))
-            return nbs_csv(d, mu if mu is not None else "", s if s is not None else "")
+            run = datetime.strptime(params["ets"], "%Y-%m-%dT%H:%MZ")
+            mu, s = by_day.get(run.date(), (None, None))
+            return nbs_csv(run.date(), mu if mu is not None else "", s if s is not None else "",
+                           runtime=run.strftime("%Y-%m-%d %H:%M:00"))
         out = io.StringIO()
         with mock.patch.object(tool, "Kalshi", return_value=c), mock.patch.object(tool, "fetcher", return_value=fetch), \
                 mock.patch.object(tool.backtest, "load_observations",

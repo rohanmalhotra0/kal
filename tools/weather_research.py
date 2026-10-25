@@ -56,6 +56,8 @@ def main():
             try:
                 obs = backtest.load_observations(client, series, h, max_markets=args.markets_per_series)
                 markets = client.settled_markets(series, args.markets_per_series)
+                hushed = weather.quiet(client, series, obs, markets, h)   # what the volume filter left out
+                obs = obs + hushed
                 wants = {o["event"]: (weather.run_for(o["decided"]), weather.day_of(o["anchor"])) for o in obs}
                 cache = os.path.join(backtest.folder("cache"), f"nbm_{station}.json")
                 runs = weather.forecasts(fetch, station, wants.values(), cache)
@@ -64,15 +66,16 @@ def main():
                 print(f"{h:g}h {series}: skipped: {e}", flush=True)
                 continue
             s = weather.scores(got) or {}
-            print(f"{h:g}h {series:11} {len(obs):5} priced, {len(got):5} with a fitted forecast. Brier: forecast "
-                  f"{s.get('brier_forecast', float('nan')):.4f}, market {s.get('brier_market', float('nan')):.4f}",
-                  flush=True)
+            print(f"{h:g}h {series:11} {len(obs):5} priced ({len(hushed)} quiet, "
+                  f"{sum(1 for o in hushed if o['result'] == 'yes')} of them won), {len(got):5} with a fitted "
+                  f"forecast. Brier: forecast {s.get('brier_forecast', float('nan')):.4f}, "
+                  f"market mid {s.get('brier_market', float('nan')):.4f}", flush=True)
             rows += got
         s = weather.scores(rows) or {}
         print(f"\n===== {h:g} hours before the scheduled end: {len(rows)} markets, "
               f"{len({str(weather.day_of(o['anchor'])) for o in rows})} days")
-        print(f"Brier (lower is better): forecast {s.get('brier_forecast', float('nan')):.4f}, "
-              f"market {s.get('brier_market', float('nan')):.4f}")
+        print(f"Brier (lower is better; a guide only, trades must beat the ask): forecast "
+              f"{s.get('brier_forecast', float('nan')):.4f}, market mid {s.get('brier_market', float('nan')):.4f}")
         print("margin side  trades days   win   ROI    worst  edge?")
         out = {"scores": s, "trades": []}
         for margin in args.margins:
@@ -87,7 +90,8 @@ def main():
                                       "win": win, "roi": roi, "roi_lo": lo, "edge": edge})
         summary["hours"][f"{h:g}"] = out
     print(f"\nz = {z:.2f} for {tries} tries, {(time.time() - t0) / 60:.0f} min. Trades pay the real taker fee; "
-          "a day's trades in all cities count as one unit.")
+          "a day's trades in all cities count as one unit.\nOne look: an EDGE here still has to pass "
+          "paper trading before any money.")
     os.makedirs(research_dir(), exist_ok=True)
     path = os.path.join(research_dir(), "weather.json")
     with open(path, "w") as f:
