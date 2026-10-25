@@ -1,4 +1,4 @@
-# Side branch only (probe/maker), never merged. Public data only: no key, no orders.
+# Side branch only (probe/maker-smoke), never merged. Public data only: no key, no orders.
 name: api-probe
 
 on:
@@ -10,7 +10,7 @@ permissions:
 jobs:
   probe:
     runs-on: ubuntu-latest
-    timeout-minutes: 200
+    timeout-minutes: 20
     env:
       KAL_HOME: ./state
       PYTHONUNBUFFERED: "1"
@@ -21,8 +21,22 @@ jobs:
           python-version: "3.12"
           cache: pip
       - run: pip install -r requirements.txt
-      - name: Maker backtest, 6 hours before the scheduled end (busiest active series)
-        run: python tools/maker_research.py --series-per-category 8 --markets-per-series 150 --max-minutes 160
+      - name: Raw candles (live and historical) to check the trade-price fields
+        run: |
+          python - <<'PY'
+          import json
+          from kal.client import Kalshi, ts
+          c = Kalshi()
+          for series in ("KXHIGHNY", "KXNFLGAME"):
+              ms = c.settled_markets(series, 40)
+              for m in (ms[0], ms[-1]):
+                  t = ts(m["close_time"])
+                  cs = c.candles(series, m["ticker"], t - 8 * 3600, t + 3600)
+                  print(series, m["ticker"], m["close_time"], len(cs), "candles")
+                  print(json.dumps([x for x in cs if x.get("volume") or x.get("volume_fp")][-2:], indent=1))
+          PY
+      - name: Maker backtest, small
+        run: python tools/maker_research.py --series-per-category 1 --markets-per-series 40 --max-minutes 6
       - uses: actions/upload-artifact@v4
         if: always()
         with:
