@@ -685,6 +685,7 @@ def backtest_results(bt, kind, limit):
         out.append({"id": r["id"], "ts": r["ts"], "kind": r["kind"], "series": series,
                     "hours_before_close": _float(params.get("hours_before_close")),
                     "observations": _int(res.get("observations")), "events": _int(res.get("events")),
+                    "busy": _int(res.get("busy")), "busy_min": _int(res.get("busy_min")),
                     "calibration": calib, "edges": sum(x["edge"] for x in calib),
                     "mentions": _mention(mentions.get("best") if isinstance(mentions, dict) else None)})
     return out

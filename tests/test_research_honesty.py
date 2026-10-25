@@ -3,12 +3,15 @@
 One class per review finding: hourly luck, demo data on prod, the news-time anchor, the
 promotion budget over time, rounded fees, retirements that survive a rebuild, research
 memory, and research that daily restarts kept killing."""
+import contextlib
+import io
 import math
 import os
 import random
 import shutil
 import signal
 import statistics
+import sys
 import time
 from datetime import datetime, timezone
 from unittest import mock
@@ -724,3 +727,43 @@ class VolumeTests(TempHome):
         self.assertTrue(seen)
         self.assertTrue(all(o["volume"] >= backtest.BUSY for o in seen[0]))
         self.assertEqual(len(seen[0]), 20)
+
+    def test_the_manual_backtest_prices_busy_markets_only(self):
+        seen = []
+        real = backtest.calibration
+
+        def spy(obs, *a, **k):
+            seen.append(list(obs))
+            return real(obs, *a, **k)
+        c = FakeKalshi(can_trade=False)
+        for i in range(40):
+            self.market(c, i, i % 3 == 0, 900, 300 if i % 2 else 50)
+        with mock.patch.object(backtest, "calibration", side_effect=spy):
+            res = backtest.run(["Q"], client=c)
+        self.assertEqual(len(seen[0]), 20)
+        self.assertEqual(res["observations"], 40)       # mention words still learn from every market
+
+    def deep_research(self):
+        import importlib.util
+        path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tools", "deep_research.py")
+        spec = importlib.util.spec_from_file_location("deep_research", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def test_deep_research_counts_busy_markets_and_every_table(self):
+        tool = self.deep_research()
+        c = FakeKalshi(can_trade=False)
+        for i in range(40):
+            self.market(c, i, i % 3 == 0, 900, 300 if i % 2 else 50)
+        c.series_list = [{"ticker": "Q", "category": "Weather", "frequency": "daily"}]
+        for extra, n in (([], 20), (["--all-markets"], 40)):
+            out = io.StringIO()
+            with mock.patch.object(tool, "Kalshi", return_value=c), \
+                    mock.patch.object(sys, "argv", ["deep_research.py", "--series-per-category", "1"] + extra), \
+                    contextlib.redirect_stdout(out):
+                tool.main()
+            text = out.getvalue()
+            self.assertIn(f"\n{n} priced markets, {n} events", text)
+            # 2 sides x 12 price ranges x 2 tables (any spread, tight) x (1 category + ALL)
+            self.assertIn("for 96 tries", text)

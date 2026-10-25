@@ -881,10 +881,17 @@ function resultView(r) {
       el("p", {}, "No settled markets found. Check the series names, or try a different number of hours."));
   }
   const edges = rows.filter((x) => x.edge).length;
+  const untested = r.busy === 0;  // none busy enough to trade: no prices were tested
   const summary = el("p", { class: "result-sum" }, `${num(r.observations)} markets in ${num(r.events)} events. `,
     edges ? pill(edges === 1 ? "1 edge found" : `${edges} edges found`, "good")
-      : "No edge found. That's normal: most prices are fair.");
+      : untested ? false : "No edge found. That's normal: most prices are fair.");
   const parts = [head, summary];
+  if (isNum(r.busy) && r.busy < r.observations) {
+    const how = isNum(r.busy_min) ? ` (${num(r.busy_min)}+ contracts in the day before)` : "";
+    parts.push(el("p", { class: "muted" }, untested
+      ? `None was busy enough for the bot to trade${how}, so no prices were tested.`
+      : `Prices are tested on the ${num(r.busy)} busy enough for the bot to trade${how}.`));
+  }
   if (rows.length) parts.push(roiBars(rows), calibTable(rows));
   if (rows.length && rows.every((x) => !x.side)) {
     parts.push(el("p", { class: "muted" }, "This test mixes Yes and No buys. The bot only trades an edge "

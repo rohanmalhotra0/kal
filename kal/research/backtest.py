@@ -456,9 +456,11 @@ def run(series, hours_before_close=6, hours_after_open=None, client=None, refres
     obs = []
     for s in series:
         obs += load_observations(client, s, hours_before_close, hours_after_open, max_markets, refresh)
-    rows = calibration(obs)
-    mentions = mention_backtest(obs)
-    results = {"observations": len(obs), "events": len({o["event"] for o in obs}), "calibration": rows,
+    traded = busy(obs)                # prices: only what the live strategies could have traded
+    rows = calibration(traded)
+    mentions = mention_backtest(obs)  # words: every market
+    results = {"observations": len(obs), "events": len({o["event"] for o in obs}), "busy": len(traded),
+               "busy_min": BUSY, "calibration": rows,
                "edges": [r for r in rows if is_edge(r)],
                "mentions": {"best": mentions["best"], "margins": mentions["margins"]}}
     record("manual", {"series": list(series), "hours_before_close": hours_before_close,

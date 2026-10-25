@@ -3,7 +3,9 @@
 Question: if you bought every contract in a price range some hours before its event's
 scheduled close, did you make money after fees? Answered per category and per side
 (YES vs NO), with the same event-clustered, Bonferroni-corrected lower bound the bot
-uses. Prints tables; saves a summary JSON.
+uses. Only busy markets count (backtest.BUSY+ contracts traded in the day before the
+decision, as the live strategies check); --all-markets counts the quiet ones too.
+Prints tables; saves a summary JSON.
 
   python tools/deep_research.py --series-per-category 10 --markets-per-series 150
 """
@@ -67,6 +69,8 @@ def main():
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--max-minutes", type=float, default=150)
     ap.add_argument("--active", action="store_true", help="busiest active series instead of a random sample")
+    ap.add_argument("--all-markets", action="store_true",
+                    help="also count markets too quiet for the live strategies to trade")
     args = ap.parse_args()
     t0 = time.time()
     client = Kalshi()
@@ -97,24 +101,29 @@ def main():
                 break
             try:
                 got = backtest.load_observations(client, s, args.hours, max_markets=args.markets_per_series)
+                if not args.all_markets:
+                    got = backtest.busy(got)   # only what the live strategies could have traded
                 obs += got
                 print(f"{cat:22} {s:30} {len(got):5} priced markets", flush=True)
             except Exception as e:
                 print(f"{cat:22} {s:30} skipped: {e}", flush=True)
         obs_by_cat[cat] = obs
-    # Each table tests 2 sides x 12 buckets; across categories that's many tries.
-    tries = 2 * (len(backtest.BUCKETS) - 1) * (len(obs_by_cat) + 1)
+    # Each table tests 2 sides x 12 buckets, and each category (and ALL) gets two tables:
+    # any spread and tight spread. Across categories that's many tries.
+    tries = 2 * 2 * (len(backtest.BUCKETS) - 1) * (len(obs_by_cat) + 1)
     z = backtest.z_for(tries)
-    summary = {"hours_before_close": args.hours, "z": z, "tries": tries, "categories": {}}
+    which = "every market" if args.all_markets else f"busy markets ({backtest.BUSY}+ traded in the day before)"
+    summary = {"hours_before_close": args.hours, "z": z, "tries": tries, "markets": which, "categories": {}}
     everything = [o for obs in obs_by_cat.values() for o in obs]
     print(f"\n{len(everything)} priced markets, {len({o['event'] for o in everything})} events, "
           f"{len(obs_by_cat)} categories, z = {z:.2f} for {tries} tries, {(time.time() - t0) / 60:.0f} min")
+    print(f"Counted: {which}")
     for name, obs in [("ALL", everything)] + sorted(obs_by_cat.items()):
         if len(obs) < 30:
             continue
         rows = table(obs, None, z)
         tight = table(obs, 0.02, z)
-        show(f"{name}: every market ({len(obs)} markets)", rows)
+        show(f"{name}: any spread ({len(obs)} markets)", rows)
         show(f"{name}: tight spread only (<= 2c)", tight)
         summary["categories"][name] = {"markets": len(obs), "all": rows, "tight": tight}
     from kal.research.discover import research_dir   # this exchange's folder (research-demo/ on demo)
