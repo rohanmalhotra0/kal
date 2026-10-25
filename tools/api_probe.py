@@ -202,3 +202,49 @@ show("fee_type / fee_multiplier counts", {str(k): v for k, v in fee_types.most_c
 cats = collections.Counter(s.get("category") for s in ser)
 show("series categories", dict(cats.most_common(30)))
 sys.exit(0)
+
+# ---- What can break a "locked-in" NO basket? (settlement floors, fair-price rules, netting)
+events, cursor = [], None
+for _ in range(6):
+    params = {"status": "open", "with_nested_markets": "true", "limit": 200}
+    if cursor:
+        params["cursor"] = cursor
+    code, d = get("/events", **params)
+    if code != 200 or not isinstance(d, dict):
+        show("events page failed", {"code": code, "body": str(d)[:300]})
+        break
+    events += d.get("events") or []
+    cursor = d.get("cursor")
+    if not cursor:
+        break
+excl = [e for e in events if e.get("mutually_exclusive")]
+markets = [m for e in excl for m in e.get("markets") or []]
+show("open events sampled", {"events": len(events), "mutually_exclusive": len(excl), "their markets": len(markets)})
+event_keys, market_keys = collections.Counter(), collections.Counter()
+for e in events:
+    event_keys.update(k for k in e if k != "markets")
+for e in events:
+    for m in e.get("markets") or []:
+        market_keys.update(m.keys())
+show("event keys (count of events having each)", dict(event_keys.most_common()))
+show("market keys (count of markets having each)", dict(market_keys.most_common()), limit=6000)
+risky = [k for k in market_keys if any(w in k for w in ("settlement", "floor", "bound", "cap", "collateral", "fee"))]
+values = {}
+for k in risky:
+    values[k] = collections.Counter(str(m.get(k))[:40] for e in events for m in e.get("markets") or [] if k in m).most_common(8)
+show("values of settlement / floor / bound / collateral market fields", values, limit=6000)
+show("collateral_return_type on events", collections.Counter(str(e.get("collateral_return_type")) for e in events).most_common(10))
+words = ["last traded", "fair price", "fair value", "postpone", "cancel", "abandon", "suspend", "tie", "draw",
+         "death", "dies", "outcome review", "settle at", "floor"]
+hits = collections.Counter()
+examples = collections.defaultdict(list)
+for m in markets:
+    text = f"{m.get('rules_primary') or ''} {m.get('rules_secondary') or ''}".lower()
+    for w in words:
+        if w in text:
+            hits[w] += 1
+            if len(examples[w]) < 2:
+                i = text.find(w)
+                examples[w].append(f"{m.get('ticker')}: ...{text[max(0, i - 160): i + 160]}...")
+show(f"rule wording in {len(markets)} markets of mutually exclusive events", dict(hits.most_common()))
+show("rule wording examples", dict(examples), limit=8000)
