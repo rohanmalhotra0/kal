@@ -2,6 +2,15 @@
 
 Newest first. Each 2-hour check-in adds one entry: what it checked, what it found, links.
 
+## 2026-10-25 01:20 UTC — first deep backtest (real history)
+
+- 1,677 priced markets, 332 events, 19 categories (random series; many had no data).
+- After fees: YES under 10c lost 88-100%. YES at 95c+ lost ~13%. NO at 80-95c with a
+  tight spread (<= 2c) made +7% to +12%. NO at 95c+ made ~+2%.
+- Nothing is significant yet (z = 3.7 for 480 tries). Lead to chase: **NO at 80-95c,
+  tight spreads** (fits the favorite-longshot and YES-overbetting research).
+- Running v2 on the busiest active series with more markets.
+
 ## 2026-10-25 01:10 UTC — order endpoint moved
 
 - **Kalshi retired the V1 order endpoint** (`POST /portfolio/orders` -> 410). Every real
