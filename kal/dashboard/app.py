@@ -30,7 +30,7 @@ from urllib.parse import urlsplit
 from flask import Flask, jsonify, render_template, request
 from werkzeug.serving import make_server
 
-from .. import config, db, ledger, notify, paper
+from .. import config, db, gate, ledger, notify, paper
 from ..client import Kalshi, fee, load_key
 from ..scheduler import Scheduler
 from ..strategies import load_all
@@ -99,11 +99,23 @@ def _utc_midnight(now):
     return datetime(d.year, d.month, d.day, tzinfo=timezone.utc).timestamp()
 
 
-def _has_key():
+def _key_id():
     try:
-        return load_key(config.home())[0] is not None
+        return load_key(config.home())[0]
     except Exception:
-        return False  # a key file we can't read is no key at all
+        return None  # a key file we can't read is no key at all
+
+
+def _has_key():
+    return _key_id() is not None
+
+
+def order_test(cfg, key_id):
+    """The $0.01 test order that real money waits for (kal/gate.py): has it passed for this
+    key and exchange? A pass for another key or exchange doesn't count."""
+    rec = gate.status()
+    ok = bool(rec.get("ok")) and key_id is not None and rec.get("fingerprint") == f"{cfg['env']}:{key_id}"
+    return {"passed": ok, "detail": str(rec.get("detail") or "")[:200], "ts": _float(rec.get("ts")) or None}
 
 
 def _float(v):
@@ -319,8 +331,9 @@ def build_state(sched):
     now = time.time()
     errors = []
     cfg = config.load()
-    s = {"now": now, "config": cfg, "has_key": _has_key(), "errors": errors,
-         "alerts": {"enabled": notify.enabled()}}
+    key_id = _key_id()
+    s = {"now": now, "config": cfg, "has_key": key_id is not None, "errors": errors,
+         "alerts": {"enabled": notify.enabled()}, "order_test": order_test(cfg, key_id)}
     parts = {
         "money": lambda: dict(zip(("account", "today", "positions", "money"), account(cfg, now))),
         "strategies": lambda: {"strategies": strategies(cfg, errors)},

@@ -456,6 +456,12 @@ function moneyNotes(s) {
       out.push(`Kalshi has less cash than "Free to use". So it can only use ${money(Math.max(0, room))} now.`);
     }
   }
+  const t = s.order_test || {};
+  if (s.has_key && m.budget > 0) {
+    if (t.passed) out.push(`Real-money test order: passed (${ago(t.ts)}).`);
+    else if (t.detail) out.push(`Real money waits for the $0.01 test order: ${t.detail}. It tries again every hour.`);
+    else out.push("Before its first real trade, it sends one $0.01 test order that can't fill.");
+  }
   if (isNum((s.today || {}).pnl)) out.push(`Today: ${signed(s.today.pnl)}.`);
   return out;
 }

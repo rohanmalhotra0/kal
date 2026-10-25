@@ -117,6 +117,36 @@ class Base(TempHome):
         return self.client.post(path, data=json.dumps(body, allow_nan=True), content_type="application/json", **kw)
 
 
+class OrderTestStateTests(Base):
+    """Real money waits for the $0.01 test order (kal/gate.py); the Home tab says where it is."""
+
+    def state(self):
+        return self.client.get("/api/state").get_json()["order_test"]
+
+    def test_not_passed_until_it_passes_for_this_key_and_exchange(self):
+        from kal import gate
+        self.assertFalse(self.state()["passed"])
+        fake = types.SimpleNamespace(key_id="kid-1")
+        gate.record(fake, "prod", True, "KXA-1: accepted, 0 filled")
+        with mock.patch.object(dash, "_key_id", return_value="kid-1"):
+            t = self.state()
+            self.assertTrue(t["passed"])
+            self.assertIn("accepted", t["detail"])
+            config.update({"env": "demo"})
+            self.assertFalse(self.state()["passed"])   # passed on prod, not demo
+        with mock.patch.object(dash, "_key_id", return_value="another-key"):
+            config.update({"env": "prod"})
+            self.assertFalse(self.state()["passed"])   # a new key needs its own test
+
+    def test_a_failure_says_why(self):
+        from kal import gate
+        gate.record(types.SimpleNamespace(key_id="kid-1"), "prod", False, "Kalshi refused it: 400 bad field")
+        with mock.patch.object(dash, "_key_id", return_value="kid-1"):
+            t = self.state()
+        self.assertFalse(t["passed"])
+        self.assertIn("400 bad field", t["detail"])
+
+
 class StateTests(Base):
     def seed(self):
         now = time.time()
