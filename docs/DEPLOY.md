@@ -135,6 +135,7 @@ Start with the **demo** exchange. It uses fake money.
 
 Shortcut: do steps 1 to 5 below. Then run `sudo kal setup`. It asks five plain
 questions and does the rest for you. At question 2, press Enter to use the key you copied.
+If the bot is on, setup turns it off first. It's only on again if you say yes at the end.
 
 1. Make a demo account at [demo.kalshi.co](https://demo.kalshi.co).
 2. In the demo site, open your account settings, then **API keys**. Make a new key.
@@ -296,6 +297,7 @@ To change it (the hour is in UTC): `sudo kal set summary_hour_utc 14`
 | **kal warning: disk** | The disk is getting full. Under 200 MB it stops itself. | Free some space (see below). |
 | **kal warning: clock** | The server clock is off. Kalshi may refuse orders. | `timedatectl`. If it says not synchronized: `sudo systemctl restart chrony` |
 | **kal warning: trading** | Trade runs keep failing. Kalshi or the internet is down. It keeps trying. | Usually nothing. If it lasts a day: `sudo kal logs` |
+| **kal warning: report** | The status report can't reach GitHub. Usually the token ran out (they last 90 days). | Make a new token: step 10 below. Until then the check-in can't see the bot. |
 | **kal backup failed** | Last night's backup didn't work. | `sudo kal backup` shows why. |
 
 Warnings come at most once a day each.
