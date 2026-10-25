@@ -64,6 +64,8 @@ def spread(seconds):
 
 
 out = {}
+SERIES += ["KXMLBTOTAL", "KXNBASPREAD", "KXEPLGAME", "KXHIGHLAX", "KXLOWTNYC", "KXFEDMENTION",
+           "KXOSCARPIC", "KXSENATETX", "KXHURCAT", "KXDJI"]
 for s in SERIES:
     _, d = get("/markets", series_ticker=s, status="settled", limit=200)
     settled = (d or {}).get("markets") or []
@@ -72,6 +74,8 @@ for s in SERIES:
     strike = {k: ts(v) for k, v in strike_raw.items()}
     _, d = get("/markets", series_ticker=s, status="open", limit=200)
     open_ = (d or {}).get("markets") or []
+    _, d = get("/historical/markets", series_ticker=s, limit=100)
+    hist = (d or {}).get("markets") or []
 
     r = {"settled": len(settled), "open": len(open_),
          "can_close_early (settled)": dict(collections.Counter(str(m.get("can_close_early")) for m in settled)),
@@ -102,8 +106,25 @@ for s in SERIES:
          if ts(m.get("close_time")) and ts(m.get("expected_expiration_time"))])
     r["open: expected_expiration - now (hours)"] = spread(
         [ts(m["expected_expiration_time"]) - NOW for m in open_ if ts(m.get("expected_expiration_time"))])
-    keys = ("ticker", "can_close_early", "open_time", "close_time", "expected_expiration_time",
-            "latest_expiration_time", "result")
+    keys = ("ticker", "open_time", "close_time", "occurrence_datetime", "expected_expiration_time",
+            "expiration_time", "latest_expiration_time", "result")
+    def occ(ms, field="close_time"):
+        return spread([ts(m[field]) - ts(m["occurrence_datetime"]) for m in ms
+                       if ts(m.get(field)) and ts(m.get("occurrence_datetime"))])
+    r["has occurrence_datetime (settled, open, historical)"] = [
+        sum(1 for m in ms if m.get("occurrence_datetime")) for ms in (settled, open_, hist)]
+    r["has early_close_condition (settled, open)"] = [
+        sum(1 for m in ms if m.get("early_close_condition")) for ms in (settled, open_)]
+    r["settled: close - occurrence (hours)"] = occ(settled)
+    r["settled: expected_expiration - occurrence (hours)"] = occ(settled, "expected_expiration_time")
+    r["open: close - occurrence (hours)"] = occ(open_)
+    r["open: expected_expiration - occurrence (hours)"] = occ(open_, "expected_expiration_time")
+    r["historical: close - occurrence (hours)"] = occ(hist)
+    r["historical: close - expected_expiration (hours)"] = spread(
+        [ts(m["close_time"]) - ts(m["expected_expiration_time"]) for m in hist
+         if ts(m.get("close_time")) and ts(m.get("expected_expiration_time"))])
+    r["early_close_condition examples"] = sorted({str(m.get("early_close_condition"))[:160]
+                                                  for m in settled + open_})[:3]
     r["samples"] = ([{k: m.get(k) for k in keys} | {"strike_date": strike_raw.get(m.get("event_ticker"))}
                      for m in settled[:2]] +
                     [{k: m.get(k) for k in keys[:-1]} | {"status": "open"} for m in open_[:1]])
