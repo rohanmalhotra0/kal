@@ -331,7 +331,7 @@ def run(client, cfg, quick=False, now=None, series=None):
         info = all_series.get(s, {"ticker": s})
         try:
             obs = backtest.load_observations(client, s, hours, max_markets=max_markets)
-            rows = backtest.calibration(obs, max_spread=favorites.MAX_SPREAD, by_side=True)
+            rows = backtest.calibration(backtest.busy(obs), max_spread=favorites.MAX_SPREAD, by_side=True)
             changes = merge_edges(edges, s, rows, hours, stamp)
             backtest.record("calibration", {"series": s, "hours_before_close": hours, "max_markets": max_markets,
                                             "max_spread": favorites.MAX_SPREAD},

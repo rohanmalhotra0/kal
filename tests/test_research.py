@@ -40,7 +40,7 @@ def add_series(c, series, n, ask, bid, win_rate, seed, words=None, title=""):
             c.settled.setdefault(series, []).append(m)
             t = close - 6 * 3600
             c.candle_data[tk] = [{"end_period_ts": t - 3600, "yes_ask": {"close_dollars": f"{ask:.4f}"},
-                                  "yes_bid": {"close_dollars": f"{bid:.4f}"}}]
+                                  "yes_bid": {"close_dollars": f"{bid:.4f}"}, "volume_fp": "500.00"}]
 
 
 class AllCandles(FakeKalshi):
@@ -186,7 +186,7 @@ class BacktestTests(TempHome):
         obs = backtest.load_observations(c, "S", 6)
         self.assertEqual(len(obs), 20)
         self.assertEqual(c.candle_calls, 20)
-        self.assertTrue(os.path.exists(os.path.join(self.home, "cache", "S_close6_v4.json")))
+        self.assertTrue(os.path.exists(os.path.join(self.home, "cache", "S_close6_v5.json")))
         self.assertEqual(len(backtest.load_observations(c, "S", 6)), 20)
         self.assertEqual(c.candle_calls, 20)  # second time: all from cache
         res = backtest.run(["S"], client=c)

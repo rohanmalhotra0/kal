@@ -202,6 +202,7 @@ def _run(client, cfg, quick, now, named, summary):
     trades, seen, counts = defaultdict(list), [], defaultdict(int)
 
     def take(s, obs):
+        obs = backtest.busy(obs)   # only what the live strategy could have traded
         cat = str(info[s]["category"]).strip()
         compact(cat, obs, hours, trades)
         counts[cat] += len(obs)

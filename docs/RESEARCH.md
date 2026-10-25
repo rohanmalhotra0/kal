@@ -47,6 +47,10 @@ status: **testing** (add the PR link), **built**, or **rejected** (say why in on
   of its markets had settled when research ran, and that picks winners.
 - A market already closed at the decision time is skipped, as the bot would have found
   it closed. Mention words are learned an hour after the event's scheduled end.
+- No filter on a market's total volume: that's known only once it settles, and markets
+  far from the result go quiet, so it dropped mostly losers (a fair market showed +50%).
+  "Busy" means 200+ contracts traded in the day before the decision, the same check
+  the live strategies make. Research for live strategies uses busy markets only.
 - The 5% chance of promoting luck is spent over looks and over ideas, for good. The
   20th idea ever judged needs far more proof than the first.
 - Demo keeps its own research (`research-demo/`, `cache-demo/`). Nothing is promoted

@@ -45,7 +45,7 @@ def add_series(c, series, category, n, hit, bid=0.07, ask=0.08, seed=1, title=""
                 "ticker": tk, "event_ticker": ev, "open_time": iso(close - 3 * 86400), "can_close_early": False, "close_time": iso(close),
                 "status": "settled", "volume_fp": "1000.00", "result": "yes" if won else "no"})
             c.candle_data[tk] = [{"end_period_ts": close - 7 * H, "yes_ask": {"close_dollars": f"{a:.4f}"},
-                                  "yes_bid": {"close_dollars": f"{b:.4f}"}}]
+                                  "yes_bid": {"close_dollars": f"{b:.4f}"}, "volume_fp": "500.00"}]
     if liquid:  # an open event with volume: discover.active_series counts the series as busy
         c.event_list.append({"event_ticker": f"{series}-OPEN", "series_ticker": series,
                              "markets": [{"ticker": f"{series}-OPEN-L", "volume_24h_fp": "500.00"}]})

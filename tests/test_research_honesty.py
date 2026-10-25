@@ -524,7 +524,7 @@ def crashing_job():
 class MemoryTests(TempHome):
     def test_the_price_cache_stops_growing(self):
         path = backtest.cache_path("S", 6)
-        olds = [path.replace("_v4.json", v) for v in ("_v2.json", "_v3.json")]
+        olds = [path.replace("_v5.json", v) for v in ("_v2.json", "_v3.json", "_v4.json")]
         for v in olds:
             with open(v, "w") as f:
                 f.write('{"version": 1, "markets": {}}')   # an old cache: its prices may peek
@@ -665,3 +665,62 @@ class ResearchKeepsOneExchangeTests(TempHome):
             self.assertEqual(len(db.query("SELECT * FROM runs WHERE kind = 'research'")), 1)
         with db.pinned("demo"):
             self.assertEqual(db.query("SELECT * FROM runs WHERE kind = 'research'"), [])
+
+
+# ---------- 5. no filter on volume known only after settling ----------
+
+class VolumeTests(TempHome):
+    """The backtest used to skip markets with under 100 contracts traded over their whole
+    life. That's known only once a market settles, and markets far from the result go
+    quiet, so it dropped mostly losers and flattered YES."""
+
+    def market(self, c, i, won, life_volume, day_volume, price=0.30):
+        close = M0 + (i + 10) * DAY
+        tk = f"Q-{i}"
+        c.settled.setdefault("Q", []).append({
+            "ticker": tk, "event_ticker": tk, "open_time": iso(close - 3 * DAY), "can_close_early": False,
+            "close_time": iso(close), "status": "finalized", "result": "yes" if won else "no",
+            "volume_fp": f"{life_volume:.2f}"})
+        t = close - 6 * H
+        c.candle_data[tk] = [
+            {"end_period_ts": t - 30 * H, "volume_fp": "9999.00"},          # more than a day before: not counted
+            {"end_period_ts": t - 20 * H, "volume_fp": f"{day_volume / 2:.2f}"},
+            {"end_period_ts": t - H, "volume_fp": f"{day_volume / 2:.2f}",
+             "yes_ask": {"close": f"{price + 0.01:.4f}"}, "yes_bid": {"close": f"{price - 0.01:.4f}"}}]
+
+    def test_quiet_losers_no_longer_fake_a_yes_edge(self):
+        c, rng = FakeKalshi(can_trade=False), random.Random(4)
+        for i in range(400):
+            won = rng.random() < 0.31                   # fair at a 31c ask
+            quiet = not won and rng.random() < 0.5      # half the losers barely trade after
+            self.market(c, i, won, 40 if quiet else 900, 300)
+        obs = backtest.load_observations(c, "Q", 6, max_markets=10_000)
+        self.assertEqual(len(obs), 400)                 # the quiet ones count too
+        row = next(r for r in backtest.calibration(obs, by_side=True) if r["side"] == "yes" and r["lo"] == 0.30)
+        self.assertLess(row["roi_lo"], 0)               # no edge in a fair market
+        self.assertGreater(row["roi"], -0.25)
+
+    def test_busy_is_measured_in_the_day_before_the_decision(self):
+        c = FakeKalshi(can_trade=False)
+        self.market(c, 0, True, 40, 300)                # quiet over its life, busy before the decision
+        self.market(c, 1, True, 900, 100)               # busy over its life, quiet before the decision
+        obs = {o["ticker"]: o for o in backtest.load_observations(c, "Q", 6, max_markets=10_000)}
+        self.assertEqual(obs["Q-0"]["volume"], 300)     # the 9,999 from 30 hours before isn't counted
+        self.assertEqual([o["ticker"] for o in backtest.busy(obs.values())], ["Q-0"])
+
+    def test_research_for_live_strategies_uses_busy_markets_only(self):
+        seen = []
+        real = backtest.calibration
+
+        def spy(obs, *a, **k):
+            seen.append(list(obs))
+            return real(obs, *a, **k)
+        c = FakeKalshi(can_trade=False)
+        for i in range(40):
+            self.market(c, i, i % 3 == 0, 900, 300 if i % 2 else 50)
+        c.series_list = [{"ticker": "Q", "category": "Weather", "frequency": "daily"}]
+        with mock.patch.object(backtest, "calibration", side_effect=spy):
+            discover.run(c, config.load(), series=["Q"])
+        self.assertTrue(seen)
+        self.assertTrue(all(o["volume"] >= backtest.BUSY for o in seen[0]))
+        self.assertEqual(len(seen[0]), 20)
