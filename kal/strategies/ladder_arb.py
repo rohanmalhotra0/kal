@@ -26,7 +26,7 @@ import time
 
 from ..client import fee, price, ts
 from ..risk import yearly_return
-from .base import Leg, Signal, Strategy
+from .base import Leg, Signal, Strategy, plain_payouts
 
 MIN_PROFIT = 0.05      # dollars per signal, after fees
 MIN_ROI = 0.01
@@ -68,11 +68,10 @@ def one_close_time(ev):
 
 def own_markets(ev):
     """The event has a ticker, and so does every market, which all belong to it, and every
-    market is a plain binary one (pays exactly $0 or $1), which the locked-in math needs."""
-    return bool(ev.get("event_ticker")) and all(
-        m.get("ticker") and m.get("event_ticker") in (None, ev["event_ticker"])
-        and m.get("market_type", "binary") == "binary"
-        for m in ev.get("markets") or [])
+    market pays plainly ($0 or $1: see base.plain_payouts), which the locked-in math needs."""
+    markets = ev.get("markets") or []
+    return bool(ev.get("event_ticker")) and plain_payouts(markets) and all(
+        m.get("ticker") and m.get("event_ticker") in (None, ev["event_ticker"]) for m in markets)
 
 
 def _wording(m):

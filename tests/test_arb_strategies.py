@@ -13,8 +13,8 @@ from unittest import mock
 
 from kal import config, db, engine, paper
 from kal.client import fee, price
-from kal.strategies import MODULES, bracket_arb, ladder_arb
-from kal.strategies.base import Context, Leg
+from kal.strategies import MODULES, basket_arb, bracket_arb, ladder_arb
+from kal.strategies.base import Context, Leg, plain_payouts
 from tests.fakes import FakeKalshi
 from tests.helpers import TempHome, orders_proven
 
@@ -600,4 +600,36 @@ class BinaryOnlyTests(unittest.TestCase):
                                                                 ("T112000", 112000, "$112,000 or above")])
         self.assertIsNotNone(ladder_arb.ladder(ev))
         ev["markets"][0]["market_type"] = "scalar"
+        self.assertIsNone(ladder_arb.ladder(ev))
+
+
+class PlainPayoutTests(unittest.TestCase):
+    """Locked-in trades only where every market pays $0 or $1 (real API facts, 2026-10-25)."""
+
+    def test_default_markets_pass(self):
+        self.assertTrue(plain_payouts([{"market_type": "binary", "settlement_bounds_type": "default",
+                                        "rules_primary": "If X wins, the market resolves to Yes."}]))
+        self.assertTrue(plain_payouts([{}]))  # older listings leave the fields out
+
+    def test_floors_and_fair_price_rules_fail(self):
+        self.assertFalse(plain_payouts([{"settlement_bounds_type": "floor"}]))
+        self.assertFalse(plain_payouts([{"market_type": "scalar"}]))
+        death = ("In the event of death, the market will resolve to the last traded price prior to "
+                 "death, unless such a price is not available.")  # real KXG7LEADEROUT wording
+        self.assertFalse(plain_payouts([{}, {"rules_secondary": death}]))
+        self.assertFalse(plain_payouts([{"rules_primary": "the exchange may determine a Fair Value"}]))
+
+    def test_basket_skips_an_event_with_a_death_clause(self):
+        from tests.test_core import fake_with_arb
+        c = fake_with_arb()
+        ctx = Context(c, dict(config.DEFAULTS, max_per_arb=30), "paper", 100, 100, set(), {}, {})
+        self.assertEqual(len(basket_arb.STRATEGY.scan(ctx)), 1)
+        c.event_list[0]["markets"][2]["rules_secondary"] = "settles at the last traded price before death"
+        self.assertEqual(basket_arb.STRATEGY.scan(ctx), [])
+
+    def test_ladder_skips_markets_with_payout_bounds(self):
+        ev = RealDataRegressionTests()._ev("KXBTCD-26OCT2517", [("T110000", 110000, "$110,000 or above"),
+                                                                ("T112000", 112000, "$112,000 or above")])
+        self.assertIsNotNone(ladder_arb.ladder(ev))
+        ev["markets"][1]["settlement_bounds_type"] = "floor"
         self.assertIsNone(ladder_arb.ladder(ev))

@@ -3,6 +3,27 @@ from dataclasses import dataclass, field
 
 from ..client import fee
 
+# Rules that let Kalshi settle at the last traded price or a "fair" price of its choosing
+# (seen on real markets: death clauses on "leader leaves office" events). Then a market
+# can pay anything from $0 to $1, and a "locked-in" basket can lose.
+FAIR_PRICE_WORDS = ("last traded price", "fair price", "fair value")
+
+
+def plain_payouts(markets):
+    """True if every market pays exactly $0 or $1, or a split that keeps the at-most-one-YES
+    total (a cancelled match paid $0.33 on each of its three outcomes). Locked-in trades need
+    this. Fails closed: a payout floor or cap (any settlement_bounds_type but "default", the
+    only value on 10,148 real markets) or fair-price wording in the rules means no."""
+    for m in markets:
+        if m.get("market_type", "binary") != "binary":
+            return False
+        if m.get("settlement_bounds_type", "default") != "default":
+            return False
+        rules = f"{m.get('rules_primary') or ''} {m.get('rules_secondary') or ''}".lower()
+        if any(w in rules for w in FAIR_PRICE_WORDS):
+            return False
+    return True
+
 
 @dataclass
 class Leg:

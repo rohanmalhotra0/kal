@@ -7,7 +7,7 @@ add up to more than $1 (net of fees), the profit is locked in. This usually
 happens because people overpay for longshots.
 """
 from ..client import fee, price, ts
-from .base import Leg, Signal, Strategy
+from .base import Leg, Signal, Strategy, plain_payouts
 from .ladder_arb import yearly
 
 MIN_PROFIT = 0.05   # dollars per basket, after fees
@@ -67,7 +67,7 @@ class BasketArb(Strategy):
         for ev in ctx.client.events(status="open", with_nested_markets="true"):
             if not ev.get("mutually_exclusive"):
                 continue
-            if any(m.get("market_type", "binary") != "binary" for m in ev.get("markets", [])):
+            if not plain_payouts(ev.get("markets", [])):
                 continue  # the math needs every market to pay exactly $0 or $1
             markets = [m for m in ev.get("markets", []) if m.get("status", "active") in ("active", "open")]
             if sum(price(m, "yes_bid") for m in markets) <= 1:
