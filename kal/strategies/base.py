@@ -87,6 +87,12 @@ CANCELLATION_CLAUSES = [re.compile(p, re.I) for p in (
     r"determined by kalshi\.",
     r"if the election is postponed beyond one year from the original date or cancell?ed entirely, the market "
     r"resolves to the last fair market price\.",
+    # Esports (CS2, Dota 2, LoL, Valorant, ...) and darts, seen on real events 2026-10-25.
+    rf"if (?:the relevant|a) (?:match or map|match|map) is (?:cancell?ed before play begins|forfeited before any "
+    rf"play occurs(?: in the map)?|postponed and not started within (?:{_WINDOW}) of its originally scheduled start "
+    rf"time), the market will resolve to the fair market price\.",
+    r"if the cancell?ed match is not played, rescheduled, or declared a tie, the market will resolve to the fair "
+    r"market price\.",
 )]
 
 
