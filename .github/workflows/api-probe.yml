@@ -20,4 +20,4 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install -r requirements.txt
-      - run: python tools/fair_price_sentences.py
+      - run: python tools/fair_price_check.py && python tools/fair_price_sentences.py
