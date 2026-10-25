@@ -2,64 +2,86 @@
 
 Buying at the ask pays the spread and the taker fee, and on real Kalshi data that leaves
 about nothing (docs/RESEARCH.md). Studies say the edge goes to makers, whose orders rest
-in the book. This tests that on settled markets. Research only: it places nothing.
+in the book. This screens for that on settled markets. Research only: it places nothing.
 
-At the decision time (as in kal.research.backtest: hours before the market's scheduled
-end), post one bid on the YES or the NO side: at the best bid ("join"), or 1c above it
-when the spread is 2c or more ("improve", which never crosses). It rests until the
-market closes or reaches its scheduled end, whichever is first.
+Each market gets one bid on the YES or the NO side, set from the last hourly candle
+before the decision time (as in kal.research.backtest): at the best bid ("join"), or 1c
+above it when the spread is 2c or more ("improve", which never crosses). It rests until
+the market closes, or until the hour its scheduled end falls in begins (a live maker
+would cancel by then), whichever is first.
 
-It counts as filled only if a later trade printed THROUGH its price: a YES bid at 90c
-fills when YES traded below 90c. Every bid at 90c had to be used up first, ours too.
-A trade AT our price doesn't count: we may have been at the back of the queue. So fills
-come when the price runs through us, often on news. That's the real cost of making,
+The bid is for ONE contract. It fills when a later trade went through its price: every
+bid there was used up, ours too. A trade AT our price fills an "improve" bid (it was
+alone at that price), not a "join" bid (it may have been at the back of the queue).
+Fills come when the price runs through us, often on news. That's the cost of making,
 and this keeps it.
 
-A fill costs our price plus a maker fee. Most series charge makers nothing. This
-charges every fill the maker fee Kalshi uses where it does charge one (a quarter of
-the taker rate), rounded up to the cent.
+Why one contract: a bigger bid fills only as far as the volume that went through its
+price. Small dips (often in markets that go on to win) fill a little of it; news runs
+(often in markets that go on to lose) fill all of it. So one contract is the best case
+per dollar. A price range that loses money here loses at any size. One that makes money
+is a lead, not an edge: it needs a check with real trade sizes before any strategy.
+
+Every fill pays the maker fee Kalshi charges on series that charge makers (a quarter of
+the taker rate). Most series charge nothing.
 """
 import json
 import logging
-import math
 import os
 import re
+import time
 from collections import defaultdict
 
-from ..client import num, price
-from ..strategies import favorites
+from ..client import price
 from . import backtest
 
 MAKER_FEE_RATE = 0.0175   # Kalshi's maker rate on series that charge one (taker: 0.07)
 TICK = 0.01
-PERIOD = 3600             # hourly candles
+PERIOD = 3600             # hourly candles, which end on the hour
 RULES = ("join", "improve")
 
 log = logging.getLogger(__name__)
 
 
-def maker_fee(count, p):
-    """Maker fee for one order, rounded up to the cent."""
-    return math.ceil(round(MAKER_FEE_RATE * count * p * (1 - p) * 100, 6)) / 100
+def maker_fee(p):
+    """Maker fee for one contract at p, before rounding (the most any series charges)."""
+    return MAKER_FEE_RATE * p * (1 - p)
 
 
 def window_end(o):
-    """When our bid stops resting: the market's close or its scheduled end, if earlier."""
-    return min(o["close"], o.get("anchor") or o["close"])
+    """When our bid stops resting: the market's close, or the start of the hour its
+    scheduled end falls in, whichever is first."""
+    anchor = o.get("anchor") or o["close"]
+    return min(o["close"], anchor - anchor % PERIOD)
+
+
+def _volume(c):
+    for k in ("volume_fp", "volume"):   # live candles send volume_fp, historical ones volume
+        v = c.get(k)
+        if v not in (None, ""):
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                return 0.0
+    return 0.0
 
 
 def window(client, o):
-    """(lowest, highest) trade price after the decision time, while our bid rested.
-    (None, None) if nothing traded. Includes the hour the window ends in (fills just after
-    a scheduled end are mostly bad ones, so that's the cautious side) and the hour the
-    decision falls in (the bid was set from prices before that hour began)."""
+    """(lowest, highest) trade price while our bid rested; None for each if nothing
+    traded. The hour the decision falls in counts: the bid was set from prices before
+    that hour began. The hour a market closes in counts: news runs are how bids get
+    picked off. Returns None if Kalshi sent no candles at all (it sends one an hour even
+    when nothing traded), so the market is tried again later instead of written off."""
     start, end = o["decided"], window_end(o)
+    candles = client.candles(o["series"], o["ticker"], start + 1, end + PERIOD)
+    if not candles:
+        return None
     lo = hi = None
-    for c in client.candles(o["series"], o["ticker"], start + 1, end + PERIOD):
+    for c in candles:
         t = c.get("end_period_ts")
         if not isinstance(t, (int, float)) or not (start < t and t - PERIOD < end):
             continue
-        if num(c, "volume") <= 0:
+        if _volume(c) <= 0:
             continue  # no trades: its price range is empty or carried over
         p = c.get("price") or {}
         low, high = price(p, "low"), price(p, "high")
@@ -72,7 +94,7 @@ def window(client, o):
 
 def cache_path(series, hours_before_close=6):
     safe = re.sub(r"[^A-Za-z0-9_.-]", "_", series)
-    return os.path.join(backtest.folder("cache"), f"{safe}_maker_close{hours_before_close:g}_v1.json")
+    return os.path.join(backtest.folder("cache"), f"{safe}_maker_close{hours_before_close:g}_v2.json")
 
 
 def _read(path):
@@ -85,33 +107,39 @@ def _read(path):
 
 def _write(path, markets):
     with open(path + ".tmp", "w") as f:
-        json.dump({"version": 1, "markets": markets}, f)
+        json.dump({"version": 2, "markets": markets}, f)
     os.replace(path + ".tmp", path)
 
 
-def load(client, series, hours_before_close=6, max_markets=1500, refresh=False):
-    """backtest.load_observations rows, each with the trade range while our bid rested:
-    "lo" and "hi" (None if nothing traded). Settled markets don't change, so the range
-    is cached next to the price snapshots."""
+def load(client, series, hours_before_close=6, max_markets=1500, refresh=False, deadline=None):
+    """The newest max_markets backtest.load_observations rows, each with the trade range
+    while our bid rested: "lo" and "hi" (None if nothing traded). A cached range is used
+    only for the same decision time and window end. Stops fetching at `deadline` (unix
+    time) and returns what it has."""
     obs = backtest.load_observations(client, series, hours_before_close, max_markets=max_markets,
-                                     refresh=refresh)
+                                     refresh=refresh)[-max_markets:]
     path = cache_path(series, hours_before_close)
     cache = {} if refresh else _read(path)
     out, new, errors, last_error = [], 0, 0, None
     try:
         for o in obs:
-            tk = o["ticker"]
-            if tk not in cache:
+            tk, when = o["ticker"], {"decided": o["decided"], "end": window_end(o)}
+            hit = cache.get(tk)
+            if not (isinstance(hit, dict) and all(hit.get(k) == v for k, v in when.items())):
+                if deadline and time.time() > deadline:
+                    break
                 try:
-                    cache[tk] = list(window(client, o))
+                    got = window(client, o)
                 except Exception as e:  # one market's candles failing shouldn't sink the series
                     errors, last_error = errors + 1, e
                     if errors >= 10 and errors > new:
                         raise RuntimeError(f"candles keep failing: {e}") from e
                     continue
+                if got is None:
+                    continue
+                hit = cache[tk] = {"lo": got[0], "hi": got[1], **when}
                 new += 1
-            lo, hi = cache[tk]
-            out.append({**o, "lo": lo, "hi": hi})
+            out.append({**o, "lo": hit["lo"], "hi": hit["hi"]})
     finally:
         if new:
             listed = {o["ticker"] for o in obs}
@@ -138,50 +166,45 @@ def quotes(o, rule="join"):
     return [(side, p) for side, p in out if 0.01 <= p <= 0.99]
 
 
-def filled(o, side, p, touch=False):
-    """Did a later trade go through our bid? A YES bid at p: YES traded below p. A NO bid
-    at p (a YES ask at 1 - p): YES traded above 1 - p. touch also counts a trade at our
-    price: an upper bound on fills, never used to call an edge."""
+def filled(o, side, p, at_price=False):
+    """Did a later trade fill our bid? A YES bid at p: YES traded below p (or at p, with
+    at_price). A NO bid at p is a YES ask at 1 - p: YES traded above it (or at it)."""
     eps = 1e-6
     if side == "yes":
         lo = o.get("lo")
-        return lo is not None and (lo < p - eps or (touch and lo <= p + eps))
+        return lo is not None and (lo < p - eps or (at_price and lo <= p + eps))
     hi, a = o.get("hi"), 1 - p
-    return hi is not None and (hi > a + eps or (touch and hi >= a - eps))
+    return hi is not None and (hi > a + eps or (at_price and hi >= a - eps))
 
 
-def maker_trade(event, p, won, dollars=favorites.FULL_BET):
-    """(event, cost, pnl, fair_var) for one filled bid, sized like the bot's full bet."""
-    n = favorites.full_size(p, dollars)
-    cost = n * p + maker_fee(n, p)
-    return event, cost, n * float(won) - cost, n * n * p * (1 - p)
+def maker_trade(unit, p, won):
+    """(unit, cost, pnl, fair_var) for one filled one-contract bid."""
+    cost = p + maker_fee(p)
+    return unit, cost, won - cost, p * (1 - p)
 
 
-def table(obs, rule="join", touch=False, z=2.0):
-    """Per side and price range of our bid: bids posted, fills, ROI on the money filled,
-    its cautious bound, and the ROI if every bid had filled (the gap is what being
-    picked off costs)."""
-    posted, fills, every = defaultdict(int), defaultdict(list), defaultdict(list)
+def table(obs, rule="join", z=2.0):
+    """Per side and price range of our bid: bids posted, fills, ROI on fills and its
+    cautious bound. Fills that win or lose together count as one unit: o["unit"] if set
+    (the tool uses category and day: related series move together), else series and day."""
+    posted, fills = defaultdict(int), defaultdict(list)
     for o in obs:
         for side, p in quotes(o, rule):
             key = (side, backtest.bucket_of(p))
-            won = backtest.paid(o, side)
             posted[key] += 1
-            every[key].append(maker_trade(backtest.group(o), p, won))
-            if filled(o, side, p, touch):
-                fills[key].append(every[key][-1])
+            if filled(o, side, p, at_price=rule == "improve"):
+                fills[key].append(maker_trade(o.get("unit") or backtest.group(o), p, backtest.paid(o, side)))
     rows = []
     for side, b in sorted(posted):
         t = fills[(side, b)]
         roi, lo = backtest.roi_stats(t, z) if t else (None, None)
-        if_all, _ = backtest.roi_stats(every[(side, b)], z)
         rows.append({"side": side, "lo": backtest.BUCKETS[b], "hi": backtest.BUCKETS[b + 1],
-                     "bids": posted[(side, b)], "fills": len(t), "events": len({x[0] for x in t}),
-                     "win": sum(1 for x in t if x[2] > 0) / len(t) if t else None,
-                     "roi": roi, "roi_lo": lo, "roi_if_all_filled": if_all})
+                     "bids": posted[(side, b)], "fills": len(t), "units": len({x[0] for x in t}),
+                     "win": sum(1 for x in t if x[2] > 0) / len(t) if t else None, "roi": roi, "roi_lo": lo})
     return rows
 
 
-def is_edge(row):
+def is_lead(row):
+    """Worth a check with real trade sizes. Never an edge by itself: one contract is the best case."""
     return (row["roi_lo"] is not None and row["roi_lo"] > 0
-            and row["fills"] >= backtest.MIN_TRADES and row["events"] >= backtest.MIN_EVENTS)
+            and row["fills"] >= backtest.MIN_TRADES and row["units"] >= backtest.MIN_EVENTS)

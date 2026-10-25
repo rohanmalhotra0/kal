@@ -1,14 +1,16 @@
-"""Maker backtest (kal/research/maker.py): resting bids, filled only when trades go through them."""
+"""Maker backtest (kal/research/maker.py): one-contract bids, filled only when trades reach them."""
 import importlib.util
 import io
+import json
 import os
 import random
+import time
 import unittest
 from contextlib import redirect_stdout
 from datetime import datetime, timezone
 from unittest import mock
 
-from kal.client import fee
+from kal.client import fee_per_contract
 from kal.research import backtest, maker
 from tests.fakes import FakeKalshi
 from tests.helpers import TempHome
@@ -23,7 +25,7 @@ def iso(t):
 
 
 def candle(end, lo=None, hi=None, volume=10, bid=None, ask=None):
-    c = {"end_period_ts": end, "volume": volume,
+    c = {"end_period_ts": end, "volume_fp": f"{volume:.2f}",
          "price": {"low_dollars": f"{lo:.4f}" if lo else None, "high_dollars": f"{hi:.4f}" if hi else None}}
     if bid is not None:
         c["yes_bid"], c["yes_ask"] = {"close": f"{bid:.4f}"}, {"close": f"{ask:.4f}"}
@@ -39,12 +41,19 @@ class FillRuleTests(unittest.TestCase):
         # YES bid at 90c: a trade AT 90c may have filled the queue ahead of us, not us.
         self.assertFalse(maker.filled(row(lo=0.90), "yes", 0.90))
         self.assertTrue(maker.filled(row(lo=0.89), "yes", 0.90))
-        self.assertTrue(maker.filled(row(lo=0.90), "yes", 0.90, touch=True))
-        self.assertFalse(maker.filled(row(lo=None), "yes", 0.90, touch=True))  # nothing traded
+        self.assertTrue(maker.filled(row(lo=0.90), "yes", 0.90, at_price=True))
+        self.assertFalse(maker.filled(row(lo=None), "yes", 0.90, at_price=True))  # nothing traded
         # NO bid at 10c is a YES ask at 90c: it fills when YES traded above 90c.
         self.assertFalse(maker.filled(row(hi=0.90), "no", 0.10))
         self.assertTrue(maker.filled(row(hi=0.91), "no", 0.10))
-        self.assertTrue(maker.filled(row(hi=0.90), "no", 0.10, touch=True))
+        self.assertTrue(maker.filled(row(hi=0.90), "no", 0.10, at_price=True))
+
+    def test_an_improved_bid_fills_on_a_trade_at_its_price(self):
+        # 1c above the best bid, it was alone at its price, so a trade there was with it.
+        o = {**row(lo=0.91, hi=0.91, ask=0.92, bid=0.90), "result": "yes", "yes_value": 1.0,
+             "series": "S", "anchor": M0, "close": M0}
+        self.assertEqual([r["fills"] for r in maker.table([o], "improve") if r["side"] == "yes"], [1])
+        self.assertEqual([r["fills"] for r in maker.table([o], "join") if r["side"] == "yes"], [0])
 
     def test_bids_join_or_improve_but_never_cross(self):
         self.assertEqual(maker.quotes(row(ask=0.92, bid=0.90)), [("yes", 0.90), ("no", 0.08)])
@@ -59,12 +68,10 @@ class FillRuleTests(unittest.TestCase):
                 else:
                     self.assertGreater(1 - p, bid)   # our NO bid is a YES ask over the YES bid
 
-    def test_maker_fee_rounds_up_and_is_a_quarter_of_the_taker_rate(self):
-        self.assertEqual(maker.maker_fee(1, 0.5), 0.01)
-        self.assertEqual(maker.maker_fee(100, 0.5), 0.44)
-        self.assertEqual(maker.maker_fee(10, 0.99), 0.01)
-        for n, p in ((1, 0.5), (10, 0.9), (100, 0.3), (7, 0.07)):
-            self.assertLessEqual(maker.maker_fee(n, p), fee(n, p))
+    def test_maker_fee_is_a_quarter_of_the_taker_fee(self):
+        self.assertAlmostEqual(maker.maker_fee(0.5), 0.004375)
+        for p in (0.03, 0.5, 0.9, 0.99):
+            self.assertAlmostEqual(maker.maker_fee(p), fee_per_contract(p) / 4)
 
 
 class WindowTests(unittest.TestCase):
@@ -77,24 +84,34 @@ class WindowTests(unittest.TestCase):
             candle(M0 + H, lo=0.85, hi=0.91),             # the decision's hour: bid set before it began
             candle(M0 + 2 * H, lo=0.50, hi=0.95, volume=0),   # no trades: a carried-over range
             candle(M0 + 3 * H, lo=0.86, hi=0.93),
-            candle(M0 + 7 * H, lo=0.84, hi=0.94),         # the end's hour: counts (late fills are mostly bad)
-            candle(M0 + 8 * H, lo=0.02, hi=0.98),         # after the bid stopped resting
+            candle(M0 + 6 * H, lo=0.84, hi=0.94),         # the last hour before the end's hour
+            candle(M0 + 7 * H, lo=0.02, hi=0.98),         # the scheduled end's hour: cancelled by then
         ]
+        self.assertEqual(maker.window_end(o), M0 + 6 * H)
         self.assertEqual(maker.window(c, o), (0.84, 0.94))
 
-    def test_window_ends_at_an_early_close(self):
-        decided = M0 + 1800
-        o = {"series": "S", "ticker": "S-1", "decided": decided, "close": M0 + 2 * H, "anchor": M0 + 6 * H}
+    def test_an_early_close_counts_the_news_hour(self):
+        o = {"series": "S", "ticker": "S-1", "decided": M0 + 1800, "close": M0 + H + 1200, "anchor": M0 + 6 * H}
         c = FakeKalshi(can_trade=False)
         c.candle_data["S-1"] = [candle(M0 + H, lo=0.85, hi=0.91), candle(M0 + 2 * H, lo=0.01, hi=0.91),
-                                candle(M0 + 4 * H, lo=0.30, hi=0.97)]   # can't exist after a close; ignored
-        self.assertEqual(maker.window(c, o), (0.01, 0.91))   # the news run counts: it's how bids get picked off
+                                candle(M0 + 4 * H, lo=0.30, hi=0.97)]   # after the close; ignored
+        self.assertEqual(maker.window(c, o), (0.01, 0.91))   # the run to 1c is how bids get picked off
 
-    def test_nothing_traded(self):
+    def test_nothing_traded_and_nothing_sent(self):
         o = {"series": "S", "ticker": "S-1", "decided": M0, "close": M0 + 6 * H, "anchor": M0 + 6 * H}
         c = FakeKalshi(can_trade=False)
         c.candle_data["S-1"] = [candle(M0 + H), candle(M0 + 2 * H, lo=0.5, hi=0.6, volume=0)]
         self.assertEqual(maker.window(c, o), (None, None))
+        c.candle_data["S-1"] = []
+        self.assertIsNone(maker.window(c, o))   # unknown, not "nothing traded"
+
+    def test_historical_candles_and_either_volume_field(self):
+        # Historical candles send plain "low"/"high" dollar strings and "volume".
+        o = {"series": "S", "ticker": "S-1", "decided": M0, "close": M0 + 6 * H, "anchor": M0 + 6 * H}
+        c = FakeKalshi(can_trade=False)
+        c.candle_data["S-1"] = [{"end_period_ts": M0 + H, "volume": "12.00", "volume_fp": None,
+                                 "price": {"low": "0.0800", "high": "0.9600"}}]
+        self.assertEqual(maker.window(c, o), (0.08, 0.96))
 
 
 def settled(c, n, series="S", result=lambda i: "yes", lo=lambda i: 0.85, hi=lambda i: 0.95, bid=0.90, ask=0.92):
@@ -110,38 +127,65 @@ def settled(c, n, series="S", result=lambda i: "yes", lo=lambda i: 0.85, hi=lamb
 
 
 class LoadTests(TempHome):
+    def counting(self, c):
+        calls, real = [], c.candles
+        c.candles = lambda *a, **k: calls.append(a) or real(*a, **k)
+        return calls
+
     def test_load_adds_the_range_and_caches_it(self):
         c = FakeKalshi(can_trade=False)
         settled(c, 3)
-        calls = []
-        real = c.candles
-        c.candles = lambda *a, **k: calls.append(a) or real(*a, **k)
+        calls = self.counting(c)
         got = maker.load(c, "S", 6)
         self.assertEqual([(o["lo"], o["hi"]) for o in got], [(0.85, 0.95)] * 3)
         self.assertEqual(len(calls), 6)          # a price snapshot and a window per market
-        again = maker.load(c, "S", 6)
+        self.assertEqual(maker.load(c, "S", 6), got)
         self.assertEqual(len(calls), 6)          # both cached: settled markets don't change
-        self.assertEqual(again, got)
-        self.assertTrue(os.path.exists(maker.cache_path("S", 6)))
 
-    def test_a_failing_window_skips_the_market_not_the_series(self):
+    def test_a_cached_range_is_reused_only_for_the_same_window(self):
+        c = FakeKalshi(can_trade=False)
+        settled(c, 2)
+        maker.load(c, "S", 6)
+        path = maker.cache_path("S", 6)
+        with open(path) as f:
+            cached = json.load(f)
+        cached["markets"]["S-0"]["decided"] -= H   # made for an earlier decision time
+        cached["markets"]["S-0"]["lo"] = 0.70      # e.g. a trade from before the bid existed
+        with open(path, "w") as f:
+            json.dump(cached, f)
+        calls = self.counting(c)
+        got = {o["ticker"]: o["lo"] for o in maker.load(c, "S", 6)}
+        self.assertEqual(got, {"S-0": 0.85, "S-1": 0.85})
+        self.assertEqual(len(calls), 1)          # only the stale one was fetched again
+
+    def test_failures_and_empty_replies_skip_the_market_not_the_series(self):
         c = FakeKalshi(can_trade=False)
         settled(c, 3)
         real = c.candles
 
         def flaky(series, ticker, start, end, period=60):
-            if ticker == "S-1" and start > M0 + 11 * DAY - 6 * H:
+            if start > M0 + 11 * DAY - 6 * H and ticker == "S-1":
                 raise RuntimeError("503")
+            if start > M0 + 12 * DAY - 6 * H and ticker == "S-2":
+                return []
             return real(series, ticker, start, end, period)
         c.candles = flaky
-        self.assertEqual([o["ticker"] for o in maker.load(c, "S", 6)], ["S-0", "S-2"])
+        self.assertEqual([o["ticker"] for o in maker.load(c, "S", 6)], ["S-0"])
         c.candles = real
         self.assertEqual(len(maker.load(c, "S", 6)), 3)   # fetched next time, not written off
+
+    def test_newest_markets_only_and_a_deadline(self):
+        c = FakeKalshi(can_trade=False)
+        settled(c, 5)
+        self.assertEqual([o["ticker"] for o in maker.load(c, "S", 6, max_markets=2)], ["S-3", "S-4"])
+        c2 = FakeKalshi(can_trade=False)
+        settled(c2, 5, "T")
+        self.assertEqual(maker.load(c2, "T", 6, deadline=time.time() - 1), [])   # out of time: fetch nothing
 
 
 class HonestyTests(unittest.TestCase):
     def obs(self, n, p_true, fills, seed=1, bid=0.90, ask=0.92):
-        """n fair-ish markets, one per day. fills(i, won) says whether trades went through the bid."""
+        """n markets, one per day. fills(i, won) says whether trades went through the bid."""
         rng = random.Random(seed)
         out = []
         for i in range(n):
@@ -158,24 +202,35 @@ class HonestyTests(unittest.TestCase):
 
     def test_bids_that_get_picked_off_lose_even_when_the_price_was_fair(self):
         # Fair at 90c, but the price only runs through our bid when YES is losing.
-        obs = self.obs(300, 0.90, lambda i, won: not won)
-        r = self.yes_row(maker.table(obs, z=3.0))
+        r = self.yes_row(maker.table(self.obs(300, 0.90, lambda i, won: not won), z=3.0))
         self.assertLess(r["roi"], -0.99)
-        self.assertFalse(maker.is_edge(r))
-        self.assertGreater(r["roi_if_all_filled"], -0.05)   # every bid filling would have been about fair
+        self.assertFalse(maker.is_lead(r))
 
-    def test_fair_prices_and_random_fills_show_no_edge(self):
+    def test_fair_prices_and_random_fills_show_no_lead(self):
         z = backtest.z_for(2 * (len(backtest.BUCKETS) - 1) * len(maker.RULES))
         for seed in range(20):
             obs = self.obs(400, 0.90, lambda i, won, r=random.Random(seed + 1000): r.random() < 0.5, seed=seed)
             for rule in maker.RULES:
                 for r in maker.table(obs, rule, z=z):
-                    self.assertFalse(maker.is_edge(r), (seed, rule, r))
+                    self.assertFalse(maker.is_lead(r), (seed, rule, r))
 
     def test_a_real_edge_is_found(self):
         # YES really wins 97% at a 90c bid, fills independent of the outcome: makers keep it.
         obs = self.obs(400, 0.97, lambda i, won, r=random.Random(7): r.random() < 0.6)
-        self.assertTrue(maker.is_edge(self.yes_row(maker.table(obs, z=3.0))))
+        self.assertTrue(maker.is_lead(self.yes_row(maker.table(obs, z=3.0))))
+
+    def test_related_series_on_one_day_count_once(self):
+        # 8 series ride one price path each day. Counted per series, luck looks like proof.
+        rng, obs = random.Random(3), []
+        for day in range(60):
+            won, through = rng.random() < 0.9, rng.random() < 0.5
+            for s in range(8):
+                obs.append({"series": f"S{s}", "event": f"S{s}-{day}", "ticker": f"S{s}-{day}",
+                            "close": M0 + day * DAY, "anchor": M0 + day * DAY, "yes_ask": 0.92, "yes_bid": 0.90,
+                            "result": "yes" if won else "no", "yes_value": float(won), "unit": f"Crypto:{day}",
+                            "lo": 0.88 if through else 0.90, "hi": None})
+        r = self.yes_row(maker.table(obs))
+        self.assertEqual(r["fills"], 8 * r["units"])   # 8 fills a day, one unit a day
 
 
 class ToolTests(TempHome):
@@ -192,13 +247,16 @@ class ToolTests(TempHome):
         out = io.StringIO()
         with mock.patch.object(tool, "Kalshi", return_value=c), \
                 mock.patch.object(tool, "active_series", return_value=["S", "T"]), \
-                mock.patch("sys.argv", ["maker_research.py", "--markets-per-series", "50"]), redirect_stdout(out):
+                mock.patch("sys.argv", ["maker_research.py", "--markets-per-series", "50", "--hours", "6", "24"]), \
+                redirect_stdout(out):
             tool.main()
         text = out.getvalue()
-        self.assertIn("75 priced markets", text)
-        self.assertIn("ALL: join the best bid", text)
-        self.assertIn("Sports: improve the best bid", text)
-        self.assertTrue(os.path.exists(os.path.join(self.home, "research", "maker_6h.json")))
+        self.assertIn("6 hours before the scheduled end: 75 priced markets, 75 category-days", text)
+        self.assertIn("6h Sports: improve the best bid", text)
+        self.assertIn("for 144 tries", text)   # 2 sides x 12 ranges x 2 rules x 3 tables (24h priced none)
+        self.assertNotIn("EDGE", text)          # a best case is never called an edge
+        with open(os.path.join(self.home, "research", "maker_6h.json")) as f:
+            self.assertEqual(json.load(f)["tables"]["ALL"]["markets"], 75)
 
 
 if __name__ == "__main__":
