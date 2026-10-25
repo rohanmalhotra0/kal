@@ -176,7 +176,7 @@ def _go_live(cfg, strategy):
 def _ready(stats, env=None):
     """Proof enough for real money. Never on the demo exchange: practice fills on its thin
     books say nothing about the real one."""
-    env = env or config.load().get("env", "prod")
+    env = env or db.current_env()
     return (env == "prod" and stats["paper_trades"] >= MIN_PAPER_TRADES and stats["events"] >= MIN_EVENTS
             and stats["roi_lo"] is not None and stats["roi_lo"] > 0)
 

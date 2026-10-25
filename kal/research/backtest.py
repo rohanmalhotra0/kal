@@ -42,7 +42,7 @@ def folder(name, env=None):
     """$KAL_HOME/<name> for the real exchange, <name>-<env> for another. Demo practice
     keeps its own research and prices, the way it keeps its own db (kal-demo.db): demo's
     thin books must never become the real exchange's history or edges."""
-    env = env or config.load().get("env", "prod")
+    env = env or db.current_env()   # a research run's own exchange (db.pinned), else the setting
     d = os.path.join(config.home(), name if env == "prod" else f"{name}-{env}")
     os.makedirs(d, exist_ok=True)
     return d

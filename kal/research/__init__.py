@@ -32,22 +32,26 @@ def run_all(client=None, quick=False):
         return {"ok": False, "skipped": "research is already running"}
     summary = {"ok": True, "quick": quick}
     try:
-        try:
-            client = client or Kalshi.from_env(config.home(), cfg["env"])
-            summary.update(discover.run(client, cfg, quick=quick))
-        except Exception as e:
-            summary.update(ok=False, error=f"discovery failed: {e}"[:500])
-            log.error("research discovery failed: %s", traceback.format_exc())
-        summary["longshot"] = longshot.run(client, cfg, quick=quick)  # never raises
-        try:
-            summary["changes"] = promote.apply(cfg, client) + longshot.apply_longshot(cfg, client)
-        except Exception as e:
-            summary.update(ok=False, promote_error=str(e)[:500])
-            log.error("research promote failed: %s", traceback.format_exc())
-        summary["duration"] = round(time.time() - t0, 1)
-        text = json.dumps(summary, default=str)
-        db.insert("runs", kind="research", ok=int(summary["ok"]), duration=summary["duration"], message=text[:4000])
-        db.put("last_research", {"ts": time.time(), **json.loads(text)})
+        # One exchange for the whole run (it can take an hour or two): a switch meanwhile must
+        # not send one exchange's prices, edges or promotions into the other's files or db.
+        with db.pinned(cfg.get("env", "prod")):
+            try:
+                client = client or Kalshi.from_env(config.home(), cfg["env"])
+                summary.update(discover.run(client, cfg, quick=quick))
+            except Exception as e:
+                summary.update(ok=False, error=f"discovery failed: {e}"[:500])
+                log.error("research discovery failed: %s", traceback.format_exc())
+            summary["longshot"] = longshot.run(client, cfg, quick=quick)  # never raises
+            try:
+                summary["changes"] = promote.apply(cfg, client) + longshot.apply_longshot(cfg, client)
+            except Exception as e:
+                summary.update(ok=False, promote_error=str(e)[:500])
+                log.error("research promote failed: %s", traceback.format_exc())
+            summary["duration"] = round(time.time() - t0, 1)
+            text = json.dumps(summary, default=str)
+            db.insert("runs", kind="research", ok=int(summary["ok"]), duration=summary["duration"],
+                      message=text[:4000])
+            db.put("last_research", {"ts": time.time(), **json.loads(text)})
     finally:
         fcntl.flock(lock, fcntl.LOCK_UN)
         lock.close()

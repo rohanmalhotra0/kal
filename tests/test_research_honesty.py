@@ -454,3 +454,29 @@ class RestartTests(TempHome):
                 running = clock.t + H
             clock.t += 60
         self.assertGreaterEqual(done, 27, (done, killed))
+
+
+class ResearchKeepsOneExchangeTests(TempHome):
+    def test_a_switch_during_research_cant_send_its_results_to_the_other_exchange(self):
+        # Research can take an hour or two. Started on prod, it keeps prod's folder and db even
+        # if someone switches to demo meanwhile (round-3 supervisor review).
+        import os
+        from unittest import mock
+        from kal import config, db, research
+        from kal.research import discover, longshot, promote
+
+        def discover_then_switch(client, cfg, quick=False):
+            config.update({"env": "demo"})          # someone switches mid-run
+            discover._save("edges.json", [{"id": "S:0.90-0.95"}])
+            return {"tested": ["S"]}
+        with mock.patch.object(discover, "run", discover_then_switch), \
+                mock.patch.object(longshot, "run", return_value={"ok": True}), \
+                mock.patch.object(promote, "apply", return_value=[]), \
+                mock.patch.object(longshot, "apply_longshot", return_value=[]):
+            research.run_all(client=object())
+        self.assertTrue(os.path.exists(os.path.join(config.home(), "research", "edges.json")))
+        self.assertFalse(os.path.exists(os.path.join(config.home(), "research-demo", "edges.json")))
+        with db.pinned("prod"):
+            self.assertEqual(len(db.query("SELECT * FROM runs WHERE kind = 'research'")), 1)
+        with db.pinned("demo"):
+            self.assertEqual(db.query("SELECT * FROM runs WHERE kind = 'research'"), [])
