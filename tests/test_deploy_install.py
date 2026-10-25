@@ -82,6 +82,47 @@ class InstallHelpers(unittest.TestCase):
         self.assertFalse(os.path.exists(os.path.join(sshd, "10-kal.conf")))
         self.assertIn("STILL ON", r.stdout)
 
+    # ---- a new server's own updates hold apt's locks: wait, don't stop ----
+    def _apt(self, fails, error="E: Could not get lock /var/lib/apt/lists/lock"):
+        """Run --apt-update with a fake apt-get that fails `fails` times, then works."""
+        bindir = os.path.join(self.d, "bin")
+        calls = os.path.join(self.d, "apt.log")
+        _write(os.path.join(bindir, "apt-get"),
+               f'#!/bin/sh\necho "$*" >> {calls}\n'
+               f'n=$(wc -l < {calls})\n[ "$n" -gt {fails} ] && exit 0\n'
+               f'echo "{error}" >&2\nexit 100\n', x=True)
+        env = dict(PATH=bindir + ":/usr/bin:/bin", KAL_APT_TRIES="4", KAL_APT_PAUSE="0")
+        r = self._emit("--apt-update", env)
+        return r, _read(calls).splitlines()
+
+    def test_apt_waits_while_ubuntu_updates_itself(self):
+        r, calls = self._apt(fails=2)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(len(calls), 3)
+        for c in calls:   # every try also waits on the lock itself
+            self.assertEqual(c, "-o DPkg::Lock::Timeout=600 update -qq")
+        self.assertEqual(r.stdout.count("Ubuntu is busy updating itself"), 1)   # said once
+        self.assertNotIn("Could not get lock", r.stdout + r.stderr)
+
+    def test_apt_shows_any_other_error(self):
+        r, calls = self._apt(fails=1, error="E: Failed to fetch http://archive.ubuntu.com 404")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("Failed to fetch", r.stderr)
+        self.assertNotIn("Ubuntu is busy", r.stdout)
+
+    def test_apt_gives_up_in_plain_words(self):
+        r, calls = self._apt(fails=99)
+        self.assertEqual(r.returncode, 1)
+        self.assertEqual(len(calls), 4)
+        self.assertIn("STOP: apt-get update keeps failing. Wait 5 minutes", r.stderr)
+
+    def test_no_apt_call_skips_the_wait(self):
+        with open(INSTALL) as f:
+            lines = [ln for ln in f if not ln.lstrip().startswith("#")]
+        bare = [ln for ln in lines if re.search(r"^\s*(if\s+)?apt-get\s", ln)]
+        self.assertEqual(bare, [])
+        self.assertTrue(any(re.search(r"^\s*apt_get install .*python3-venv", ln) for ln in lines))
+
     # ---- finding 6: the kal wrapper must never die on a bad settings line ----
     def _wrapper(self):
         path = os.path.join(self.d, "kal")
