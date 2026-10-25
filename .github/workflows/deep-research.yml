@@ -28,8 +28,8 @@ jobs:
           python-version: "3.12"
           cache: pip
       - run: pip install -r requirements.txt
-      - name: 6 hours before close
-        run: python tools/deep_research.py --hours 6 --series-per-category 10 --markets-per-series 150 --max-minutes 150
+      - name: 6 hours before close (busiest active series)
+        run: python tools/deep_research.py --active --hours 6 --series-per-category 25 --markets-per-series 300 --max-minutes 150
       - uses: actions/upload-artifact@v4
         if: always()
         with:

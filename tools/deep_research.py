@@ -67,17 +67,30 @@ def main():
     ap.add_argument("--hours", type=float, default=6)
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--max-minutes", type=float, default=150)
+    ap.add_argument("--active", action="store_true", help="busiest active series instead of a random sample")
     args = ap.parse_args()
     t0 = time.time()
     client = Kalshi()
+    info = {s["ticker"]: s for s in client.series() if s.get("ticker")}
     by_cat = collections.defaultdict(list)
-    for s in client.series():
-        if s.get("ticker") and s.get("category") and not s["ticker"].startswith("KXMVE"):
-            by_cat[s["category"]].append(s["ticker"])
+    if args.active:
+        # The busiest series with open markets, by 24h volume: where an edge could be traded.
+        from kal.research.discover import active_series
+        for t in active_series(client, pool=2000):
+            s = info.get(t, {})
+            if s.get("category") and s.get("frequency") != "one_off":
+                by_cat[s["category"]].append(t)  # already busiest first
+    else:
+        for t, s in info.items():
+            if s.get("category") and not t.startswith("KXMVE"):
+                by_cat[s["category"]].append(t)
     rng = random.Random(args.seed)
     obs_by_cat = {}
     for cat in sorted(by_cat, key=lambda c: -len(by_cat[c])):
-        picked = rng.sample(sorted(by_cat[cat]), min(args.series_per_category, len(by_cat[cat])))
+        if args.active:
+            picked = by_cat[cat][:args.series_per_category]
+        else:
+            picked = rng.sample(sorted(by_cat[cat]), min(args.series_per_category, len(by_cat[cat])))
         obs = []
         for s in picked:
             if time.time() - t0 > args.max_minutes * 60:
