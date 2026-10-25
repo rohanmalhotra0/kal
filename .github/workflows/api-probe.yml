@@ -1,16 +1,17 @@
 # Side branch only (probe/xvenue), never merged. Public data only: no key, no orders.
+# Saves the public market data it reads to probe-data/ on this same branch.
 name: api-probe
 
 on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   probe:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 45
     env:
       KAL_HOME: ./state
       PYTHONUNBUFFERED: "1"
@@ -21,3 +22,11 @@ jobs:
           python-version: "3.12"
       - run: pip install -r requirements.txt
       - run: python tools/xvenue_probe.py
+      - name: Save probe data to this branch
+        if: always()
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898333+github-actions[bot]@users.noreply.github.com"
+          git add probe-data
+          git commit -m "probe data (public market data, side branch only)" || exit 0
+          git push origin HEAD:probe/xvenue
