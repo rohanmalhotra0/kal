@@ -2,6 +2,17 @@
 
 Newest first. Each 2-hour check-in adds one entry: what it checked, what it found, links.
 
+## 2026-10-25 01:35 UTC — test order before real money
+
+- **No real money until Kalshi accepts one $0.01 test order** for this key and exchange
+  (buy 1 YES where sellers ask $0.10+, so it can't fill). A new key, a new exchange, or
+  any refused order means a new test. Until then, live strategies trade on paper.
+- Real API (9,000 settled markets): every one was a plain yes/no binary. No voided or
+  scalar settlements seen; the bot still books them by payout, or stops if unreadable.
+- Fees: 15,197 series use the normal taker fee; 32 pay half or none. The bot always
+  assumes the full fee, so it never overrates a trade. Order books come as
+  `orderbook_fp` with dollar strings; the bot reads both shapes.
+
 ## 2026-10-25 01:20 UTC — first deep backtest (real history)
 
 - 1,677 priced markets, 332 events, 19 categories (random series; many had no data).
