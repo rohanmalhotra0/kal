@@ -11,7 +11,7 @@ import unittest
 from datetime import datetime, timezone
 from unittest import mock
 
-from kal import config, db, engine, paper
+from kal import config, db, engine, paper, risk
 from kal.client import fee, price
 from kal.strategies import MODULES, basket_arb, bracket_arb, ladder_arb
 from kal.strategies.base import Context, Leg, fair_price_only_if_cancelled, plain_payouts
@@ -662,9 +662,17 @@ class PlainPayoutTests(unittest.TestCase):
             m["rules_primary"] = "If this team wins, Yes. " + self.GAME
         sigs = basket_arb.STRATEGY.scan(ctx)
         self.assertEqual(len(sigs), 1)
-        self.assertIs(sigs[0].meta["paper_only"], True)
-        self.assertIn("paper only", sigs[0].note)
-        self.assertEqual((sigs[0].cost, sigs[0].payout_min), (plain[0].cost, plain[0].payout_min))
+        s = sigs[0]
+        self.assertIs(s.meta["paper_only"], True)
+        self.assertIn("paper only", s.note)
+        # Not locked in: a bet with $0 as its worst case, sized and checked like one.
+        self.assertFalse(s.guaranteed)
+        self.assertEqual((s.payout_min, s.max_loss), (0.0, s.cost))
+        self.assertLessEqual(s.cost, config.DEFAULTS["max_per_trade"])
+        self.assertGreater(plain[0].cost, config.DEFAULTS["max_per_trade"])      # the plain one could use $30
+        self.assertGreater(s.meta["pays_if_played"], s.cost)
+        self.assertAlmostEqual(s.exp_profit, s.meta["pays_if_played"] - s.cost)
+        self.assertIsNone(risk.Limits(dict(config.DEFAULTS), 1000).refuse(s))  # passes the bet limits
         c.event_list[0]["markets"][1]["rules_secondary"] = self.DEATH   # any other clause: skipped
         self.assertEqual(basket_arb.STRATEGY.scan(ctx), [])
 

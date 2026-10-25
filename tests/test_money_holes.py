@@ -6,7 +6,7 @@ from unittest import mock
 
 import requests
 
-from kal import client, config, db, engine, ledger, maintenance, risk
+from kal import client, config, db, engine, ledger, maintenance, paper, risk
 from kal.client import KalshiError
 from kal.strategies import basket_arb
 from tests.fakes import FakeKalshi
@@ -68,9 +68,10 @@ class LiveBasketTests(TempHome):
         self.assertTrue(s["ok"], s)
         self.assertEqual((s["live_trades"], s["paper_trades"]), (0, 1))
         self.assertEqual(list(c.orders), [])                      # not one real order
-        row = db.query("SELECT mode, status, meta FROM signals")[0]
-        self.assertEqual((row["mode"], row["status"]), ("paper", "accepted"))
+        row = db.query("SELECT mode, status, guaranteed, meta FROM signals")[0]
+        self.assertEqual((row["mode"], row["status"], row["guaranteed"]), ("paper", "accepted", 0))
         self.assertIs(json.loads(row["meta"])["paper_only"], True)
+        self.assertGreater(paper.open_directional(), 0)   # counts against the bet exposure cap
         # The same event without the clause trades for real, as before.
         for m in c.event_list[0]["markets"]:
             del m["rules_primary"]
