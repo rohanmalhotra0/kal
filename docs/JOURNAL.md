@@ -2,6 +2,20 @@
 
 Newest first. Each 2-hour check-in adds one entry: what it checked, what it found, links.
 
+## 2026-10-25 21:35 UTC — PR #24 merged: 5 more holes closed after a review of PR #23
+
+- An independent review of PR #23's new code proved 5 holes, each with a failing test. All
+  fixed in PR #24 (c32c0c4), 784 tests pass, CI green:
+  - a part sale was written off twice at settlement;
+  - with no key, live payouts were booked without checking Kalshi's fills;
+  - a demo round trip ignored the modes chosen on prod (basket_arb paper could come back live);
+  - an order lookup that said only "canceled" was read as 0 filled;
+  - a restored winning bet settling tripped the daily stop.
+- The $0.01 test-order pass is now version 3, so older passes are proved again.
+- Paused new swarms and research: the account is near its weekly limit (resets Thursday).
+- Next: the owner's `sudo kal doctor` output from the server.
+  https://github.com/rohanmalhotra0/kal/pull/24
+
 ## 2026-10-25 21:10 UTC — anchors hold after closes; 9 hours of arbitrage watches found nothing
 
 - PR #23 merged (8ce7926). CI and market-check green on it.
