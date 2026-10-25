@@ -25,14 +25,17 @@ from collections import defaultdict
 from .. import config, db
 from ..client import Kalshi, UnknownSettlement, candle_close, fee, num, ts, yes_payout
 from ..strategies import favorites
+from ..strategies.base import scheduled_end
 from ..strategies.mentions import MAX_PER_TRADE, MIN_HISTORY, mention_side, word_estimate, word_of
 
 BUCKETS = [0, 0.05, 0.10, 0.20, 0.30, 0.40, 0.50, 0.60, 0.70, 0.80, 0.90, 0.95, 1.0]
-MIN_VOLUME = 100            # settled markets almost nobody traded tell us little
+BUSY = favorites.MIN_VOLUME_24H   # contracts traded in the day before the decision, as the live strategies ask
 MIN_TRADES, MIN_EVENTS = 30, 10   # events: series-days (see group)
 MARGINS = [0.10, 0.15, 0.20, 0.25]
 ALPHA = 0.05                # 95% confidence, before the Bonferroni split
 LOOKBACK_HOURS = 12         # an older price is too stale to call "the price at decision time"
+VOLUME_HOURS = 24           # "busy" is measured over the day before the decision
+LEARN_LAG = 3600            # a mention event's words are known an hour after its scheduled end
 CACHE_MAX = 3000            # markets kept per series: as many as any backtest here asks for
 
 log = logging.getLogger(__name__)
@@ -53,9 +56,10 @@ def folder(name, env=None):
 def decision_time(m, hours_before_close=6, hours_after_open=None, anchor=None):
     """Unix time we'd have decided at, or None if the market wasn't open then.
 
-    `anchor` is the event's scheduled close (see event_anchors). Using each market's own
-    close_time would leak the outcome: a mention market closes early when the word is
-    said, so its "6 hours before close" would sit right before the YES."""
+    `anchor` is the market's scheduled end (see anchors). Using its own close_time would
+    leak the outcome: a mention market closes early when the word is said, so its "6
+    hours before close" would sit right before the YES. A market that had already closed
+    by then is skipped, as the bot would have found it closed."""
     try:
         open_t, close_t = ts(m["open_time"]), ts(m["close_time"])
     except (KeyError, TypeError, ValueError, AttributeError):
@@ -67,42 +71,71 @@ def decision_time(m, hours_before_close=6, hours_after_open=None, anchor=None):
     return int(t) if open_t < t < close_t else None
 
 
-def event_anchors(markets):
-    """{event: scheduled close} = the latest close_time among the event's markets that
-    can't close early. Those closed on schedule, so they show it even when their siblings
-    closed early on the news.
-
-    An event whose markets can all close early is left out (and so never tested): its
-    latest close may be the news itself. In "Will X happen by day 1/2/3?" every market
-    closes on the same headline, and deciding 6 hours before that is peeking. It's left
-    out whatever it settled, so the events that stay are a fair sample. Kalshi sends
-    can_close_early on every market; one without it counts as can't."""
+def anchors(markets, strikes=None):
+    """{ticker: scheduled end}, from times Kalshi set when it listed each market
+    (base.scheduled_end; `strikes` is {event: strike_date}), never from when a market
+    really closed. Each market has its own: an event's latest end would depend on which
+    of its markets had settled when research ran. In "Will X happen by day 1/2/3?" day 1
+    would be tested only if it settled NO before the news, a fake NO edge. A market
+    that shows no such time is left out, whatever it settled."""
+    strikes = strikes or {}
     out = {}
     for m in markets:
-        if m.get("can_close_early") is True:
-            continue
-        try:
-            t = ts(m["close_time"])
-        except (KeyError, TypeError, ValueError, AttributeError):
-            continue
-        ev = m.get("event_ticker") or m.get("ticker")
-        out[ev] = max(out.get(ev, t), t)
+        end = scheduled_end(m, strikes.get(m.get("event_ticker")))
+        if end is not None and m.get("ticker"):
+            out[m["ticker"]] = end
     return out
 
 
-def snapshot(client, series, m, hours_before_close=6, hours_after_open=None, anchor=None):
-    """(yes_ask, yes_bid) from the last candle that ENDED by the decision time.
-    Later candles are dropped even if the API sends them: that's the no-look-ahead rule."""
+def strike_dates(client, series, markets):
+    """{event: strike_date} for the events of these settled markets. Weather, indexes and
+    crypto stop trading at their event's strike_date, and settled markets don't carry it.
+    A failed lookup returns what it has: those events fall back to their markets' own
+    times, which for weather sit after the close, so they're skipped, never misdated."""
+    want = {m.get("event_ticker") for m in markets if m.get("event_ticker")}
+    out = {}
+    if not want:
+        return out
+    try:
+        for ev in client.events(limit=max(200, len(want)), series_ticker=series, status="settled"):
+            if isinstance(ev, dict) and ev.get("event_ticker") in want and ev.get("strike_date"):
+                out[ev["event_ticker"]] = ev["strike_date"]
+    except Exception as e:  # the markets' own times still work for most series
+        log.warning("%s: couldn't list settled events: %s", series, e)
+    return out
+
+
+def _volume(c):
+    for k in ("volume_fp", "volume"):   # live candles send volume_fp, historical ones volume
+        v = c.get(k)
+        if v not in (None, ""):
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                return 0.0
+    return 0.0
+
+
+def snapshot(client, series, m, hours_before_close=6, hours_after_open=None, anchor=None, with_volume=False):
+    """(yes_ask, yes_bid) from the last candle that ENDED by the decision time, at most
+    LOOKBACK_HOURS old. with_volume adds the contracts traded in the VOLUME_HOURS before
+    the decision: (ask, bid, volume). Later candles are dropped even if the API sends
+    them: that's the no-look-ahead rule."""
     t = decision_time(m, hours_before_close, hours_after_open, anchor)
     if t is None:
         return None
-    start = t - LOOKBACK_HOURS * 3600
+    start = t - max(LOOKBACK_HOURS, VOLUME_HOURS) * 3600
     candles = [c for c in client.candles(series, m["ticker"], start, t)
                if isinstance(c.get("end_period_ts"), (int, float)) and start <= c["end_period_ts"] <= t]
     for c in sorted(candles, key=lambda c: -c["end_period_ts"]):
+        if c["end_period_ts"] < t - LOOKBACK_HOURS * 3600:
+            return None   # nothing fresh enough
         ask, bid = candle_close(c, "yes_ask"), candle_close(c, "yes_bid")
         if 0 < ask <= 1 and bid < ask:
-            return ask, bid
+            if not with_volume:
+                return ask, bid
+            day = t - VOLUME_HOURS * 3600
+            return ask, bid, sum(_volume(x) for x in candles if x["end_period_ts"] > day)
     return None
 
 
@@ -114,9 +147,12 @@ def _when(hours_before_close, hours_after_open):
 
 def cache_path(series, hours_before_close=6, hours_after_open=None):
     safe = re.sub(r"[^A-Za-z0-9_.-]", "_", series)
-    # v3: only markets that can't close early set the decision time (v2's could be the
-    # news itself, when every market of an event closed on it)
-    return os.path.join(folder("cache"), f"{safe}_{_when(hours_before_close, hours_after_open)}_v3.json")
+    # v5: every market, with the volume traded in the day before the decision (v4 skipped
+    # markets with little volume over their whole life, known only once they settled).
+    # v4: the decision time comes from times set when the market was listed (v2's could be
+    # the news itself; v3 skipped nearly everything, since Kalshi marks almost every market
+    # as able to close early)
+    return os.path.join(folder("cache"), f"{safe}_{_when(hours_before_close, hours_after_open)}_v5.json")
 
 
 def _read_cache(path):
@@ -165,7 +201,7 @@ def load_observations(client, series, hours_before_close=6, hours_after_open=Non
         new, errors, last_error, listed = 0, 0, None, set()
         try:
             settled = list(client.settled_markets(series, max_markets))
-            anchors = event_anchors(settled)
+            ends = anchors(settled, strike_dates(client, series, settled))
             for m in settled:
                 tk = m.get("ticker")
                 listed.add(tk)
@@ -173,15 +209,19 @@ def load_observations(client, series, hours_before_close=6, hours_after_open=Non
                     value = yes_payout(m)  # 1, 0, or in between: cancelled games really pay $0.33
                 except UnknownSettlement:
                     value = None
-                if not tk or tk in cache or value is None or num(m, "volume") < MIN_VOLUME:
+                # No filter on the market's total volume: it's known only once it settles,
+                # and markets far from the result go quiet, so it would drop mostly losers.
+                if not tk or tk in cache or value is None:
                     continue
                 res = m["result"] if m.get("result") in ("yes", "no") else "scalar"
                 ev = m.get("event_ticker") or tk
-                anchor = anchors.get(ev)
+                anchor = ends.get(tk)
                 if anchor is None and hours_after_open is None:
-                    continue  # nothing shows the scheduled close: its closes may be the outcome
+                    continue  # nothing shows the scheduled end: its closes may be the outcome
+                if decision_time(m, hours_before_close, hours_after_open, anchor) is None:
+                    continue  # not cached: a strike date found later may give it a time
                 try:
-                    snap = snapshot(client, series, m, hours_before_close, hours_after_open, anchor)
+                    snap = snapshot(client, series, m, hours_before_close, hours_after_open, anchor, with_volume=True)
                 except Exception as e:  # one market's candles failing shouldn't sink the series
                     errors, last_error = errors + 1, e
                     if errors >= 10 and errors > new:
@@ -193,16 +233,23 @@ def load_observations(client, series, hours_before_close=6, hours_after_open=Non
                     "series": series, "event": ev, "ticker": tk,
                     "word": word_of(m), "close": ts(m["close_time"]), "anchor": anchor,
                     "decided": decision_time(m, hours_before_close, hours_after_open, anchor),
-                    "yes_ask": snap[0], "yes_bid": snap[1], "result": res, "yes_value": value}
+                    "yes_ask": snap[0], "yes_bid": snap[1], "volume": snap[2], "result": res, "yes_value": value}
         finally:
             if new:  # Kalshi lists up to max_markets recent ones plus as many from /historical
                 cache = _write_cache(path, cache, max(CACHE_MAX, 2 * max_markets), listed)
-                old = path[:-len("_v3.json")] + "_v2.json"
-                if os.path.exists(old):
-                    os.remove(old)  # the old format, never read again: free the disk
+                for v in ("_v2.json", "_v3.json", "_v4.json"):
+                    old = path[:-len("_v5.json")] + v
+                    if os.path.exists(old):
+                        os.remove(old)  # an old format, never read again: free the disk
         if errors:
             log.warning("%s: %d markets skipped (candles failed): %s", series, errors, last_error)
     return sorted((o for o in cache.values() if _priced(o)), key=lambda o: (o["close"], o["ticker"]))
+
+
+def busy(obs):
+    """The rows the live strategies could have traded: BUSY+ contracts traded in the day
+    before the decision (they check volume_24h the same way)."""
+    return [o for o in obs if (o.get("volume") or 0) >= BUSY]
 
 
 # ---------- statistics ----------
@@ -316,9 +363,11 @@ def is_edge(row):
 
 
 def mention_test(obs, margin):
-    """Walk forward through time: price each word from events that had already closed by
-    the decision time, trade when history and the market disagree by `margin`, and only
-    learn an event's results once it has closed."""
+    """Walk forward through time: price each word from events already over by the decision
+    time, trade when history and the market disagree by `margin`, and only learn an
+    event's results once it's over: LEARN_LAG after the later of its markets' close and
+    scheduled end. Mention markets can close before the event ends, and the words are
+    only known after it."""
     hist = defaultdict(lambda: [0, 0])    # (series, word) -> [hits, n]
     base = defaultdict(lambda: [0, 0])    # series -> [hits, n]
     trades = []
@@ -331,13 +380,13 @@ def mention_test(obs, margin):
         # event can never learn from itself.
         return min(o.get("decided") or o["close"] - 1 for o in by_event[e])
 
-    def closed(e):
-        return max(o["close"] for o in by_event[e])
+    def known(e):
+        return max(max(o["close"], o.get("anchor") or 0) for o in by_event[e]) + LEARN_LAG
 
-    pending = sorted(by_event, key=lambda e: (closed(e), e))  # not yet learned, by close
+    pending = sorted(by_event, key=lambda e: (known(e), e))  # not yet learned, by when known
     for event in sorted(by_event, key=lambda e: (decided(e), e)):
         now = decided(event)
-        while pending and closed(pending[0]) <= now:
+        while pending and known(pending[0]) <= now:
             for o in by_event[pending.pop(0)]:
                 if o["result"] not in ("yes", "no"):
                     continue  # a cancelled market says nothing about the word
@@ -407,9 +456,11 @@ def run(series, hours_before_close=6, hours_after_open=None, client=None, refres
     obs = []
     for s in series:
         obs += load_observations(client, s, hours_before_close, hours_after_open, max_markets, refresh)
-    rows = calibration(obs)
-    mentions = mention_backtest(obs)
-    results = {"observations": len(obs), "events": len({o["event"] for o in obs}), "calibration": rows,
+    traded = busy(obs)                # prices: only what the live strategies could have traded
+    rows = calibration(traded)
+    mentions = mention_backtest(obs)  # words: every market
+    results = {"observations": len(obs), "events": len({o["event"] for o in obs}), "busy": len(traded),
+               "busy_min": BUSY, "calibration": rows,
                "edges": [r for r in rows if is_edge(r)],
                "mentions": {"best": mentions["best"], "margins": mentions["margins"]}}
     record("manual", {"series": list(series), "hours_before_close": hours_before_close,

@@ -1,13 +1,14 @@
 # Checks the bot against the REAL Kalshi API, with no secrets and no orders.
 # The selftest catches renamed fields; the scan shows what each strategy sees today;
-# research --quick proves backtests still parse real settled markets.
+# research --quick proves backtests still parse real settled markets, and the coverage
+# check fails if research stops pricing them (a rule skipping them all looks "safe").
 name: market-check
 
 on:
   workflow_dispatch:
   push:
     branches: [main]
-    paths: ["kal/**"]
+    paths: ["kal/**", "tools/coverage_check.py"]
   schedule:
     - cron: "17 13 * * *"   # once a day
 
@@ -43,6 +44,10 @@ jobs:
       - name: Research (quick)
         if: success() || failure()
         run: python -m kal research --quick
+
+      - name: Research still prices real markets
+        if: success() || failure()
+        run: python tools/coverage_check.py
 
       - name: Save research results
         if: always()
