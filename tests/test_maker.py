@@ -68,10 +68,19 @@ class FillRuleTests(unittest.TestCase):
                 else:
                     self.assertGreater(1 - p, bid)   # our NO bid is a YES ask over the YES bid
 
-    def test_maker_fee_is_a_quarter_of_the_taker_fee(self):
-        self.assertAlmostEqual(maker.maker_fee(0.5), 0.004375)
+    def test_a_one_contract_fill_pays_its_series_maker_fee_rounded_up(self):
         for p in (0.03, 0.5, 0.9, 0.99):
-            self.assertAlmostEqual(maker.maker_fee(p), fee_per_contract(p) / 4)
+            self.assertEqual(maker.maker_fee(p), 0.01)      # a whole cent where makers pay
+            self.assertEqual(maker.maker_fee(p, 0.0), 0.0)  # nothing where they don't
+            self.assertGreaterEqual(maker.maker_fee(p), fee_per_contract(p) / 4)
+        c = FakeKalshi(can_trade=False)
+        self.assertEqual(maker.maker_rate(c, "S"), 0.0)     # plain "quadratic": takers pay, makers don't
+        c.series_fees["S"] = {"fee_type": "quadratic_with_maker_fees", "fee_multiplier": 1}
+        self.assertEqual(maker.maker_rate(c, "S"), maker.MAKER_FEE_RATE)
+        c.series_fees["S"] = {"fee_type": "something_new", "fee_multiplier": 1}
+        self.assertEqual(maker.maker_rate(c, "S"), maker.MAKER_FEE_RATE)   # unknown: assume it charges
+        c.series_info = mock.Mock(side_effect=OSError("down"))
+        self.assertEqual(maker.maker_rate(c, "S"), maker.MAKER_FEE_RATE)   # unreadable: same
 
 
 class WindowTests(unittest.TestCase):
@@ -138,6 +147,7 @@ class LoadTests(TempHome):
         calls = self.counting(c)
         got = maker.load(c, "S", 6)
         self.assertEqual([(o["lo"], o["hi"]) for o in got], [(0.85, 0.95)] * 3)
+        self.assertEqual({o["maker_rate"] for o in got}, {0.0})   # the fake's series charge takers only
         self.assertEqual(len(calls), 6)          # a price snapshot and a window per market
         self.assertEqual(maker.load(c, "S", 6), got)
         self.assertEqual(len(calls), 6)          # both cached: settled markets don't change
