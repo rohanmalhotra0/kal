@@ -146,6 +146,16 @@ class OrderTestStateTests(Base):
         self.assertFalse(t["passed"])
         self.assertIn("400 bad field", t["detail"])
 
+    def test_a_pass_saved_before_the_key_id_was_hashed_still_counts(self):
+        """The books hold a hash of the key ID now, not the ID (they are in every backup)."""
+        from kal import gate
+        db.put(gate.KEY, {"ok": True, "fingerprint": "prod:kid-1", "detail": "KXA-1: accepted", "ts": time.time()})
+        with mock.patch.object(dash, "_key_id", return_value="kid-1"):
+            self.assertTrue(self.state()["passed"])
+        with mock.patch.object(dash, "_key_id", return_value="kid-2"):
+            self.assertFalse(self.state()["passed"])
+        self.assertNotIn("kid-1", json.dumps(db.get(gate.KEY)))
+
 
 class StateTests(Base):
     def seed(self):
@@ -848,6 +858,18 @@ class ConfigApiTests(Base):
         self.assertEqual(config.load()["env"], "prod")
         config.update({"enabled": False})
         self.assertEqual(self.post("/api/config", {"env": "demo"}).status_code, 200)
+
+    def test_switching_exchange_waits_for_a_trade_run(self):
+        """Turned off mid-run, the run still finishes its basket: switching then would book
+        the rest of it in the other exchange's books."""
+        with mock.patch.object(config, "SWITCH_WAIT", 0.3), risk.run_lock():
+            r = self.post("/api/config", {"env": "demo"})
+            self.assertEqual(r.status_code, 400)
+            self.assertEqual(r.get_json()["error"], "A trade run is still going. Try again in a minute.")
+            self.assertEqual(self.post("/api/config", {"budget": 40}).status_code, 200)   # other changes don't wait
+        self.assertEqual((config.load()["env"], config.load()["budget"]), ("prod", 40))
+        self.assertEqual(self.post("/api/config", {"env": "demo"}).status_code, 200)
+        self.assertEqual(config.load()["env"], "demo")
 
     def test_off_works_even_with_a_bad_value_in_the_file(self):
         config.update({"budget": 50, "enabled": True})

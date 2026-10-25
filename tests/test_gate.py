@@ -1,3 +1,5 @@
+import json
+import os
 import time
 import unittest
 from unittest import mock
@@ -122,6 +124,49 @@ class GateTests(TempHome):
         engine.run_once(c)
         self.assertEqual(c.orders, [])
         self.assertEqual(db.get(gate.KEY), None)
+
+    # ---------- the key ID stays out of the books (they are in every backup) ----------
+
+    REAL_ID = "1234abcd-12ab-34cd-56ef-1234567890ab"
+
+    def books_text(self):
+        out = ""
+        for suffix in ("", "-wal"):
+            if os.path.exists(db.path() + suffix):
+                with open(db.path() + suffix, "rb") as f:
+                    out += f.read().decode("latin-1")
+        return out
+
+    def test_the_key_id_is_never_stored(self):
+        c = fake_with_probe_market()
+        c.key_id = self.REAL_ID
+        engine.run_once(c)
+        self.assertTrue(gate.passed(c, "prod"))
+        rec = db.get(gate.KEY)
+        self.assertEqual(rec["fingerprint"], gate.fingerprint(self.REAL_ID, "prod"))
+        self.assertRegex(rec["fingerprint"], r"^prod:[0-9a-f]{16}$")
+        self.assertNotIn(self.REAL_ID, json.dumps(rec))
+        self.assertNotIn(self.REAL_ID, self.books_text())
+        other = FakeKalshi()
+        other.key_id = self.REAL_ID[:-1] + "c"
+        self.assertFalse(gate.passed(other, "prod"))   # one character off is another key
+
+    def test_a_pass_saved_before_the_hash_still_counts(self):
+        """Books from before this change say "prod:<key ID>". The owner mustn't be sent back
+        to paper by an upgrade, and the plain ID is rewritten as the hash."""
+        c = fake_with_probe_market()
+        c.key_id = self.REAL_ID
+        db.put(gate.KEY, {"ok": True, "fingerprint": f"prod:{self.REAL_ID}", "detail": "accepted, 0 filled",
+                          "ts": time.time() - 30 * 86400})
+        s = engine.run_once(c)
+        self.assertEqual(self.probes(c), [])           # no new test order
+        self.assertEqual(s["live_trades"], 1, s)       # real money, as before the upgrade
+        self.assertNotIn(self.REAL_ID, json.dumps(db.get(gate.KEY)))
+        self.assertTrue(gate.passed(c, "prod"))
+        self.assertFalse(gate.passed(c, "demo"))
+        db.put(gate.KEY, {"ok": False, "fingerprint": "demo:old-demo-key-99", "detail": "refused", "ts": 0})
+        self.assertEqual(gate.status()["fingerprint"], gate.fingerprint("old-demo-key-99", "demo"))
+        self.assertNotIn("old-demo-key-99", json.dumps(db.get(gate.KEY)))
 
 
 if __name__ == "__main__":

@@ -22,6 +22,7 @@ Modules other people own (dashboard, scheduler, research) are imported only by t
 command that needs them, so a broken dashboard can't stop `off` from working.
 """
 import argparse
+import difflib
 import inspect
 import json
 import logging
@@ -46,9 +47,8 @@ def say(*lines):
 
 
 def _cmd(rest):
-    """How to type a kal command here. The server's `kal` wrapper sets KAL_CMD="sudo kal",
-    so the hints match what the owner really types. (Display only: it changes nothing.)"""
-    return f"{os.environ.get('KAL_CMD') or 'python -m kal'} {rest}"
+    """How to type a kal command here (config.command: the server's wrapper sets KAL_CMD)."""
+    return config.command(rest)
 
 
 def _positive(text):
@@ -74,8 +74,15 @@ def _money(text):
 
 
 def _logging(level=logging.WARNING):
-    if not logging.getLogger().handlers:
-        logging.basicConfig(level=level, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    """Log lines go to stderr through kal.logs' scrubber, for every command: an error can
+    quote a secret (a failed alert's URL holds the topic). Calling it again sets the level."""
+    from .logs import DATE, FORMAT, Formatter
+    root = logging.getLogger()
+    if not root.handlers:
+        h = logging.StreamHandler()
+        h.setFormatter(Formatter(FORMAT, DATE))
+        root.addHandler(h)
+    root.setLevel(level)
 
 
 def _log_to_file():
@@ -427,21 +434,62 @@ def _where(cfg):
     return "demo (fake money)" if cfg["env"] == "demo" else "prod (REAL money)"
 
 
+def _tty():
+    try:
+        return sys.stdin.isatty()
+    except (AttributeError, ValueError):
+        return False
+
+
+def _budget_ok(new, old, env):
+    """True if this budget may be saved. A big raise must be typed twice (kal.setup.big_budget:
+    a slip like 3000 for 300 loosens every money limit). With no terminal to ask in, it is
+    refused rather than accepted."""
+    from . import setup
+    why = setup.big_budget(new, old, env)
+    if not why:
+        return True
+    typed = setup.plain_money(new)
+    if not _tty():
+        say(f"Not changed. {why}", f"To use {setup.dollars(new)}, run this in a terminal and type {typed} again.")
+        return False
+    try:
+        again = input(f"{why} Type {typed} again to confirm: ")
+    except EOFError:
+        again = ""
+    if setup.same_money(again, new):
+        return True
+    say("That doesn't match. Not changed.")
+    return False
+
+
+SWITCH_BUSY = "A trade run is still going. Try again in a minute."
+
+
 def cmd_on(args):
     stored = config.load()
     if stored["disabled_reason"] and not args.clear_trip:
         say(f"It is stopped: {stored['disabled_reason']}",
             f"Find out why first. Then run: {_cmd('on --clear-trip')}")
         return 1
+    env = getattr(args, "env", None)
+    if env and env != stored["env"] and stored["enabled"]:
+        say(f"Turn the bot off first: {_cmd('off')}")   # a run may be mid-basket on this exchange
+        return 2
+    if args.budget is not None and not _budget_ok(args.budget, stored["budget"], env or stored["env"]):
+        return 2
     changes = {"enabled": True}
     if args.budget is not None:
         changes["budget"] = args.budget
-    if getattr(args, "env", None):
-        changes["env"] = args.env
+    if env:
+        changes["env"] = env
     if args.clear_trip:
         changes["disabled_reason"] = ""
     try:
-        cfg = config.update(changes)
+        cfg = config.switch(changes)   # a new exchange waits for a trade run to finish
+    except config.Busy:
+        say(SWITCH_BUSY)
+        return 1
     except ValueError as e:
         say(f"Not changed: {e}")
         return 2
@@ -468,6 +516,31 @@ def _parse_value(text):
         return text
 
 
+def _no_such(what, name, known):
+    near = difflib.get_close_matches(str(name), sorted(known), n=1)
+    return f"No {what} '{name}'." + (f" Did you mean {near[0]}?" if near else "")
+
+
+def _unknown(change):
+    """Why `set` won't take this change, or None. A misspelled name would be saved, say it
+    worked, and change nothing (`set budjet 250`), so only known names get through."""
+    from .strategies import MODULES
+    for key, value in change.items():
+        if key not in config.DEFAULTS:
+            return _no_such("setting", key, config.DEFAULTS)
+        if key != "strategies" or not isinstance(value, dict):
+            continue
+        names = set(MODULES) | set(config.DEFAULTS["strategies"])
+        for name, s in value.items():
+            if name not in names:
+                return _no_such("strategy", name, names)
+            known = {"mode"} | set(config.DEFAULTS["strategies"].get(name, {}))
+            for k in s if isinstance(s, dict) else ():
+                if k not in known:
+                    return _no_such(f"{name} setting", k, known)
+    return None
+
+
 def cmd_set(args):
     """Change one setting, e.g. `set env demo` or `set strategies.ladder_arb.mode live`."""
     path = args.key.split(".")
@@ -478,12 +551,22 @@ def cmd_set(args):
     change = value
     for k in reversed(path):
         change = {k: change}
+    why = _unknown(change)
+    if why:
+        say(why)
+        return 2
     cfg = config.load()
     if path[0] == "env" and cfg["enabled"]:
         say(f"Turn the bot off first: {_cmd('off')}")
         return 2
+    if path == ["budget"] and isinstance(value, (int, float)) and not isinstance(value, bool) \
+            and math.isfinite(value) and not _budget_ok(value, cfg["budget"], cfg["env"]):
+        return 2
     try:
-        new = config.update(change)
+        new = config.switch(change)   # a new exchange waits for a trade run to finish
+    except config.Busy:
+        say(SWITCH_BUSY)
+        return 1
     except (ValueError, TypeError, KeyError) as e:
         say(f"Not changed: {e}")
         return 2
@@ -572,6 +655,7 @@ def main(argv=None):
     if not getattr(args, "fn", None):
         p.print_help()
         return 2
+    _logging()   # every command's log lines are scrubbed of secrets
     return args.fn(args)
 
 

@@ -293,6 +293,119 @@ class CliTests(TempHome):
         self.assertEqual(config.load()["env"], "demo")
         self.assertIn("demo", text)
 
+    def test_set_refuses_names_it_doesnt_know(self):
+        """`set budjet 250` used to say "budjet is now 250." and change nothing."""
+        config.update({"budget": 300})
+        for argv, said in ((("budjet", "250"), "No setting 'budjet'. Did you mean budget?"),
+                           (("daily_los_limit", "0.05"), "Did you mean daily_loss_limit?"),
+                           (("strategies.favorite.mode", "paper"), "No strategy 'favorite'. Did you mean favorites?"),
+                           (("strategies.favorites.mdoe", "paper"), "No favorites setting 'mdoe'. Did you mean mode?"),
+                           (("strategies", '{"favorite": {"mode": "paper"}}'), "Did you mean favorites?"),
+                           (("zzz", "1"), "No setting 'zzz'.")):
+            with self.subTest(argv=argv):
+                code, text = self.cli("set", *argv)
+                self.assertEqual(code, 2)
+                self.assertIn(said, text)
+        self.assertNotIn("Did you mean", self.cli("set", "zzz", "1")[1])   # nothing close: no guess
+        with open(os.path.join(config.home(), "config.json")) as f:
+            saved = json.load(f)
+        self.assertNotIn("budjet", saved)
+        self.assertNotIn("favorite", saved["strategies"])
+        self.assertEqual(config.load()["budget"], 300)
+        self.assertEqual(config.load()["strategies"]["favorites"]["mode"], "paper")
+        self.assertEqual(self.cli("set", "summary_hour_utc", "14")[0], 0)   # docs/DEPLOY.md uses it
+        self.assertEqual(config.load()["summary_hour_utc"], 14)
+        self.assertEqual(self.cli("set", "summary_hour_utc", "25")[0], 2)
+        self.assertEqual(self.cli("set", "strategies.bracket_arb.verified", "true")[0], 0)
+
+    def test_a_big_budget_raise_must_be_typed_twice(self):
+        """A slip (3000 for 300) would quietly loosen the daily stop and the bet caps."""
+        self.assertEqual(self.cli("on", "--budget", "300")[0], 0)   # a first budget, no key: nothing to compare
+        with mock.patch.object(cli, "_tty", return_value=False):
+            code, text = self.cli("on", "--budget", "3000")          # no terminal to ask in: refused
+        self.assertEqual(code, 2)
+        self.assertIn("Not changed. That's more than double the budget now ($300).", text)
+        self.assertEqual(config.load()["budget"], 300)
+        with mock.patch.object(cli, "_tty", return_value=True), \
+                mock.patch("builtins.input", return_value="300") as ask:
+            self.assertEqual(self.cli("set", "budget", "3000")[0], 2)   # typed wrong: not changed
+        self.assertIn("Type 3000 again to confirm", ask.call_args.args[0])
+        self.assertEqual(config.load()["budget"], 300)
+        with mock.patch.object(cli, "_tty", return_value=True), mock.patch("builtins.input", return_value="3,000"):
+            self.assertEqual(self.cli("set", "budget", "3000")[0], 0)
+        self.assertEqual(config.load()["budget"], 3000)
+        with mock.patch("builtins.input", side_effect=AssertionError("lowering never asks")), \
+                mock.patch.object(cli, "_tty", return_value=False):
+            self.assertEqual(self.cli("set", "budget", "250")[0], 0)
+            self.assertEqual(self.cli("on", "--budget", "250")[0], 0)
+        self.assertEqual(config.load()["budget"], 250)
+
+    def test_a_budget_over_the_kalshi_balance_must_be_typed_twice(self):
+        config.update({"budget": 300})
+        with mock.patch("kal.setup.kalshi_balance", return_value=(True, 350.0)) as balance, \
+                mock.patch.object(cli, "_tty", return_value=False):
+            code, text = self.cli("on", "--budget", "400", "--env", "demo")
+        self.assertEqual(code, 2)
+        self.assertIn("Your Kalshi account has $350.", text)
+        balance.assert_called_once_with("demo")   # the exchange it would trade on
+        self.assertEqual((config.load()["env"], config.load()["enabled"]), ("prod", False))
+        with mock.patch("kal.setup.kalshi_balance", return_value=(True, None)), \
+                mock.patch.object(cli, "_tty", return_value=True), \
+                mock.patch("builtins.input", return_value="400") as ask:
+            self.assertEqual(self.cli("on", "--budget", "400")[0], 0)   # can't check it: asks anyway
+        self.assertIn("Can't check your Kalshi balance right now.", ask.call_args.args[0])
+        self.assertEqual(config.load()["budget"], 400)
+
+    def test_on_wont_switch_exchange_under_a_running_bot(self):
+        """A run may be mid-basket: its other legs would land in the other exchange's books."""
+        self.cli("on", "--budget", "10")
+        code, text = self.cli("on", "--env", "demo")
+        self.assertEqual((code, config.load()["env"]), (2, "prod"))
+        self.assertIn("Turn the bot off first: python -m kal off", text)
+        self.assertEqual(self.cli("on", "--env", "prod")[0], 0)   # the exchange it's on already: fine
+        self.cli("off")
+        self.assertEqual(self.cli("on", "--env", "demo")[0], 0)
+        self.assertEqual(config.load()["env"], "demo")
+
+    def test_a_switch_of_exchange_waits_for_a_trade_run(self):
+        from kal import risk
+        with mock.patch.object(config, "SWITCH_WAIT", 0.3), risk.run_lock():
+            for argv in (("set", "env", "demo"), ("on", "--env", "demo")):
+                with self.subTest(argv=argv):
+                    code, text = self.cli(*argv)
+                    self.assertEqual(code, 1)
+                    self.assertIn("A trade run is still going. Try again in a minute.", text)
+        cfg = config.load()
+        self.assertEqual((cfg["env"], cfg["enabled"]), ("prod", False))
+        self.assertEqual(self.cli("set", "env", "demo")[0], 0)   # once the run is done
+        self.assertEqual(config.load()["env"], "demo")
+
+    def test_every_command_scrubs_its_log_lines(self):
+        """CLI runs log to stderr too, and a failed alert's error quotes the secret topic."""
+        import logging
+        import requests
+        root = logging.getLogger()
+        saved = (list(root.handlers), root.level)
+        for h in saved[0]:
+            root.removeHandler(h)
+
+        def put_back():
+            for h in list(root.handlers):
+                root.removeHandler(h)
+            for h in saved[0]:
+                root.addHandler(h)
+            root.setLevel(saved[1])
+        self.addCleanup(put_back)
+        err = io.StringIO()
+        boom = requests.ConnectionError("Max retries exceeded with url: /kal-SECRET-topic-9")
+        with mock.patch("sys.stderr", err), mock.patch.dict(os.environ, {"KAL_NTFY_TOPIC": "kal-SECRET-topic-9"}), \
+                mock.patch("kal.notify.requests.post", side_effect=boom):
+            self.assertEqual(self.cli("summary", "--send")[0], 1)
+            logging.getLogger("kal.test").warning("posting to https://ntfy.sh/kal-SECRET-topic-9")
+        self.assertIn("alert not sent: ConnectionError", err.getvalue())
+        self.assertIn("posting to https://ntfy.sh/[removed]", err.getvalue())
+        self.assertNotIn("SECRET", err.getvalue())
+
     # ---------- upkeep commands ----------
 
     def kalshi_date(self, behind=0):
@@ -952,6 +1065,119 @@ class ReportTests(TempHome):
         with open(os.path.join(self.home, "backups", "2020-01-01", "kal.db"), "w"):
             pass
         self.assertIn("No backup since 2020-01-01.", report.build()["health"])
+
+
+def github_says_401(*a, **k):
+    body = {"message": "Bad credentials", "documentation_url": "https://docs.github.com/rest"}
+    return SimpleNamespace(status_code=401, json=lambda: body, text=json.dumps(body))
+
+
+class StatusReportHealthTests(TempHome):
+    """The 90-day GitHub token runs out and every hourly push gets a 401 (critic repro:
+    repro_token_expiry.py). The 2-hourly check-in reads that report, so `kal health`, the
+    phone and the daily summary must all say so. Never with the token in the text."""
+
+    LINE = ("kal can't post its status report: GitHub said 401 to GET /: Bad credentials. "
+            "Make a new GitHub token: docs/DEPLOY.md step 10")
+
+    def setUp(self):
+        env = mock.patch.dict(os.environ, {"KAL_GITHUB_TOKEN": "github_pat_SECRET_old", "KAL_GITHUB_REPO": "owner/kal",
+                                           "KAL_NTFY_TOPIC": "kal-SECRET-topic-5"})
+        env.start()   # before TempHome, as in ReportTests
+        self.addCleanup(env.stop)
+        super().setUp()
+        disk = mock.patch("kal.maintenance.shutil.disk_usage",
+                          return_value=SimpleNamespace(total=10 ** 12, used=0, free=10 ** 11))
+        clock = mock.patch("kal.maintenance.clock_ok",
+                           lambda *a, **k: {"check": "clock", "ok": True, "level": "ok", "detail": "fine"})
+        for p in (disk, clock):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def pushes(self, hours_ago, github):
+        """The scheduler's hourly report job, run at these many hours ago."""
+        from kal import scheduler
+        s = scheduler.Scheduler(jobs={"report": scheduler.run_report}, threaded=False)
+        now = time.time()
+        for h in hours_ago:
+            with mock.patch("kal.report.requests.request", github), \
+                    mock.patch("kal.report.time.time", return_value=now - h * 3600):
+                s._run("report")
+
+    def failing(self, hours_ago, github=github_says_401):
+        with self.assertLogs("kal.scheduler", "ERROR"):
+            self.pushes(hours_ago, github)
+
+    def test_an_expired_token_is_said_everywhere_but_never_shown(self):
+        from kal import maintenance
+        self.pushes([5], FakeGitHub())    # a good push 5 hours ago, then the token ran out
+        self.failing([4, 3, 2, 1, 0])
+        self.assertEqual(db.query("SELECT COUNT(*) AS n FROM runs WHERE kind = 'report' AND ok = 0")[0]["n"], 5)
+        r = maintenance.report_ok()
+        self.assertEqual((r["level"], r["detail"]), ("warn", self.LINE))
+        with mock.patch("kal.notify.send", return_value=True) as send:
+            maintenance.health()
+            maintenance.health()           # the 10-minute check: one phone alert a day
+        self.assertEqual([c.args for c in send.call_args_list], [("kal warning: report", self.LINE)])
+        _, summary, _ = report.daily()     # the morning summary
+        self.assertIn(self.LINE, summary)
+        out = io.StringIO()
+        with redirect_stdout(out):
+            cli.main(["health"])           # what the owner sees
+        self.assertIn(f"WARN  report: {self.LINE}", out.getvalue())
+        seen = json.dumps(db.get("health")) + json.dumps(db.get(report.PUSH_KEY)) + summary + out.getvalue()
+        self.assertNotIn("SECRET", seen)
+
+    def test_a_fresh_start_or_a_short_blip_is_not_flagged(self):
+        from kal import maintenance
+        self.assertEqual(maintenance.report_ok()["detail"], "not sent yet")
+        self.failing([2, 1])               # never worked yet: 2 failed tries, 2 hours. Not yet.
+        r = maintenance.report_ok()
+        self.assertEqual(r["level"], "ok")
+        self.assertIn("the last try failed (GitHub said 401", r["detail"])
+        self.assertEqual(maintenance.report_ok(time.time() + 3601)["level"], "warn")   # 3 hours of it
+        self.failing([0])
+        self.assertEqual(maintenance.report_ok()["detail"], self.LINE)   # or 3 tries in a row
+        self.assertEqual(maintenance.report_ok(time.time() + 4 * 3600)["level"], "ok")   # stopped trying
+        self.pushes([0], FakeGitHub())     # a push works again
+        self.assertEqual(maintenance.report_ok()["detail"], "sent 0 s ago")
+        self.assertNotIn("can't post", report.daily()[1])
+
+    def test_the_critics_week_of_failed_pushes(self):
+        """repro_token_expiry.py: 168 failed pushes, no clock moving, then health and the
+        morning summary."""
+        from kal import maintenance
+        sent = []
+        self.failing([0] * 168)
+        with mock.patch("kal.notify.send", side_effect=lambda *a, **k: sent.append(a[0]) or True):
+            maintenance.health()
+            _, summary, _ = report.daily()
+        self.assertEqual(sent, ["kal warning: report"])
+        self.assertIn(self.LINE, summary)
+
+    def test_github_out_of_reach_says_it_keeps_trying(self):
+        import requests
+        from kal import maintenance
+        self.pushes([5], FakeGitHub())
+        self.failing([3, 2, 1, 0], mock.Mock(side_effect=requests.ConnectionError("no route to host")))
+        self.assertEqual(maintenance.report_ok()["detail"],
+                         "kal can't post its status report: couldn't reach GitHub: ConnectionError. It keeps trying.")
+
+    def test_a_public_repo_gets_the_right_advice(self):
+        from kal import maintenance
+        self.failing([2, 1, 0], FakeGitHub(private=False))
+        self.assertEqual(maintenance.report_ok()["detail"],
+                         "kal can't post its status report: owner/kal is public, so anyone could read the report. "
+                         "Use a private repo. See docs/DEPLOY.md step 10")
+
+    def test_only_with_a_token(self):
+        from kal import maintenance
+        os.environ.pop("KAL_GITHUB_REPO")
+        self.assertIn("KAL_GITHUB_REPO is not set", maintenance.report_ok()["detail"])
+        os.environ.pop("KAL_GITHUB_TOKEN")
+        self.assertEqual(maintenance.report_ok()["level"], "ok")
+        self.assertNotIn("report", [r["check"] for r in maintenance.checks()])
+        self.assertNotIn("report", [r["check"] for r in maintenance.health()["checks"]])
 
 
 # ---------- deploy and CI files ----------

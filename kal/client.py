@@ -69,7 +69,8 @@ WRITE_PACER = _Pacer(0.11)
 
 def load_key(home=None):
     """(key_id, private_key) from env vars, or the files `kal setup` writes in $KAL_HOME
-    (kalshi_key_id, kalshi.pem), or (None, None)."""
+    (kalshi_key_id, kalshi.pem), or (None, None). Env vars win (CI, Docker and the server's
+    kal.env set them); `kal setup` stops rather than save a key ID that one would override."""
     key_id = os.environ.get("KALSHI_API_KEY_ID")
     id_path = home and os.path.join(home, "kalshi_key_id")
     if not key_id and id_path and os.path.exists(id_path):

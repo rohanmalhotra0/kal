@@ -31,6 +31,7 @@ CONFIG_KEYS = ("enabled", "env", "budget", "reinvest_profits", "cash_floor", "ma
                "paper_bankroll", "disabled_reason")
 REPO = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 HEALTH_FRESH = 3600   # a saved health check older than this is too old to warn from
+PUSH_KEY = "report_push"   # kv: when a push last worked, and the last error (maintenance.report_ok)
 
 log = logging.getLogger(__name__)
 
@@ -311,7 +312,8 @@ def _promoted(start, end):
 
 def daily(now=None):
     """Yesterday (UTC) in a few short lines, for the phone. Returns (title, text, priority):
-    "high" when the bot is stopped, else "low" (no buzz)."""
+    "high" when the bot is stopped, else "low" (no buzz). A status report that can't reach
+    GitHub is named first: the check-in that reads it is blind until it is fixed."""
     from . import maintenance
     now = time.time() if now is None else now
     end = _day_start(now)
@@ -328,7 +330,14 @@ def daily(now=None):
     demo = cfg.get("env") == "demo"
     reason = cfg.get("disabled_reason") or ""
     money = "Demo money" if demo else "Real money"
-    lines = [f"STOPPED: {reason}", "Open the dashboard, find out why, then press Reset.", ""] if reason else []
+    lines = [f"STOPPED: {reason}", *config.STOPPED_HELP.splitlines(), ""] if reason else []
+    try:
+        push = maintenance.report_ok(now)
+    except Exception:
+        log.warning("could not check the status report", exc_info=True)
+        push = None
+    if push and push["level"] != "ok":
+        lines += [push["detail"], ""]
     lines += [
         f"Yesterday ({datetime.fromtimestamp(start, timezone.utc):%a %b %d}, UTC):",
         f"{money}: {_signed(live['p'])} from {_bets(live['n'])}",
@@ -455,7 +464,7 @@ class _GitHub:
         r = requests.request(method, f"{GITHUB_API}/repos/{self.repo}{path}", headers=self.headers,
                              timeout=30, **kw)
         if r.status_code not in ok:
-            raise PushError(f"GitHub said {r.status_code} to {method} {path}: {r.text[:200]}")
+            raise PushError(f"GitHub said {r.status_code} to {method} {path or '/'}: {_why(r)}")
         return r
 
     def is_private(self):
@@ -484,16 +493,59 @@ class _GitHub:
             r = self.call("PUT", f"/contents/{path}", ok=(200, 201, 409, 422), json=body)
             if r.status_code in (200, 201):
                 return
-        raise PushError(f"GitHub kept saying {r.status_code} to PUT /contents/{path}: {r.text[:200]}")
+        raise PushError(f"GitHub kept saying {r.status_code} to PUT /contents/{path}: {_why(r)}")
+
+
+def _why(r):
+    """GitHub's own short reason ("Bad credentials"), else the start of its reply."""
+    try:
+        msg = r.json().get("message")
+    except Exception:
+        msg = None
+    return str(msg)[:200] if msg else r.text[:200]
+
+
+def _note_push(error=None):
+    """Remember how a push went, so `kal health` and the daily summary can say when the
+    report stops reaching GitHub (maintenance.report_ok). Never the token: errors don't hold
+    it, and scrub() would blank it anyway."""
+    try:
+        now = time.time()
+        if error is None:
+            st = {"ok_ts": now}
+        else:
+            st = db.get(PUSH_KEY) or {}
+            st = st if isinstance(st, dict) else {}
+            streak = bool(st.get("error"))   # failing since the last good push already
+            st.update(fail_ts=now, first_fail_ts=(st.get("first_fail_ts") if streak else None) or now,
+                      fails=(int(st.get("fails") or 0) if streak else 0) + 1, error=scrub(str(error))[:200])
+        db.put(PUSH_KEY, st)
+    except Exception:
+        log.warning("could not save how the report push went", exc_info=True)
 
 
 def maybe_push(rep=None):
     """Write report.json and report.md to the "status" branch. False (and no network)
     unless KAL_GITHUB_TOKEN and KAL_GITHUB_REPO (owner/repo) are set. Raises PushError
-    if GitHub refuses, so the scheduler records the failure instead of hiding it."""
+    if GitHub refuses, so the scheduler records the failure instead of hiding it.
+    Each try is noted for maintenance.report_ok()."""
     token, repo = os.environ.get("KAL_GITHUB_TOKEN"), os.environ.get("KAL_GITHUB_REPO")
     if not token or not repo:
         return False
+    try:
+        _push(token, repo, rep)
+    except PushError as e:
+        _note_push(e)
+        raise
+    except Exception as e:
+        _note_push(f"{type(e).__name__}: {e}")
+        raise
+    _note_push()
+    return True
+
+
+def _push(token, repo, rep):
+    """The push itself (maybe_push decides whether to, and notes how it went)."""
     if not REPO.match(repo):
         raise PushError("KAL_GITHUB_REPO must look like owner/repo")
     gh = _GitHub(token, repo)
@@ -505,9 +557,8 @@ def maybe_push(rep=None):
         files = {"report.json": scrub(json.dumps(rep, indent=1, default=str)) + "\n", "report.md": markdown(rep)}
         message = f"Status report {rep.get('generated') or ''}".strip()
         if not gh.branch_exists() and gh.create_branch(files, message):
-            return True
+            return
         for path, text in files.items():
             gh.put(path, text, message)
     except requests.RequestException as e:
         raise PushError(f"couldn't reach GitHub: {type(e).__name__}") from None
-    return True
