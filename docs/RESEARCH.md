@@ -116,7 +116,7 @@ status: **testing** (add the PR link), **built**, or **rejected** (say why in on
 - Risk: high. Better-informed traders pick off resting orders. The engine can't cancel orders. LIP terms change often: check they still apply.
 - Test: paper only. Log would-be quotes. Count a fill when trades go through our price. Score at settlement, plus our LIP share.
 - Backtest: `tools/maker_research.py` (`kal/research/maker.py`). At the decision time, rest a one-contract bid at the best bid (or 1c better). It fills only when a later trade reached it, and every fill pays a maker fee. One contract is a maker's best case, so a price range that loses here loses at any size. A range that wins is only a lead: check it with real trade sizes first.
-- Result (4,103 markets, 216 category-days, 6 h before the end): no lead. Best: NO bids at 90-95c, +2.3% (worst case -20%). Most ranges lose even in this best case. Fills come when the price runs through the bid (a 95c+ NO bid filled 9% of the time). Not worth the engine work now.
+- Result (4,633 markets, 224 category-days, 6 h before the end, each series' own maker fee): no lead. Best: NO bids at 90-95c, +2.4% (worst case -20%). Most ranges lose even in this best case. Fills come when the price runs through the bid (a 95c+ NO bid filled about 1 time in 10). Not worth the engine work now.
 - LIP (checked 2026-10-25): still running. An amended version starts 2026-10-28 (CFTC filing). It takes a snapshot every second and scores resting orders by size and distance from the best price. A snapshot counts only with qualifying YES and NO bids. The exact formula and pool sizes weren't found. It's the one thing that could change the verdict above.
 
 **11. Other venues as a fair-price guide** - untested
