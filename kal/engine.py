@@ -12,7 +12,7 @@ import time
 import traceback
 import uuid
 
-from . import config, db, gate, ledger, paper, risk, sizing
+from . import config, db, flow, gate, ledger, paper, risk, sizing
 from .client import Kalshi, KalshiError, UnknownSettlement, fee, filled, is_transient, resting
 from .strategies import load_all
 from .strategies.base import Context
@@ -363,6 +363,8 @@ def _run(client, cfg, summary):
                     continue
             limits = live_limits if sig_live else paper_limits
             reason = limits.refuse(sig)
+            if not reason and not sig.guaranteed:
+                reason = flow.veto(client, sig)  # paper too, so practice results match real ones
             sid = db.insert("signals", strategy=name, event=sig.event, title=sig.title,
                             mode="live" if sig_live else "paper",
                             guaranteed=int(sig.guaranteed), cost=sig.cost, payout_min=sig.payout_min,

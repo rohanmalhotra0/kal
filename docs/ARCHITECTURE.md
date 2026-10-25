@@ -71,6 +71,9 @@ tests/            unittest; tests/fakes.py has FakeKalshi, tests/helpers.py has 
 - An order whose reply was lost is marked `unknown`; the next run looks it up on
   Kalshi (by client_order_id) before trading. Can't tell yet -> no live trading.
 - An order left resting -> cancelled, and the bot trips.
+- Bets (never locked-in trades) are skipped when the last hour of public trades on that
+  market went 70%+ the other way, or one big trade (5x the median, $50+) just did
+  (`kal/flow.py`). Paper too, so practice matches real. Unreadable trades -> skip.
 - No real money until Kalshi accepts one $0.01 test order (`kal/gate.py`): buy 1 YES,
   immediate-or-cancel, where the cheapest seller asks $0.10+, so it can't fill. Needed
   again for a new key or exchange, or after Kalshi refuses any order. Until it passes,

@@ -1,4 +1,5 @@
 """An in-memory stand-in for kal.client.Kalshi. Tests set its fields directly."""
+from kal.client import ts as _ts
 
 
 class _OrderLog(list):
@@ -30,6 +31,7 @@ class FakeKalshi:
         self.orders = _OrderLog(self)  # every buy() call; also callable as the orders() lookup
         self.order_list = []          # what the orders() lookup returns (for reconciliation)
         self.cancelled = []
+        self.trade_list = {}          # ticker -> public trades, for the informed-flow check
         self.fill = lambda ticker, side, count, price: count  # override to simulate partial fills
 
     def events(self, **params):
@@ -37,6 +39,10 @@ class FakeKalshi:
 
     def markets(self, limit=None, **params):
         return self.market_list
+
+    def trades(self, ticker, min_ts=None, limit=500):
+        return [t for t in self.trade_list.get(ticker, [])
+                if min_ts is None or _ts(t["created_time"]) >= min_ts]
 
     def markets_by_ticker(self, tickers):
         return {t: self.market_info[t] for t in tickers if t in self.market_info}

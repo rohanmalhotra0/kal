@@ -163,6 +163,14 @@ class Kalshi:
     def markets(self, limit=None, **params):
         return self.paginate("/markets", "markets", {"limit": 1000, **params}, limit)
 
+    def trades(self, ticker, min_ts=None, limit=500):
+        """Public trades in one market, newest first. Each says which side its taker bought
+        (taker_side), how many (count_fp) and when (created_time)."""
+        params = {"ticker": ticker, "limit": min(limit, 1000)}
+        if min_ts:
+            params["min_ts"] = int(min_ts)
+        return self.paginate("/markets/trades", "trades", params, limit)
+
     def markets_by_ticker(self, tickers):
         """{ticker: market}. Batches with tickers=, then fetches any it missed one by one:
         the real API returned nothing for some tickers in a batch, and a position we can't
