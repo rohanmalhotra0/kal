@@ -1256,6 +1256,14 @@ class DeployFileTests(unittest.TestCase):
         self.assertNotIn("\nKAL_NTFY_TOPIC=", sh)
         self.assertTrue(os.access(os.path.join(ROOT, "deploy", "install.sh"), os.X_OK))
 
+    def test_readme_lists_every_strategy(self):
+        # The owner reads the README's table to see what can trade and how. A strategy left out
+        # of it is one they don't know is running.
+        from kal.strategies import MODULES
+        rows = [line for line in read("README.md").splitlines() if line.startswith("| `")]
+        for name in MODULES:
+            self.assertTrue(any(line.startswith(f"| `{name}` |") for line in rows), name)
+
     def test_docs_cover_the_basics(self):
         docs = read("docs", "DEPLOY.md")
         for bit in ("ntfy", "KAL_NTFY_TOPIC", "kal set env demo", "kal set env prod", "kal on --budget 300",
