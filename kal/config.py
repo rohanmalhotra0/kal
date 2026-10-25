@@ -46,7 +46,7 @@ DEFAULTS = {
     "strategies": {
         "basket_arb": {"mode": "live"},
         "ladder_arb": {"mode": "paper"},
-        "date_ladder_arb": {"mode": "paper", "verified": False},
+        "date_ladder_arb": {"mode": "paper"},
         "bracket_arb": {"mode": "paper", "verified": False},
         "favorites": {"mode": "paper"},
         "mentions": {"mode": "paper"},

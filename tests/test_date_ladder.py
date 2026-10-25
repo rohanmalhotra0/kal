@@ -152,8 +152,9 @@ class DateLadderTests(unittest.TestCase):
         self.assertEqual(self.scan(ev), [])
 
     def test_every_pair_is_checked_not_just_neighbours(self):
-        # Only the first and last deadlines are upside down (the middle one's spread is wide).
-        ev = date_event(quotes=((.50, .52), (.40, .55), (.43, .45)))
+        # Only the first and last deadlines are upside down (the middle one's spread is wide,
+        # and its mid is higher, so the price doesn't fall at most steps).
+        ev = date_event(quotes=((.55, .57), (.40, .75), (.45, .47)))
         sigs = self.scan(ev)
         self.assertEqual(len(sigs), 1)
         legs = {leg.side: leg.ticker for leg in sigs[0].legs}
@@ -353,6 +354,28 @@ class DateLadderTests(unittest.TestCase):
                      "If Drake releases an album on the day before {d}, then the market resolves to Yes."):
             self.assertEqual(self.scan(self._rules(date_event(), text)), [], text)
 
+    def test_round_three_wordings_are_refused_on_paper_too(self):
+        for text in ("If nothing is released by Drake before {d}, then the market resolves to Yes.",
+                     "If zero new albums come out before {d}, then the market resolves to Yes.",
+                     "If Drake refrains from releasing an album before {d}, then the market resolves to Yes.",
+                     "If Drake releases an album in the seven days before {d}, then the market resolves to Yes.",
+                     "If Drake releases an album the night before {d}, then the market resolves to Yes.",
+                     "If Drake releases an album in the 30-day period before {d}, then the market resolves to Yes.",
+                     "If Drake releases an album shortly before {d}, then the market resolves to Yes."):
+            self.assertEqual(self.scan(self._rules(date_event(), text)), [], text)
+        for undo in ("If the deal is cancelled before expiration, the market resolves to No.",
+                     "A release later pulled from streaming does not count.", "A vetoed bill does not count."):
+            ev = date_event()
+            for m in ev["markets"]:
+                m["rules_secondary"] = undo
+            self.assertEqual(self.scan(ev), [], undo)
+
+    def test_wide_spreads_cant_hide_a_ladder_upside_down_everywhere(self):
+        # Review round 3: no neighbour looks upside down by bid and ask, but the mid falls at
+        # every step, and the far pair would trade.
+        ev = date_event(quotes=((.60, .66), (.58, .64), (.56, .62), (.40, .42)), days=(10, 15, 20, 25))
+        self.assertEqual(self.scan(ev), [])
+
     def test_nothing_may_follow_the_claim_or_undo_it(self):
         # An outcome that can be undone ("retracted before expiration") gives a later market
         # longer to undo it: an earlier YES with a later NO. The claim must be the whole first
@@ -515,7 +538,8 @@ class EngineTests(TempHome):
         self.assertIn("date_ladder_arb", MODULES)
         self.assertEqual(date_ladder_arb.STRATEGY.name, "date_ladder_arb")
         self.assertEqual(date_ladder_arb.STRATEGY.kind, "arbitrage")
-        self.assertEqual(config.DEFAULTS["strategies"]["date_ladder_arb"], {"mode": "paper", "verified": False})
+        self.assertEqual(config.DEFAULTS["strategies"]["date_ladder_arb"], {"mode": "paper"})
+        self.assertEqual(date_ladder_arb.VERIFIED, {})   # no event's rules read by a person yet
 
     def test_paper_run_records_both_legs_and_buys_nothing(self):
         config.update({"strategies": {"date_ladder_arb": {"mode": "paper"}}})
@@ -527,18 +551,46 @@ class EngineTests(TempHome):
         row = db.query("SELECT * FROM signals")[0]
         self.assertEqual((row["strategy"], row["status"], row["guaranteed"]), ("date_ladder_arb", "accepted", 1))
 
+    def verify(self, ev, key=None):
+        """Put the event on VERIFIED, as a person would after reading its rules."""
+        patcher = mock.patch.dict(date_ladder_arb.VERIFIED,
+                                  {ev["event_ticker"]: key or date_ladder_arb.rules_key(ev["markets"])})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_live_needs_a_person_to_check_it_first(self):
-        # The lock rests on reading rules text, so "live" alone stays on paper, as bracket_arb does.
+        # The lock rests on reading rules text, so "live" alone stays on paper.
         config.update({"strategies": {"date_ladder_arb": {"mode": "live"}}})
         c = fake_for(date_event())
         s = engine.run_once(c)
         self.assertTrue(s["ok"], s)
         self.assertEqual((s["live_trades"], s["paper_trades"], c.orders), (0, 1, []))
-        self.assertTrue(any("not yet checked by hand" in n for n in s["notes"]))
+        self.assertTrue(any("checked by hand" in n for n in s["notes"]))
+
+    def test_only_the_verified_event_with_the_same_wording_trades_live(self):
+        config.update({"strategies": {"date_ladder_arb": {"mode": "live"}}})
+        ev, other = date_event(), date_event(ev="KXALBUM-NEWTAY")
+        self.verify(other)                       # someone else's rules were read, not these
+        c = fake_for(ev)
+        s = engine.run_once(c)
+        self.assertEqual((s["live_trades"], s["paper_trades"], c.orders), (0, 1, []))
+        self.verify(ev, key="if drake releases an album before <deadline>, then the market resolves to yes.")
+        s = engine.run_once(fake_for(ev))      # verified, but Kalshi's wording has changed since
+        self.assertEqual(s["live_trades"], 0)
+
+    def test_a_verified_event_trades_live(self):
+        config.update({"strategies": {"date_ladder_arb": {"mode": "live"}}})
+        ev = date_event()
+        self.verify(ev)
+        c = fake_for(ev)
+        s = engine.run_once(c)
+        self.assertTrue(s["ok"], s)
+        self.assertEqual((s["live_trades"], len(c.orders)), (1, 2))
 
     def test_live_by_hand_buys_both_legs_thinnest_first(self):
-        config.update({"strategies": {"date_ladder_arb": {"mode": "live", "verified": True}}})
+        config.update({"strategies": {"date_ladder_arb": {"mode": "live"}}})
         ev = date_event()
+        self.verify(ev)
         c = fake_for(ev)
         set_book(c, ev["markets"][0]["ticker"], .40, .42, bid_size=15)   # NO on the earlier date is thin
         s = engine.run_once(c)
@@ -553,8 +605,9 @@ class EngineTests(TempHome):
     def _live_pair(self, fill):
         """A live (and verified) run where the thin NO on the earlier date goes first, and
         fill(ticker, side, count, price) says how much each order gets."""
-        config.update({"strategies": {"date_ladder_arb": {"mode": "live", "verified": True}}})
+        config.update({"strategies": {"date_ladder_arb": {"mode": "live"}}})
         ev = date_event()
+        self.verify(ev)
         c = fake_for(ev)
         early, mid = ev["markets"][0]["ticker"], ev["markets"][1]["ticker"]
         set_book(c, early, .40, .42, bid_size=15)   # NO on the earlier date is the thin leg
@@ -605,7 +658,7 @@ class EngineTests(TempHome):
         before = config.load()["strategies"]["date_ladder_arb"]
         promote.apply(config.load())
         self.assertEqual(config.load()["strategies"]["date_ladder_arb"], before)
-        self.assertEqual(config.DEFAULTS["strategies"]["date_ladder_arb"], {"mode": "paper", "verified": False})
+        self.assertEqual(config.DEFAULTS["strategies"]["date_ladder_arb"], {"mode": "paper"})
 
     def test_money_locked_past_max_arb_days_is_refused(self):
         config.update({"strategies": {"date_ladder_arb": {"mode": "paper"}}})

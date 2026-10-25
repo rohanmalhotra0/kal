@@ -28,19 +28,28 @@ flips. We only trust an event where:
   - the ladder isn't upside down nearly everywhere (a question read the wrong way round is);
   - the rules and custom_strike match across markets once each market's own deadline is
     taken out (any other date must be the same everywhere).
-Anything odd and the event is skipped. The lock rests on reading rules text, so real money
-also needs a person to check it first (strategies.date_ladder_arb.verified), as bracket_arb does.
+Anything odd and the event is skipped.
+
+Those checks keep paper results clean. They can't make rules text safe for real money: three
+rounds of review each found new wordings that read the question the wrong way round ("nothing
+is released", "refrains from", "the night before", "vetoed"). So real money only ever goes to
+an event in VERIFIED, whose rules a person has read in full, pinned word for word. Any
+change to the wording, and the event is back on paper.
 """
 import datetime
 import re
 import time
 
-from ..client import ts
+from ..client import price, ts
 from .base import Leg, Signal, Strategy
 from .ladder_arb import (MIN_TIME_LEFT, allocate, close_ts, locked_basket, looks_inverted, own_markets,
                          quote, thinnest_first, tradeable)
 
-UNVERIFIED = "date ladders not yet checked by hand on live data"
+# Real money only for these: event ticker -> its rules text exactly as rules_key() gives it
+# (each market's own deadline taken out). Add one only after reading every market's rules in
+# full, by pull request. Empty: every date ladder trades on paper.
+VERIFIED = {}
+UNVERIFIED = "no date ladder's rules checked by hand yet (date_ladder_arb.VERIFIED is empty)"
 _MONTHS = (r"jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?"
            r"|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?")
 MONTHS = {m: i + 1 for i, m in enumerate("jan feb mar apr may jun jul aug sep oct nov dec".split())}
@@ -141,12 +150,14 @@ _CLAIM = re.compile(r"^\s*if\s+(?P<thing>.+?)\s+before\s+(?P<date>[^,.]+(?:,\s*(
                     r"(?:\s*\.\s*otherwise,?\s+the market (?:will )?resolves? to no)?\s*\.?\s*$", re.I | re.S)
 # Anywhere in the rules: an outcome that can be undone. "Unless retracted before expiration"
 # gives a later market longer to undo it, so an earlier YES can come with a later NO.
-_UNDONE = re.compile(r"\b(?:retract|withdr[ae]w|revers|overturn|rescind|revok|repeal|annul|invalidat)", re.I)
+_UNDONE = re.compile(r"\b(?:retract|withdr[ae]w|revers|revert|overturn|rescind|revok|revocation|repeal|annul"
+                     r"|invalidat|void|veto|cancel|called off|pulled)", re.I)
 # Refused in <it happens>: negations ("not", "no new album", "yet to", "avoids"), states ("still",
 # "in effect", "as of"), and windows that end at each market's own date ("in the 7 days before",
 # "within the week before", "on the day before"): those don't nest either.
 _NOT_A_HAPPENING = re.compile(
-    r"\b(?:not|no|none|neither|nor|no longer|never|cannot|without|fails?|failed|yet to|avoids?|avoided"
+    r"\b(?:not|no|none|nothing|zero|neither|nor|no longer|never|cannot|without|fails?|failed|yet to"
+    r"|avoids?|avoided|refrains?|refrained|shortly|immediately|night|period|seven|thirty"
     r"|still|remains?|remained|continues?|continued|in effect|as of|until|unless"
     r"|within (?:the |a |one |\d+ )?(?:last |past |final )?(?:hours?|days?|weeks?|months?|years?))\b|n't\b"
     # "<it happens> in the 7 days | on the day | in the week" right before "before <date>"
@@ -182,6 +193,13 @@ def nested(earlier, later):
     return a is not None and b is not None and b <= a
 
 
+def rules_key(markets):
+    """The rules text VERIFIED pins for an event: the same for every market once its own deadline
+    is taken out (ladder() checks that), else None."""
+    keys = {_rules(m) for m in markets}
+    return keys.pop() if len(keys) == 1 and None not in keys else None
+
+
 def ladder(ev):
     """The event's markets, earliest deadline first, if it is clearly one date ladder, else None."""
     markets = ev.get("markets") or []
@@ -204,11 +222,18 @@ def ladder(ev):
     return sorted(markets, key=deadline)
 
 
+def _mid(m):
+    bid, ask = price(m, "yes_bid"), price(m, "yes_ask")
+    return (bid + ask) / 2 if 0 < ask <= 1 else None
+
+
 def mostly_upside_down(rungs):
-    """True if most neighbouring deadlines look upside down. A real gap is one spot (a fresh
-    listing, a stale quote); a question read the wrong way round is upside down everywhere."""
-    pairs = list(zip(rungs, rungs[1:]))
-    return len(pairs) >= 2 and sum(looks_inverted(a, b) for a, b in pairs) * 2 > len(pairs)
+    """True if the price falls at most steps to a later deadline. A real gap is one spot (a fresh
+    listing, a stale quote); a question read the wrong way round falls everywhere. Mid-prices,
+    so wide spreads can't hide it."""
+    mids = [_mid(m) for m in rungs]
+    steps = [(a, b) for a, b in zip(mids, mids[1:]) if a is not None and b is not None]
+    return len(steps) >= 2 and sum(b < a for a, b in steps) * 2 > len(steps)
 
 
 def settles_by(earlier, later):
@@ -246,8 +271,8 @@ class DateLadderArb(Strategy):
                    "date's, buy YES on the later date and NO on the earlier. One of them always pays $1.")
 
     def proven(self, ctx):
-        if ctx.params.get("verified") is True:
-            return True, "date ladders checked by hand on live data"
+        if VERIFIED:
+            return True, "only events whose rules a person read, word for word (VERIFIED)"
         return False, UNVERIFIED
 
     def _budget(self, ctx):
@@ -263,10 +288,12 @@ class DateLadderArb(Strategy):
                    if min(close_ts(a), close_ts(b)) - now > MIN_TIME_LEFT and tradeable(a, ctx)
                    and tradeable(b, ctx) and nested(a, b) and looks_inverted(a, b)]
             books = {m["ticker"]: ctx.client.orderbook(m["ticker"]) for pair in hot for m in pair}
+            key = rules_key(rungs)
+            checked = key is not None and VERIFIED.get(ev["event_ticker"]) == key   # else paper only
             for earlier, later in hot:
                 e, lt = earlier["ticker"], later["ticker"]
                 quotes = [(lt, "yes", *quote(books[lt], "yes")), (e, "no", *quote(books[e], "no"))]
-                meta = {"earlier": e, "later": lt,
+                meta = {"earlier": e, "later": lt, "paper_only": not checked,
                         "deadlines": {e: deadline(earlier).isoformat(), lt: deadline(later).isoformat()}}
                 candidates.append((quotes, lambda bk, ev=ev, meta=meta, at=settles_by(earlier, later): to_signal(
                     ev["event_ticker"], ev.get("title", ""), bk, meta, at)))

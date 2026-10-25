@@ -125,9 +125,13 @@ status: **testing** (add the PR link), **built**, or **rejected** (say why in on
     4 of the 5 events with gaps pass (the 5th has the death rule).
   - "After issuance" windows (the Drake ladder) pair only when the later market was listed
     no later than the earlier one: 161 of 3,864 pairs fail that.
-  - So: rare but real. Built as `date_ladder_arb` on paper. Real money also needs a person
-    to check it (`strategies.date_ladder_arb.verified`), like `bracket_arb`. Next: count its
-    paper signals for 4 weeks.
+  - So: rare but real. Built as `date_ladder_arb` on paper.
+  - Three rounds of independent review each found new rule wordings that read the question
+    the wrong way round ("nothing is released", "refrains from", "the night before"). So the
+    word checks only keep paper results clean. Real money goes only to an event listed in
+    `date_ladder_arb.VERIFIED`, after a person reads its rules in full, pinned word for word
+    (any change and it's back on paper). It starts empty. Next: count paper signals for 4
+    weeks; then a check-in can read the rules of the ladders that gap and propose a few by PR.
 
 **7. Scheduled data releases (weather, CPI, jobs)** - weather tested 2026-10-25: rejected
 - What: compare the price with a public forecast before the report comes out.
