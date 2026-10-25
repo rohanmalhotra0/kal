@@ -80,12 +80,19 @@ def available(cfg):
 
 
 def equity(client, cfg):
-    """Capital with open positions marked at their best bid instead of at cost."""
+    """Capital with open positions marked at their best bid instead of at cost.
+
+    A market with no bid at all (thin books, or a lookup that failed) is valued at cost,
+    not $0: no buyer right now isn't a loss, and treating it as one would trip the daily
+    loss limit for nothing. Real losses still land when the market settles."""
     rows = open_positions()
     if not rows:
         return capital(cfg)
     markets = client.markets_by_ticker({r["ticker"] for r in rows})
-    value = sum(r["count"] * price(markets.get(r["ticker"], {}), f"{r['side']}_bid") for r in rows)
+    value = 0.0
+    for r in rows:
+        bid = price(markets.get(r["ticker"], {}), f"{r['side']}_bid")
+        value += r["count"] * bid if bid > 0 else r["cost"]
     return capital(cfg) - open_cost() + value
 
 

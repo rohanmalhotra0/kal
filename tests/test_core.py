@@ -277,7 +277,7 @@ class EngineTests(TempHome):
         c = fake_with_arb()
         engine.run_once(c)
         for m in c.market_info.values():
-            m["no_bid_dollars"] = "0.0000"  # the basket's NO legs are now worth nothing
+            m["no_bid_dollars"] = "0.0100"  # the basket's NO legs crashed to a cent
         c.event_list = []
         engine.run_once(c)
         self.assertIn("daily limit", config.load()["disabled_reason"])
@@ -370,6 +370,16 @@ class LedgerTests(TempHome):
         self.assertGreater(ledger.capital(cfg), 300 - 90 - client.fee(100, 0.9))
         config.update({"reinvest_profits": False})
         self.assertLess(ledger.capital(config.load()), 300)  # net loss still counts
+
+    def test_no_bid_is_valued_at_cost_not_zero(self):
+        from kal import ledger
+        c = FakeKalshi()
+        self._fill("A", "no", 10, 0.90)
+        c.market_info["A"] = {"ticker": "A", "status": "active", "no_bid_dollars": "0.0000"}
+        cfg = config.load()
+        self.assertAlmostEqual(ledger.equity(c, cfg), ledger.capital(cfg))
+        c.market_info["A"]["no_bid_dollars"] = "0.5000"  # a real drop still shows
+        self.assertLess(ledger.equity(c, cfg), ledger.capital(cfg) - 3)
 
     def test_settles_once(self):
         from kal import ledger
