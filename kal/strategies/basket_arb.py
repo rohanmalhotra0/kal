@@ -5,11 +5,15 @@ In an event where at most one market can resolve YES (Kalshi's
 least c * (|S| - 1): every NO pays except the winner's. So when the YES bids
 add up to more than $1 (net of fees), the profit is locked in. This usually
 happens because people overpay for longshots.
+
+Nearly every game and weather event says a cancelled game (or missing data) settles
+at a "fair price". Those baskets are found too, but go on paper only: if that happens,
+Kalshi picks the price, so the profit isn't locked in.
 """
 import time
 
 from ..client import fee, price, ts
-from .base import Leg, Signal, Strategy, plain_payouts
+from .base import Leg, Signal, Strategy, fair_price_only_if_cancelled, plain_payouts
 from .ladder_arb import MIN_TIME_LEFT, yearly
 
 MIN_PROFIT = 0.05   # dollars per basket, after fees
@@ -83,7 +87,8 @@ class BasketArb(Strategy):
         for ev in ctx.client.events(status="open", with_nested_markets="true"):
             if not ev.get("mutually_exclusive"):
                 continue
-            if not plain_payouts(ev.get("markets", [])):
+            plain = plain_payouts(ev.get("markets", []))
+            if not plain and not fair_price_only_if_cancelled(ev.get("markets", [])):
                 continue  # the math needs every market to pay exactly $0 or $1
             markets = [m for m in ev.get("markets", []) if m.get("status", "active") in ("active", "open")]
             if sum(price(m, "yes_bid") for m in markets) <= 1:
@@ -98,6 +103,11 @@ class BasketArb(Strategy):
                 sig = to_signal(ev["event_ticker"], ev.get("title", ""), basket)
                 sig.closes_at = latest_close(markets)
                 sig.meta["first_close"] = first
+                if not plain:
+                    # A cancelled game settles at a price Kalshi picks: not locked in, so
+                    # paper only, to learn how often these show up and fill.
+                    sig.meta["paper_only"] = True
+                    sig.note += "; paper only: a cancelled game settles at a price Kalshi picks"
                 found.append(sig)
         return sorted(found, key=lambda s: -yearly(s))  # money back soonest, per dollar, first
 

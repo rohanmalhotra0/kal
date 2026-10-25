@@ -57,6 +57,27 @@ class LiveBasketTests(TempHome):
         engine.run_once(c)   # reported once: Reset lets the bot carry on
         self.assertEqual(config.load()["disabled_reason"], "")
 
+    def test_a_cancellation_clause_basket_trades_on_paper_even_when_live(self):
+        # If the game is cancelled, Kalshi settles at a price it picks: not locked in, so
+        # basket_arb's live mode must not put real money into it.
+        c = fake_with_arb()
+        for m in c.event_list[0]["markets"]:
+            m["rules_primary"] = ("If this team wins, Yes. If the game is cancelled or not started within "
+                                  "48 hours of its originally scheduled start, the market will resolve to a fair price.")
+        s = engine.run_once(c)
+        self.assertTrue(s["ok"], s)
+        self.assertEqual((s["live_trades"], s["paper_trades"]), (0, 1))
+        self.assertEqual(list(c.orders), [])                      # not one real order
+        row = db.query("SELECT mode, status, meta FROM signals")[0]
+        self.assertEqual((row["mode"], row["status"]), ("paper", "accepted"))
+        self.assertIs(json.loads(row["meta"])["paper_only"], True)
+        # The same event without the clause trades for real, as before.
+        for m in c.event_list[0]["markets"]:
+            del m["rules_primary"]
+        db.execute("DELETE FROM paper")
+        s = engine.run_once(c)
+        self.assertEqual(s["live_trades"], 1)
+
     def test_a_finished_basket_left_accepted_is_just_recorded(self):
         legs = [{"ticker": f"EV1-{i}", "side": "no", "price": 0.5, "count": 10} for i in range(2)]
         sid = db.insert("signals", strategy="basket_arb", event="EV1", title="t", mode="live",

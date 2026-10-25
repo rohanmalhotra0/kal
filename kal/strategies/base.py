@@ -1,4 +1,5 @@
 """What every strategy implements, and what it hands the engine."""
+import re
 from dataclasses import dataclass, field
 
 from ..client import fee
@@ -22,6 +23,31 @@ def plain_payouts(markets):
         rules = f"{m.get('rules_primary') or ''} {m.get('rules_secondary') or ''}".lower()
         if any(w in rules for w in FAIR_PRICE_WORDS):
             return False
+    return True
+
+
+# The fair-price clause nearly every game and weather market has (2,257 of 5,658 one-winner
+# events on 2026-10-25): "if the game is cancelled or not started within 48 hours, the
+# market will resolve to a fair price", or for weather "if no data is available".
+CANCELLATION = re.compile(r"cancel|postpone|reschedul|not (?:be )?started|walkover|forfeit|no data|abandon|suspend",
+                          re.I)
+
+
+def fair_price_only_if_cancelled(markets):
+    """True if every market is binary with no payout floor or cap, and every sentence of its
+    rules that names a fair or last traded price is about a cancelled, postponed or unstarted
+    game, or missing data. Such a market pays $0 or $1 unless that happens; if it does,
+    Kalshi picks the price, so a basket of them is not locked in. Fails closed: any other
+    fair-price sentence (a death clause, the exchange's own discretion) means no."""
+    for m in markets:
+        if m.get("market_type", "binary") != "binary":
+            return False
+        if m.get("settlement_bounds_type", "default") != "default":
+            return False
+        rules = f"{m.get('rules_primary') or ''} {m.get('rules_secondary') or ''}"
+        for sentence in re.split(r"(?<=[.!?])\s+", rules):
+            if any(w in sentence.lower() for w in FAIR_PRICE_WORDS) and not CANCELLATION.search(sentence):
+                return False
     return True
 
 

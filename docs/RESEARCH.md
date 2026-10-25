@@ -54,6 +54,10 @@ status: **testing** (add the PR link), **built**, or **rejected** (say why in on
 - Evidence: strong (math). Saguillo et al. found ~$40M taken from gaps like this and 6 on Polymarket.
 - Risk: low. A basket can half-fill. The engine stops at the first leg that misses.
 - Test: count signals vs full fills in live logs. Many half fills? Buy the thinnest leg first.
+- Games and weather (2,257 of 5,658 one-winner events on 2026-10-25) say a cancelled game, or
+  missing data, settles at a "fair price" Kalshi picks. Those baskets aren't locked in, so they
+  trade on paper only. Real money for them is the owner's call, once paper shows how often they
+  come and fill.
 
 **2. Ladder arbitrage** - built, paper (switch to live by hand once trusted)
 - What: if "above 70" wins, "above 60" wins too. Buy YES broad + NO narrow when under $1.
