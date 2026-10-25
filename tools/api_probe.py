@@ -247,4 +247,12 @@ for m in markets:
                 examples[w].append(f"{m.get('ticker')}: ...{text[max(0, i - 160): i + 160]}...")
 show(f"rule wording in {len(markets)} markets of mutually exclusive events", dict(hits.most_common()))
 show("rule wording examples", dict(examples), limit=8000)
+# ---- The public trade tape: who took which side (for an informed-flow veto)
+busy = sorted((m for m in markets if m.get("ticker")), key=lambda m: -float(m.get("volume_24h_fp") or 0))[:3]
+for m in busy:
+    code, d = get("/markets/trades", ticker=m["ticker"], limit=100)
+    trades = d.get("trades", []) if isinstance(d, dict) else []
+    show(f"trades {m['ticker']}", {"code": code, "keys": list(d.keys()) if isinstance(d, dict) else str(d)[:200],
+                                   "n": len(trades), "first": trades[:2],
+                                   "taker_sides": dict(collections.Counter(t.get("taker_side") for t in trades))})
 sys.exit(0)
