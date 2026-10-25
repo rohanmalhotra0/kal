@@ -53,6 +53,7 @@ def main():
     print(f"open events: {len(events)}")
     flips = collections.Counter()
     shown = collections.Counter()
+    why_shown = collections.Counter()
     for ev in events:
         ms = ev.get("markets") or []
         if not ms:
@@ -71,6 +72,25 @@ def main():
         if (a != b or c != d) and shown[key] < 4:
             shown[key] += 1
             print(f"- {ev.get('event_ticker')} [{me}] plain {a}->{b}, cancel-only {c}->{d}: ...{snippet(ms)}...")
+        if c and not d:
+            series = ev.get("series_ticker") or ev.get("event_ticker", "").split("-")[0]
+            if why_shown[series] < 1 and sum(why_shown.values()) < 12:
+                why_shown[series] += 1
+                for m in ms:
+                    for field in ("rules_primary", "rules_secondary"):
+                        for sent in base._sentences(base._plain(m.get(field))):
+                            if base.FAIR_PRICE.search(sent) and not any(cl.fullmatch(sent) for cl in base.CANCELLATION_CLAUSES):
+                                print(f"  WHY {series} {field}: {sent!r}")
+                                raw = m.get(field) or ""
+                                i = raw.lower().find("fair")
+                                print(f"  RAW {raw[max(0, i - 400):i + 200]!r}")
+                                break
+                        else:
+                            continue
+                        break
+                    else:
+                        continue
+                    break
     for k, v in sorted(flips.items()):
         print(f"{k[0]:10} {k[1]:32} {v}")
 
