@@ -104,11 +104,34 @@ status: **testing** (add the PR link), **built**, or **rejected** (say why in on
   row has even a lower bound above 0. Best: NO 95c+ with tight spreads at 24 h, +0.1% (worst
   -1.6%). The verdict stands: no taker edge.
 
-**6. Related markets that must agree** - untested
+**6. Related markets that must agree** - date ladders built, paper until checked (`date_ladder_arb`); other links untested
 - What: linked prices must fit. E.g. "Fed cuts in Dec" vs "rate below X in Jan".
 - Evidence: medium. Saguillo et al. found this on Polymarket. Finding the links is the hard part.
 - Risk: medium-high. If the rules differ (source, time, rounding), both legs can lose.
 - Test: pick 3 pairs where the rules text proves the link. Log gaps on paper for 2 weeks.
+- Date ladders, tested 2026-10-25 on real data: one question with several deadlines
+  ("Before Aug 1" / "Before Sep 1"). YES on the later date plus NO on the earlier one pays
+  $1 by the earlier date. Hourly prices of 536 such events (405 open, 131 settled):
+  - 88,407 pair-hours with both prices. 8 hours had a gap after fees that passes the bot's
+    rules (settles within 30 days, 20%+ a year), in 5 events. One more was too small.
+  - 1 of the 8 (29c, 41% return) is refused by the "too good to be true" cap of 25%.
+  - The rest: a Drake album ladder at about 15c for 3 hours, and 1-2c gaps in 3 others.
+  - 0 of 131 settled events broke the order (an earlier date YES, a later one NO).
+  - Those are a ceiling: the count used the written deadlines and none of the strategy's
+    checks. With them (open events, 2026-10-25): 307 of 405 ladders pass. Skipped: 46 with a
+    "fair price if the person dies" rule, 36 whose rules don't say plainly "if it happens
+    before <date>" (e.g. "resolved ... and not retracted before expiration"), 9 whose rules
+    differ between dates ("meet (including phone calls)" vs "meet"), 7 with mixed data.
+    4 of the 5 events with gaps pass (the 5th has the death rule).
+  - "After issuance" windows (the Drake ladder) pair only when the later market was listed
+    no later than the earlier one: 161 of 3,864 pairs fail that.
+  - So: rare but real. Built as `date_ladder_arb` on paper.
+  - Three rounds of independent review each found new rule wordings that read the question
+    the wrong way round ("nothing is released", "refrains from", "the night before"). So the
+    word checks only keep paper results clean. Real money goes only to an event listed in
+    `date_ladder_arb.VERIFIED`, after a person reads its rules in full, pinned word for word
+    (any change and it's back on paper). It starts empty. Next: count paper signals for 4
+    weeks; then a check-in can read the rules of the ladders that gap and propose a few by PR.
 
 **7. Scheduled data releases (weather, CPI, jobs)** - weather tested 2026-10-25: rejected
 - What: compare the price with a public forecast before the report comes out.
