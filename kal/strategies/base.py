@@ -39,26 +39,23 @@ def scheduled_end(m, strike_date=None):
     closed, often on the news (the game ended, it rained), and deciding "6 hours before"
     it peeks at the outcome. Kalshi marks almost every market as able to close early,
     even ones that close on a fixed schedule (weather, indexes, crypto), so in order:
-    1. close_time, if the market can't close early (then it's fixed);
+    1. close_time, if the market says it can't close early (then it's fixed);
     2. the event's strike_date (weather, indexes, crypto: when trading ends);
-    3. occurrence_datetime (games: when they're expected to end);
-    4. expected_expiration_time."""
-    if m.get("can_close_early") is not True:
+    3. occurrence_datetime (games: when they're expected to end), on the whole minute.
+    Kalshi lists it on the minute (03:15:00). After some events it's set to when they
+    really happened (a Fed press conference: 19:56:17, a minute after the close), and
+    that's a peek too.
+    Not expected_expiration_time: on real settled markets that closed a day before their
+    occurrence_datetime it equals that early close, so it may be rewritten after the fact."""
+    if m.get("can_close_early") is False:  # missing counts as "can": fail closed
         t = _time(m.get("close_time"))
         if t:
             return t
-    for v in (strike_date, m.get("occurrence_datetime"), m.get("expected_expiration_time")):
-        t = _time(v)
-        if t:
-            return t
-    return None
-
-
-def event_end(markets, strike_date=None):
-    """An event's scheduled end: the latest scheduled_end of its markets. None if any
-    market shows none: then the event's end is a guess, and the timing is never guessed."""
-    ends = [scheduled_end(m, strike_date) for m in markets]
-    return max(ends) if ends and None not in ends else None
+    t = _time(strike_date)
+    if t:
+        return t
+    t = _time(m.get("occurrence_datetime"))
+    return t if t and t % 60 == 0 else None
 
 
 @dataclass

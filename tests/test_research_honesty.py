@@ -23,6 +23,7 @@ from tests.fakes import FakeKalshi
 from tests.helpers import TempHome, orders_proven
 
 T0 = 1_760_000_000          # 2025-10-09 08:53:20 UTC
+M0 = T0 - T0 % 60           # on the minute, as Kalshi lists occurrence times
 H = 3600
 DAY = 86400
 MIDNIGHT = 1_760_054_400    # 2025-10-10 00:00 UTC
@@ -102,7 +103,7 @@ class HourlyLuckTests(TempHome):
         def market(h, held_hours):
             m = {"ticker": f"KXBTCD-H{h}-T", "event_ticker": f"KXBTCD-H{h}", "title": "BTC", "status": "active",
                  "yes_ask_dollars": "0.8500", "yes_bid_dollars": "0.8400", "no_ask_dollars": "0.1600",
-                 "no_bid_dollars": "0.1500", "volume_24h_fp": "5000.00", "close_time": iso(now + held_hours * H)}
+                 "no_bid_dollars": "0.1500", "volume_24h_fp": "5000.00", "can_close_early": False, "close_time": iso(now + held_hours * H)}
             c.market_list.append(m)
             c.market_info[m["ticker"]] = m
             c.books[m["ticker"]] = {"yes": [(0.84, 500.0)], "no": [(0.15, 500.0)]}
@@ -121,11 +122,47 @@ class HourlyLuckTests(TempHome):
         self.assertEqual(len(two), 1)
         self.assertLessEqual(two[0].cost, 10.0 + 1e-9)
 
+    def test_a_failing_book_cant_hide_held_markets_from_the_cap(self):
+        """Held markets are counted before any order book is read, and a series whose scan
+        fails part way gives no bets this run. Before, a 503 on one book ended the loop
+        before the held markets after it were counted: a 4th bet on a full day."""
+        now = MIDNIGHT + 2 * H
+        c = FakeKalshi()
+
+        def market(h, hours):
+            m = {"ticker": f"KXBTCD-H{h}-T", "event_ticker": f"KXBTCD-H{h}", "title": "BTC", "status": "active",
+                 "yes_ask_dollars": "0.8500", "yes_bid_dollars": "0.8400", "no_ask_dollars": "0.1600",
+                 "no_bid_dollars": "0.1500", "volume_24h_fp": "5000.00", "can_close_early": False,
+                 "close_time": iso(now + hours * H)}
+            c.market_list.append(m)
+            c.market_info[m["ticker"]] = m
+            c.books[m["ticker"]] = {"yes": [(0.84, 500.0)], "no": [(0.15, 500.0)]}
+            return m["ticker"]
+        market(8, 5.5)                                            # in the window: a pick
+        market(9, 5.6)                                            # in the window too; its book fails
+        held = {market(5, 2.5), market(6, 3.5), market(7, 4.5)}  # 3 x $10 held: 10% of $300, full
+        real = c.orderbook
+
+        def book(tk):
+            if tk == "KXBTCD-H9-T":
+                raise KalshiError("GET orderbook -> 503", 503)
+            return real(tk)
+
+        def scan(held, orderbook):
+            c.orderbook = orderbook
+            ctx = Context(c, cfg(), "paper", 1000.0, 300.0, set(held), {"edges": [edge("KXBTCD:yes:0.80-0.90")]}, {})
+            with mock.patch.object(favorites.time, "time", return_value=now):
+                return favorites.STRATEGY.scan(ctx)
+        self.assertEqual(scan(held, book), [])
+        self.assertEqual(scan(held, real), [])          # the day is full either way
+        self.assertEqual(scan((), book), [])            # half a scan is no scan
+        self.assertEqual(len(scan((), real)), 2)        # nothing held, books fine: both hours
+
     def test_recheck_never_grows_a_bet_past_the_cap_it_was_sized_for(self):
         c = FakeKalshi()
         m = {"ticker": "KXBTCD-H8-T", "event_ticker": "KXBTCD-H8", "title": "BTC", "status": "active",
              "yes_ask_dollars": "0.8500", "yes_bid_dollars": "0.8400", "volume_24h_fp": "5000.00",
-             "close_time": iso(time.time() + 5.5 * H)}
+             "can_close_early": False, "close_time": iso(time.time() + 5.5 * H)}
         c.market_list, c.market_info[m["ticker"]] = [m], m
         c.books[m["ticker"]] = {"yes": [(0.84, 500.0)], "no": [(0.15, 3.0)]}  # 3 contracts for sale
         ctx = Context(c, cfg(), "live", 1000.0, 300.0, set(), {"edges": [edge(self.EDGE, "live")]}, {})
@@ -142,7 +179,7 @@ class HourlyLuckTests(TempHome):
 def one_settled_market(price):
     c = FakeKalshi(can_trade=False)
     c.settled["KXS"] = [{"ticker": "KXS-1-A", "event_ticker": "KXS-1", "open_time": iso(T0),
-                         "close_time": iso(T0 + DAY), "status": "finalized", "result": "yes",
+                         "can_close_early": False, "close_time": iso(T0 + DAY), "status": "finalized", "result": "yes",
                          "settlement_value_dollars": "1.0000", "volume_fp": "500.00"}]
     c.candle_data["KXS-1-A"] = [{"end_period_ts": T0 + DAY - 7 * H, "yes_bid": {"close": f"{price - 0.01:.4f}"},
                                  "yes_ask": {"close": f"{price:.4f}"}}]
@@ -193,7 +230,7 @@ class ExchangeTests(TempHome):
         orders_proven("prod")
         c = FakeKalshi(balance=300)
         m = {"ticker": "KXS-99-A", "event_ticker": "KXS-99", "series_ticker": "KXS", "status": "active",
-             "close_time": iso(time.time() + 5.5 * H), "volume_24h_fp": "5000.00", "yes_bid_dollars": "0.0700",
+             "can_close_early": False, "close_time": iso(time.time() + 5.5 * H), "volume_24h_fp": "5000.00", "yes_bid_dollars": "0.0700",
              "yes_ask_dollars": "0.0800", "no_bid_dollars": "0.9200", "no_ask_dollars": "0.9300"}
         c.market_list, c.market_info["KXS-99-A"] = [m], m
         c.books["KXS-99-A"] = {"yes": [(0.07, 500.0)], "no": [(0.92, 500.0)]}
@@ -212,7 +249,7 @@ def by_date_series(c, events=150, seed=3):
     rate = 1 / (4 * DAY)
     markets = []
     for e in range(events):
-        start = T0 + e * 5 * DAY
+        start = M0 + e * 5 * DAY
         news = start + rng.expovariate(rate)
         for days in (1, 2, 3):
             deadline = start + days * DAY
@@ -244,7 +281,7 @@ class AnchorTests(TempHome):
         c = FakeKalshi(can_trade=False)
         by_date_series(c)
         obs = backtest.load_observations(c, "KXWHEN", 6, max_markets=10_000)
-        self.assertGreater(len(obs), 50)  # tested: decided 6h before the event's listed end
+        self.assertGreater(len(obs), 150)  # tested: each decided 6h before its own listed end
         self.assertEqual(fake_edges(obs), [])  # fair prices: nothing to find
 
     def test_deciding_before_the_real_close_finds_a_fake_edge(self):
@@ -252,37 +289,91 @@ class AnchorTests(TempHome):
         and the same fair prices show edges that aren't there."""
         c = FakeKalshi(can_trade=False)
         by_date_series(c)
-        real_close = lambda markets, strike_date=None: max(ts(m["close_time"]) for m in markets)
-        with mock.patch.object(backtest, "event_end", real_close):
+
+        def real_close(markets, strikes=None):  # each event's latest real close, as before #6
+            last = {}
+            for m in markets:
+                last[m["event_ticker"]] = max(last.get(m["event_ticker"], 0), ts(m["close_time"]))
+            return {m["ticker"]: last[m["event_ticker"]] for m in markets}
+        with mock.patch.object(backtest, "anchors", real_close):
             obs = backtest.load_observations(c, "KXWHEN", 6, max_markets=10_000)
         self.assertTrue(fake_edges(obs))
+
+    def test_daily_runs_test_the_same_markets_as_one_late_run(self):
+        """Research runs daily and sees only what has settled so far. With an event's latest
+        end as the anchor, which markets got tested depended on which had settled: day 1 of
+        "by day 1/2/3?" got in only when it settled NO before the news (the reviewer's
+        simulation: 287 NO, 0 YES, a fake NO edge). Each market's own listed end doesn't
+        move, so daily runs test exactly what one late run would."""
+        own_end = backtest.anchors
+
+        def tested(anchors, daily):
+            shutil.rmtree(backtest.folder("cache"), ignore_errors=True)
+            c = FakeKalshi(can_trade=False)
+            by_date_series(c, events=60)
+            every = c.settled["KXWHEN"]
+            last = int(max(ts(m["close_time"]) for m in every))
+            runs = range(M0 + 12 * H, last + 2 * DAY, DAY) if daily else [last + DAY]
+            with mock.patch.object(backtest, "anchors", anchors):
+                for run in runs:  # a market shows as settled an hour after it closes
+                    c.settled["KXWHEN"] = [m for m in every if ts(m["close_time"]) + H <= run]
+                    backtest.load_observations(c, "KXWHEN", 6, max_markets=10_000)
+            obs = backtest.load_observations(c, "KXWHEN", 6, cached_only=True)
+            return {(o["ticker"], o["decided"], o["result"]) for o in obs}
+
+        def event_latest(markets, strikes=None):  # the event's latest listed end, of those settled
+            ends = own_end(markets, strikes)
+            last = {}
+            for tk, end in ends.items():
+                ev = tk.rsplit("-", 1)[0]
+                last[ev] = max(last.get(ev, 0), end)
+            return {tk: last[tk.rsplit("-", 1)[0]] for tk in ends}
+        self.assertNotEqual(tested(event_latest, daily=True), tested(event_latest, daily=False))
+        once = tested(own_end, daily=False)
+        self.assertGreater(len(once), 60)
+        self.assertEqual(tested(own_end, daily=True), once)
 
     def test_the_schedule_comes_from_times_set_at_listing(self):
         """Kalshi marks almost every market able to close early (all of 5,000+ sampled),
         even weather that stops trading on a fixed schedule. So the schedule comes from
         times set when it was listed, never from when it really closed."""
-        sched = T0 + 100 * H
+        sched = M0 + 100 * H
         fixed = {"ticker": "EV-A", "event_ticker": "EV", "close_time": iso(sched), "can_close_early": False}
         early = {"ticker": "EV-B", "event_ticker": "EV", "close_time": iso(sched - 5 * H), "can_close_early": True,
                  "occurrence_datetime": iso(sched)}
-        self.assertEqual(backtest.event_anchors([fixed, early]), {"EV": sched})
+        self.assertEqual(backtest.anchors([fixed, early]), {"EV-A": sched, "EV-B": sched})
+        # No flag at all counts as "can close early": its close may be the news. Fail closed.
+        self.assertEqual(backtest.anchors([{k: v for k, v in fixed.items() if k != "can_close_early"}]), {})
         # A game closes when it ends (here 40 minutes early). It was listed to end at `sched`.
         game = {"ticker": "G-A", "event_ticker": "G", "open_time": iso(sched - 5 * DAY),
                 "close_time": iso(sched - 40 * 60), "can_close_early": True,
                 "occurrence_datetime": iso(sched), "expected_expiration_time": iso(sched)}
-        self.assertEqual(backtest.event_anchors([game]), {"G": sched})
+        self.assertEqual(backtest.anchors([game]), {"G-A": sched})
         # Weather stops trading at its event's strike_date; its other times come later.
         weather = {"ticker": "HI-T70", "event_ticker": "HI", "open_time": iso(sched - 2 * DAY),
                    "close_time": iso(sched), "can_close_early": True,
                    "occurrence_datetime": iso(sched + 9 * H), "expected_expiration_time": iso(sched + 14 * H)}
-        anchor = backtest.event_anchors([weather], {"HI": iso(sched)})["HI"]
+        anchor = backtest.anchors([weather], {"HI": iso(sched)})["HI-T70"]
         self.assertEqual(backtest.decision_time(weather, 6, anchor=anchor), sched - 6 * H)
         # Without the strike date, the next time is after the close: skipped, never misdated.
-        anchor = backtest.event_anchors([weather])["HI"]
+        anchor = backtest.anchors([weather])["HI-T70"]
         self.assertIsNone(backtest.decision_time(weather, 6, anchor=anchor))
-        # Nothing set at listing on one market: the event's end is a guess. Skip it.
+        # A market with nothing set at listing is left out; its siblings keep their own.
         bare = {"ticker": "X-A", "event_ticker": "X", "close_time": iso(sched), "can_close_early": True}
-        self.assertEqual(backtest.event_anchors([bare, dict(game, ticker="X-B", event_ticker="X")]), {})
+        self.assertEqual(backtest.anchors([bare, dict(game, ticker="X-B", event_ticker="X")]), {"X-B": sched})
+        # expected_expiration_time alone doesn't count: on real markets that closed a day
+        # early (KXLLM1) it equals that early close, so it may be rewritten after the fact.
+        llm = {"ticker": "L-A", "event_ticker": "L", "close_time": iso(sched - DAY), "can_close_early": True,
+               "expected_expiration_time": iso(sched - DAY)}
+        self.assertEqual(backtest.anchors([llm]), {})
+        self.assertEqual(backtest.anchors([dict(llm, occurrence_datetime=iso(sched))]), {"L-A": sched})
+        # Real Fed mention markets: listed to end at 14:00:00 the next day, then set to
+        # 19:56:17, a minute after they really closed. A time with seconds was set after
+        # the fact: no anchor.
+        fed = {"ticker": "F-A", "event_ticker": "F", "close_time": iso(sched - 59), "can_close_early": True,
+               "occurrence_datetime": iso(sched)}
+        self.assertEqual(backtest.anchors([fed]), {"F-A": sched})          # sched is on the minute
+        self.assertEqual(backtest.anchors([dict(fed, occurrence_datetime=iso(sched + 17))]), {})
 
     def test_weather_gets_its_strike_date_from_the_events_list(self):
         c = FakeKalshi(can_trade=False)
@@ -294,16 +385,18 @@ class AnchorTests(TempHome):
                 c.settled.setdefault("KXHIGHNY", []).append({
                     "ticker": tk, "event_ticker": ev, "open_time": iso(close - 2 * DAY), "close_time": iso(close),
                     "status": "finalized", "result": "yes" if won else "no", "volume_fp": "500.00",
-                    "can_close_early": True, "occurrence_datetime": iso(close + 9 * H),
+                    "can_close_early": True, "occurrence_datetime": iso(close // 60 * 60 + 9 * H),
                     "expected_expiration_time": iso(close + 14 * H)})
                 c.candle_data[tk] = [{"end_period_ts": close - 7 * H, "yes_ask": {"close": "0.3100"},
                                       "yes_bid": {"close": "0.3000"}}]
             c.event_list.append({"event_ticker": ev, "series_ticker": "KXHIGHNY", "strike_date": iso(close)})
-        obs = backtest.load_observations(c, "KXHIGHNY", 6, refresh=True)
+        events = c.events
+        c.events = mock.Mock(side_effect=KalshiError("down", 503))
+        self.assertEqual(backtest.load_observations(c, "KXHIGHNY", 6), [])  # skipped, not misdated
+        c.events = events  # back: the same cache must not have written them off
+        obs = backtest.load_observations(c, "KXHIGHNY", 6)
         self.assertEqual(len(obs), 24)
         self.assertTrue(all(o["decided"] == o["close"] - 6 * H for o in obs))
-        c.events = mock.Mock(side_effect=KalshiError("down", 503))  # no strike dates: skipped, not misdated
-        self.assertEqual(backtest.load_observations(c, "KXHIGHNY", 6, refresh=True), [])
 
 
 # ---------- 4. one false-promotion budget for every candidate, ever ----------
@@ -349,7 +442,7 @@ class FeeTests(TempHome):
         c = FakeKalshi()
         m = {"ticker": "FAV-X-1", "event_ticker": "FAV-X", "title": "T", "status": "active",
              "yes_ask_dollars": "0.9300", "yes_bid_dollars": "0.9200", "volume_24h_fp": "500.00",
-             "close_time": iso(time.time() + 5.5 * H)}
+             "can_close_early": False, "close_time": iso(time.time() + 5.5 * H)}
         c.market_list, c.market_info["FAV-X-1"] = [m], m
         c.books["FAV-X-1"] = {"yes": [(0.92, 1.0)], "no": [(0.07, 1.0)]}  # one contract: a whole cent of fee
         e = edge("FAV:yes:0.90-0.95", roi_lo=0.001)
@@ -409,7 +502,7 @@ class MemoryTests(TempHome):
             close = T0 + DAY * 100 + i * DAY
             tk = f"S-NEW{i}"
             c.settled.setdefault("S", []).append({"ticker": tk, "event_ticker": tk, "open_time": iso(close - 3 * DAY),
-                                                  "close_time": iso(close), "status": "finalized", "result": "yes",
+                                                  "can_close_early": False, "close_time": iso(close), "status": "finalized", "result": "yes",
                                                   "volume_fp": "500.00"})
             c.candle_data[tk] = [{"end_period_ts": close - 7 * H, "yes_ask": {"close": "0.9000"},
                                   "yes_bid": {"close": "0.8900"}}]

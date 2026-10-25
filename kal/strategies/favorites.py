@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 
 from .. import sizing
 from ..client import fee, num, price, ts
-from .base import Leg, Signal, Strategy, event_end
+from .base import Leg, Signal, Strategy, scheduled_end
 
 MAX_SPREAD = 0.02       # wider than this and the "price" isn't really known
 MIN_VOLUME_24H = 200    # thin markets: our order would be most of the trading
@@ -108,7 +108,7 @@ TIME_BAND = 1.0  # hours: the edge was measured at one time before close, so tra
 
 
 def near_tested_time(end, now, hours):
-    """True if the event is due to end (`end`, its scheduled end) about `hours` from now:
+    """True if the market is due to end (`end`, its scheduled end) about `hours` from now:
     the moment the backtest measured. A 92c contract 5 minutes before the end is a
     different bet from one 6 hours out."""
     if end is None:
@@ -117,10 +117,10 @@ def near_tested_time(end, now, hours):
     return max(0.0, hours - TIME_BAND) < left <= hours
 
 
-def event_ends(client, series, markets):
-    """{event: scheduled end} for these open markets (base.event_end), with their events'
-    strike dates: the same anchoring the backtest uses. Not close_time: on a game that's a
-    deadline two days after it, long after the market really closes."""
+def market_ends(client, series, markets):
+    """{ticker: scheduled end or None} for these open markets (base.scheduled_end), with
+    their events' strike dates: the same anchoring the backtest uses. Not close_time: on
+    a game that's a deadline two days after it, long after the market really closes."""
     strikes = {}
     try:
         for ev in client.events(status="open", series_ticker=series):
@@ -128,10 +128,7 @@ def event_ends(client, series, markets):
                 strikes[ev["event_ticker"]] = ev["strike_date"]
     except Exception as e:  # without them, weather and indexes just don't match the window
         log.warning("favorites: %s events failed: %s", series, e)
-    by_event = defaultdict(list)
-    for m in markets:
-        by_event[m.get("event_ticker") or m.get("ticker")].append(m)
-    return {ev: event_end(ms, strikes.get(ev)) for ev, ms in by_event.items()}
+    return {m.get("ticker"): scheduled_end(m, strikes.get(m.get("event_ticker"))) for m in markets}
 
 
 def quote(client, ticker, side):
@@ -164,26 +161,40 @@ class Favorites(Strategy):
             by_series[e["series"]].append(e)
         best = {}  # event -> (signal, market, side, edge): markets in one event move together, so one bet each
         held = defaultdict(int)  # series-day -> markets already held there (anyone's)
+        held_any_day = defaultdict(int)  # series -> held markets with no known end: they count on every day
         for series, edges in sorted(by_series.items()):
             try:
                 # Every open market: a game's close_time is days after its scheduled end.
                 markets = ctx.client.markets(status="open", series_ticker=series, min_close_ts=now)
-                ends = event_ends(ctx.client, series, markets)
-                for m in markets:
-                    end = ends.get(m.get("event_ticker") or m.get("ticker"))
-                    if m.get("ticker") in ctx.held and in_series(m, series):
-                        held[group_of(series, end) if end else market_group(m, series)] += 1
-                    pick = self._consider(ctx, m, series, edges, now, end)
-                    if pick and (pick[0].event not in best or pick[0].exp_profit > best[pick[0].event][0].exp_profit):
-                        best[pick[0].event] = pick
             except Exception as e:
                 log.warning("favorites: %s failed: %s", series, e)
+                continue
+            ends = market_ends(ctx.client, series, markets)
+            # Held markets first, so a failure below can't hide them from their day's cap.
+            for m in markets:
+                if m.get("ticker") in ctx.held and in_series(m, series):
+                    end = ends.get(m.get("ticker"))
+                    if end:
+                        held[group_of(series, end)] += 1
+                    else:
+                        held_any_day[series] += 1
+            picks = {}
+            try:
+                for m in markets:
+                    pick = self._consider(ctx, m, series, edges, now, ends.get(m.get("ticker")))
+                    if pick and (pick[0].event not in picks or pick[0].exp_profit > picks[pick[0].event][0].exp_profit):
+                        picks[pick[0].event] = pick
+            except Exception as e:
+                log.warning("favorites: %s failed, none of its bets this run: %s", series, e)
+                continue
+            best.update(picks)
         # One series-day rides one price path, so its bets share one cap. Each market already
         # held there counts as a full bet. Best first, so the cap leaves room for those.
         found, spent = [], defaultdict(float)
         for sig, m, side, e in sorted(best.values(), key=lambda x: -x[0].exp_profit):
             g = sig.meta["group"]
-            room = GROUP_SHARE * ctx.bankroll - held[g] * bet_cap(ctx) - spent[g]
+            n_held = held[g] + held_any_day[e["series"]]
+            room = GROUP_SHARE * ctx.bankroll - n_held * bet_cap(ctx) - spent[g]
             if sig.cost > room + 1e-9:
                 sig = self._signal(ctx, m, side, e, sig.meta["closes"], cap=room)  # smaller, to fit (or none)
             if sig:
@@ -192,8 +203,7 @@ class Favorites(Strategy):
         return sorted(found, key=lambda s: -s.exp_profit)
 
     def _consider(self, ctx, m, series, edges, now, end):
-        """(signal, market, side, edge) for the market, or None. `end`: its event's
-        scheduled end."""
+        """(signal, market, side, edge) for the market, or None. `end`: its scheduled end."""
         tk = m.get("ticker")
         if not tk or tk in ctx.held or not in_series(m, series) or not is_open(m):
             return None
@@ -219,7 +229,7 @@ class Favorites(Strategy):
 
     def _signal(self, ctx, m, side, e, end, cap=math.inf, max_count=None):
         """Price from the order book (fresh, with depth), then size. Never over `cap`
-        dollars or `max_count` contracts. `end`: the event's scheduled end."""
+        dollars or `max_count` contracts. `end`: the market's scheduled end."""
         tk = m["ticker"]
         q = quote(ctx.client, tk, side)
         if not q:

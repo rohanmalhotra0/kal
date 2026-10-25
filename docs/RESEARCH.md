@@ -38,10 +38,15 @@ status: **testing** (add the PR link), **built**, or **rejected** (say why in on
 - Backtest trades pay the real fee: a full-size order, rounded up to the cent.
 - The decision time comes from times Kalshi sets when it lists a market, never from
   when it really closed (that may be the news itself). In order: a close that can't
-  move, the event's strike_date (weather, indexes, crypto), occurrence_datetime (games,
-  mention events), expected_expiration_time. Kalshi marks almost every market "can
-  close early", even weather, so that flag alone tells nothing. A market already closed
-  at the decision time is skipped, as the bot would have found it closed.
+  move (the market must say so), the event's strike_date (weather, indexes, crypto),
+  occurrence_datetime on the whole minute (games). Not expected_expiration_time: it can
+  equal an early close. Not an occurrence time with seconds: Kalshi sets those after
+  the event (Fed mentions). Kalshi marks almost every market "can close early", even
+  weather, so that flag alone tells nothing.
+- Each market has its own decision time. An event's latest end would depend on which
+  of its markets had settled when research ran, and that picks winners.
+- A market already closed at the decision time is skipped, as the bot would have found
+  it closed. Mention words are learned an hour after the event's scheduled end.
 - The 5% chance of promoting luck is spent over looks and over ideas, for good. The
   20th idea ever judged needs far more proof than the first.
 - Demo keeps its own research (`research-demo/`, `cache-demo/`). Nothing is promoted
