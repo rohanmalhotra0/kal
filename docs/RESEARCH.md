@@ -91,11 +91,12 @@ status: **testing** (add the PR link), **built**, or **rejected** (say why in on
 - Risk: medium-high. If the rules differ (source, time, rounding), both legs can lose.
 - Test: pick 3 pairs where the rules text proves the link. Log gaps on paper for 2 weeks.
 
-**7. Scheduled data releases (weather, CPI, jobs)** - untested
+**7. Scheduled data releases (weather, CPI, jobs)** - weather backtest built
 - What: compare the price with a public forecast before the report comes out.
 - Evidence: medium-low. A Fed study found Kalshi macro prices about as good as expert surveys. Weather "edges" online come from sellers, not studies.
 - Risk: medium. Model error, thin markets, news moves first.
 - Test: daily high temps (settle on the NWS Daily Climate Report). Save forecast + price 6h before close for 60+ days. Compare with results.
+- Backtest: `tools/weather_research.py` (`kal/research/weather.py`). Daily highs in 7 cities. It uses the latest NBM forecast run published 2+ hours before the decision time (the Iowa Environmental Mesonet keeps every run). Each city's bias and spread are fitted only on earlier days. It buys where the forecast and the price disagree by 5c or 10c after the taker fee, and counts one day in all cities as one unit. It also compares how well the forecast and the market called the results (Brier score).
 
 **8. Mention words** - built, paper
 - What: YES on words said more often than the price says. NO on less.
