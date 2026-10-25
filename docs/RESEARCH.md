@@ -109,11 +109,12 @@ status: **testing** (add the PR link), **built**, or **rejected** (say why in on
 - Evidence: medium. Bartlett & O'Hara: one-sided flow predicts maker losses in single-name markets.
 - Risk: low. It only removes trades. Next test: did skipped trades do worse than taken ones? (Log the would-be result of each skip.)
 
-**10. Maker quotes + Liquidity Incentive Program** - untested, needs engine work
+**10. Maker quotes + Liquidity Incentive Program** - backtest built, needs engine work to trade
 - What: rest orders instead of taking. Most series charge makers nothing; series with fee_type `quadratic_with_maker_fees` charge 0.0175 x M (a quarter of taker), combos 0.035. Kalshi's LIP pays for resting orders near the best price, even unfilled.
 - Evidence: medium. Makers beat takers (Bürgi et al.). In single-name markets, makers earn ~2x per contract vs broad ones (Bartlett & O'Hara).
 - Risk: high. Better-informed traders pick off resting orders. The engine can't cancel orders. LIP terms change often: check they still apply.
 - Test: paper only. Log would-be quotes. Count a fill when trades go through our price. Score at settlement, plus our LIP share.
+- Backtest: `tools/maker_research.py` (`kal/research/maker.py`). At the decision time, rest a bid at the best bid (or 1c better). It fills only if a later trade went through its price, and every fill pays a maker fee. It reports ROI on fills and ROI if every bid had filled. The gap is the cost of being picked off.
 
 **11. Other venues as a fair-price guide** - untested
 - What: use Polymarket or sportsbook prices to judge Kalshi's. Trade only Kalshi.
