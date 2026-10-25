@@ -164,6 +164,12 @@ def trip(reason):
             data = {}
         data.update(enabled=False, disabled_reason=str(reason) or "stopped")
         _write(data)
+    try:
+        from . import notify
+        notify.send("kal stopped itself", f"{reason}\n\nOpen the dashboard, find out why, then press Reset.",
+                    priority="urgent", tags=("rotating_light",))
+    except Exception:
+        pass  # an alert must never block a trip
 
 
 def turn_off():

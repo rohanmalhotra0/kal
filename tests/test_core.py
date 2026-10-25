@@ -269,6 +269,42 @@ class EngineTests(TempHome):
                     pass
 
 
+class NotifyTests(TempHome):
+    def test_trip_sends_an_urgent_alert_and_survives_failure(self):
+        import os
+        from unittest import mock
+        from kal import notify
+        os.environ["KAL_NTFY_TOPIC"] = "test-topic"
+        self.addCleanup(os.environ.pop, "KAL_NTFY_TOPIC", None)
+        with mock.patch.object(notify.requests, "post") as post:
+            config.trip("lost too much")
+        self.assertIn("lost too much", post.call_args.kwargs["data"].decode())
+        self.assertEqual(post.call_args.kwargs["headers"]["Priority"], "urgent")
+        with mock.patch.object(notify.requests, "post", side_effect=OSError("no network")):
+            config.trip("again")  # must not raise
+        self.assertEqual(config.load()["disabled_reason"], "again")
+
+    def test_no_topic_no_alert(self):
+        from unittest import mock
+        from kal import notify
+        with mock.patch.object(notify.requests, "post") as post:
+            self.assertFalse(notify.send("t", "m"))
+        post.assert_not_called()
+
+    def test_live_trades_alert(self):
+        import os
+        from unittest import mock
+        from kal import notify
+        os.environ["KAL_NTFY_TOPIC"] = "test-topic"
+        self.addCleanup(os.environ.pop, "KAL_NTFY_TOPIC", None)
+        config.update({"enabled": True, "budget": 60,
+                       "strategies": {k: {"mode": "off"} for k in config.DEFAULTS["strategies"]}})
+        config.update({"strategies": {"basket_arb": {"mode": "live"}}})
+        with mock.patch.object(notify.requests, "post") as post:
+            engine.run_once(fake_with_arb())
+        self.assertIn("real trade", post.call_args.kwargs["headers"]["Title"])
+
+
 class RunCacheTests(TempHome):
     def test_strategies_share_one_events_download(self):
         config.update({"enabled": True, "budget": 60,

@@ -177,7 +177,21 @@ def run_once(client=None):
             _count_error(cfg, e)
         db.insert("runs", kind="trade", ok=int(summary["ok"]), duration=time.time() - t0,
                   message=json.dumps(summary)[:4000])
+        if summary.get("live_trades"):
+            _alert_trades(summary)
         return summary
+
+
+def _alert_trades(summary):
+    try:
+        from . import notify
+        rows = db.query("SELECT strategy, title, cost, exp_profit, guaranteed FROM signals "
+                        "WHERE status = 'executed' ORDER BY id DESC LIMIT ?", summary["live_trades"])
+        lines = [f"{'locked-in' if r['guaranteed'] else 'bet'}: ${r['cost']:.2f} on {r['title'][:50]} "
+                 f"(expect +${r['exp_profit']:.2f})" for r in rows]
+        notify.send(f"kal made {summary['live_trades']} real trade(s)", "\n".join(lines), tags=("moneybag",))
+    except Exception:
+        log.warning("trade alert failed", exc_info=True)
 
 
 def _count_error(cfg, e):
