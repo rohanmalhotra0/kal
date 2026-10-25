@@ -26,17 +26,17 @@ It runs by itself on a $6-a-month server.
    sudo bash /opt/kal/deploy/install.sh
    ```
    Write down the **dashboard password** and **alerts topic** it prints.
-6. **Send it your key file.** In a *second* terminal on your computer:
-   `scp ~/Downloads/YOUR_KEY_FILE root@SERVER_IP:/tmp/kalshi.pem`
+6. **Send it your key file.** It goes straight into the bot's own folder, which only the bot can open.
+   In a *second* terminal on your computer:
+   `scp ~/Downloads/YOUR_KEY_FILE root@SERVER_IP:/var/lib/kal/kalshi.pem`
    In the Web Console instead: open the key file in a text editor and copy all of it.
-   Then type `nano /tmp/kalshi.pem`, paste, and press Ctrl+O, Enter, Ctrl+X.
+   Then type `nano /var/lib/kal/kalshi.pem`, paste, and press Ctrl+O, Enter, Ctrl+X.
 7. **Answer 5 questions.** Back on the server: `sudo kal setup`
-   - Key ID: paste it. Key file: `/tmp/kalshi.pem`.
+   - Key ID: paste it. Key file: press Enter (it's already in place).
    - Practice or real: **real** (new ideas still start on paper).
    - Budget: **300**. Alerts: yes.
 
    It checks everything, then asks to turn the bot on. Say yes.
-   Then delete the copy: `sudo rm /tmp/kalshi.pem`
    Check it any time: `sudo kal doctor` (one list; it ends with "Ready." when all is well).
 8. **Phone alerts.** Install the free **ntfy** app. Subscribe to the topic from step 5.
    Then on the server: `sudo kal summary --send`. No buzz? The name is wrong.

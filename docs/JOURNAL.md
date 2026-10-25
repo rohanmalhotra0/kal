@@ -2,6 +2,34 @@
 
 Newest first. Each 2-hour check-in adds one entry: what it checked, what it found, links.
 
+## 2026-10-25 18:40 UTC — server up, installer fixed, all finished PRs merged, date ladders built
+
+- **Server:** the owner made the droplet (2 GB, NYC1, Ubuntu 24.04, $12 a month). He is doing
+  install and setup in its Web Console. No status report yet.
+- **Installer, tested on a fresh Ubuntu 24.04** (side branch `probe/install`):
+  - main's install worked, and `kal doctor` showed only "no key yet";
+  - but `apt-get` stops at once while Ubuntu's own first-boot updates hold its locks.
+  - Fixed in #19: it waits and says so once. With both locks held for 60 s it finished in 91 s.
+  https://github.com/rohanmalhotra0/kal/pull/19
+- **Key file** (#20): it goes straight to `/var/lib/kal/kalshi.pem`, so no copy is left in
+  `/tmp`. `kal doctor` warns if one is. https://github.com/rohanmalhotra0/kal/pull/20
+- **Merged at the owner's request ("push all PRs to main once done"):** #9, #10, #11, #12,
+  #19, #20 (#18 by the owner). Each was tested on the main it landed on, with CI green.
+  #12's merge dropped weather's `quiet()` (it used a removed constant), and a test now
+  catches any stale `backtest.<name>`.
+- **Idea #5 rerun** (busy markets only, 1 h / 6 h / 24 h, bar raised for 3x the tries): no
+  edge at any horizon. Best: 24 h, NO 95c+ with tight spreads, +0.1% (worst -1.6%).
+  https://github.com/rohanmalhotra0/kal/pull/12#issuecomment-6401349260
+- **Idea #11 (Polymarket):** no edge. 3,132 matched games, a Brier tie.
+  https://github.com/rohanmalhotra0/kal/pull/18
+- **Idea #6, date ladders:** 8 hours of real locked gaps in 88,407 pair-hours, in 5 events.
+  - Built `date_ladder_arb`, paper only until a person checks it (`verified`).
+  - Independent review found a blocker: negated rules ("has not released before") passed.
+    Fixed: the rules must say "if it happens before <its own date>".
+  - "After issuance" windows pair only in listing order.
+  - Real data: 307 of 405 open ladders pass, and 4 of the 5 gap events.
+  https://github.com/rohanmalhotra0/kal/pull/21
+
 ## 2026-10-25 16:50 UTC — check-in: all green; interest can't stretch the $300 rule
 
 - Checked: CI and market-check green on main 0ec62f8 (with #13, #14, #15). Self-test
