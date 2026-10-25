@@ -1,4 +1,5 @@
 """What every strategy implements, and what it hands the engine."""
+import re
 from dataclasses import dataclass, field
 
 from ..client import fee, ts
@@ -56,6 +57,53 @@ def scheduled_end(m, strike_date=None):
         return t
     t = _time(m.get("occurrence_datetime"))
     return t if t and t % 60 == 0 else None
+
+
+# The fair-price clauses nearly every game and weather market has (2,257 of 5,658 one-winner
+# events on 2026-10-25), word for word: Kalshi picks the price only if a game is cancelled,
+# postponed or never started, or (weather) no data comes. Exact wording, not keywords: "if the
+# match is cancelled or a player dies ..." must not pass.
+_WHO = r"(?:the market|all markets|both markets)"
+_WINDOW = r"48 hours|2 days|two days"
+CANCELLATION_CLAUSES = [re.compile(p, re.I) for p in (
+    rf"if the (?:game|match|race) is cancell?ed or rescheduled to over (?:{_WINDOW}) away, {_WHO} "
+    r"will resolve to a fair price(?: in accordance with the rules)?\.",
+    rf"if the (?:game|match|race|qualifying session) is (?:cancell?ed(?:, moved to a different circuit,)? or )?"
+    rf"not started within (?:{_WINDOW})(?: of its originally scheduled start)?, {_WHO} will resolve to a fair price"
+    r"(?: in accordance with the rules)?\.",
+    rf"if the cancell?ed (?:game|event) is not played or is rescheduled further than (?:{_WINDOW}|two weeks) "
+    rf"out, {_WHO} will resolve to a fair price(?: for each team)?(?: in accordance with the rules)?\.",
+    r"if the race is moved to a different circuit, rescheduled more than 48 hours later, or cancell?ed, "
+    r"all markets settle to a fair price\.",
+    r"if the match does not occur \(signaled by a ball being played\) due to a player injury, walkover, "
+    r"forfeiture, or any other cancellation \(all before the match starts\), the market will resolve to a fair "
+    r"price in accordance with the rules\.",
+    r"if no data is available at the end of this period, all markets will resolve to the last fair price "
+    r"determined by kalshi\.",
+)]
+
+
+def _sentences(text):
+    return [s.strip() for s in re.split(r"(?<=[.!?])\s+|[;:\n]+", text or "") if s.strip()]
+
+
+def fair_price_only_if_cancelled(markets):
+    """True if every market is binary with no payout floor or cap, and every sentence of its
+    rules that names a fair or last traded price is one of CANCELLATION_CLAUSES, word for
+    word. Such a market pays $0 or $1 unless a game is cancelled or never played (or no data
+    comes); then Kalshi picks the price, so a basket of them is not locked in. Fails closed:
+    any other fair-price sentence (a death clause, the exchange's discretion) means no."""
+    for m in markets:
+        if m.get("market_type", "binary") != "binary":
+            return False
+        if m.get("settlement_bounds_type", "default") != "default":
+            return False
+        for field in ("rules_primary", "rules_secondary"):   # apart: never one run-on sentence
+            for sentence in _sentences(m.get(field)):
+                if any(w in sentence.lower() for w in FAIR_PRICE_WORDS) and \
+                        not any(c.fullmatch(sentence) for c in CANCELLATION_CLAUSES):
+                    return False
+    return True
 
 
 @dataclass
@@ -124,6 +172,7 @@ class Context:
     research: dict             # outputs of kal.research, keyed by file name
     params: dict               # this strategy's settings from config
     open_exposure: float = 0.0  # dollars already in open directional bets (for sizing caps)
+    held_paper: frozenset = frozenset()  # tickers open on paper (paper-only signals of a live scan)
 
 
 class Strategy:

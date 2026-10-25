@@ -111,7 +111,7 @@ def _has_key():
 
 
 def order_test(cfg, key_id):
-    """The $0.01 test order that real money waits for (kal/gate.py): has it passed for this
+    """The $0.01 test orders that real money waits for (kal/gate.py): has it passed for this
     key and exchange? A pass for another key or exchange doesn't count."""
     rec = gate.status()
     ok = gate.passed_for(key_id, cfg["env"])
