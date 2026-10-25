@@ -6,7 +6,7 @@ from unittest import mock
 
 import requests
 
-from kal import client, config, db, engine, ledger, maintenance, risk
+from kal import client, config, db, engine, ledger, maintenance, paper, risk
 from kal.client import KalshiError
 from kal.strategies import basket_arb
 from tests.fakes import FakeKalshi
@@ -56,6 +56,68 @@ class LiveBasketTests(TempHome):
         config.update({"enabled": True})
         engine.run_once(c)   # reported once: Reset lets the bot carry on
         self.assertEqual(config.load()["disabled_reason"], "")
+
+    def test_a_cancellation_clause_basket_trades_on_paper_even_when_live(self):
+        # If the game is cancelled, Kalshi settles at a price it picks: not locked in, so
+        # basket_arb's live mode must not put real money into it.
+        c = fake_with_arb()
+        for m in c.event_list[0]["markets"]:
+            m["rules_primary"] = ("If this team wins, Yes. If the game is cancelled or not started within "
+                                  "48 hours of its originally scheduled start, the market will resolve to a fair price.")
+        s = engine.run_once(c)
+        self.assertTrue(s["ok"], s)
+        self.assertEqual((s["live_trades"], s["paper_trades"]), (0, 1))
+        self.assertEqual(list(c.orders), [])                      # not one real order
+        row = db.query("SELECT mode, status, guaranteed, meta FROM signals")[0]
+        self.assertEqual((row["mode"], row["status"], row["guaranteed"]), ("paper", "accepted", 0))
+        self.assertIs(json.loads(row["meta"])["paper_only"], True)
+        self.assertGreater(paper.open_directional(), 0)   # counts against the bet exposure cap
+        # The same event without the clause trades for real, as before.
+        for m in c.event_list[0]["markets"]:
+            del m["rules_primary"]
+        db.execute("DELETE FROM paper")
+        s = engine.run_once(c)
+        self.assertEqual(s["live_trades"], 1)
+
+    GAME = ("If this team wins, Yes. If the game is cancelled or not started within 48 hours of its "
+            "originally scheduled start, the market will resolve to a fair price.")
+
+    def clause_events(self, n):
+        c = FakeKalshi()
+        c.event_list = []
+        for i in range(n):
+            ev = arb_event(f"EV{i + 1}")
+            for m in ev["markets"]:
+                m["rules_primary"] = self.GAME
+                b = float(m["yes_bid_dollars"])
+                c.books[m["ticker"]] = {"yes": [(b, 40)], "no": []}
+                c.market_info[m["ticker"]] = {"ticker": m["ticker"], "status": "active",
+                                              "yes_bid_dollars": f"{b:.4f}", "no_bid_dollars": f"{1 - b - 0.01:.4f}"}
+            c.event_list.append(ev)
+        return c
+
+    def test_an_open_paper_basket_is_not_logged_again_every_run(self):
+        c = self.clause_events(1)
+        engine.run_once(c)
+        engine.run_once(c)
+        engine.run_once(c)
+        self.assertEqual(len(db.query("SELECT id FROM signals")), 1)   # found once, not once a run
+
+    def test_not_locked_in_baskets_share_at_most_a_quarter_of_the_paper_money(self):
+        # A day with many close games must not use up the paper money that other ideas
+        # need to prove themselves.
+        config.update({"paper_bankroll": 100.0})
+        c = self.clause_events(5)
+        s = engine.run_once(c)
+        self.assertTrue(s["ok"], s)
+        held = paper.open_cost_by_kind().get("cancel_clause_basket", 0)
+        self.assertGreater(held, 0)
+        self.assertLessEqual(held, basket_arb.PAPER_SHARE * 100.0 + 1e-9)
+        skipped = [r["status"] for r in db.query("SELECT status FROM signals") if r["status"] != "accepted"]
+        self.assertTrue(skipped)
+        self.assertTrue(all("25% share of the paper money" in x for x in skipped), skipped)
+        self.assertEqual(s["paper_trades"], len(db.query("SELECT id FROM signals WHERE status = 'accepted'")))
+        self.assertEqual(list(c.orders), [])   # and never a real order
 
     def test_a_finished_basket_left_accepted_is_just_recorded(self):
         legs = [{"ticker": f"EV1-{i}", "side": "no", "price": 0.5, "count": 10} for i in range(2)]
