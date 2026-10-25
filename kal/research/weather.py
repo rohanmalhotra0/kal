@@ -10,8 +10,8 @@ after fees. Research only: it places nothing.
 No peeking:
 - the price is the backtest's usual one: the last hourly candle that ended by the
   decision time, H hours before the market's scheduled end;
-- every market counts, even quiet ones: the backtest's usual volume filter uses volume
-  known only after a market settles, and dead brackets (mostly losers) are the quiet ones;
+- every market counts, even quiet ones (dead brackets, mostly losers): load_observations
+  no longer filters on volume known only after a market settles;
 - the forecast is the latest NBM run that started 2+ hours before the decision time
   (a run takes about an hour to publish);
 - a city's forecast bias and spread are fitted only on days that settled before the
@@ -27,7 +27,6 @@ import statistics
 from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
 
-from ..client import UnknownSettlement, num, yes_payout
 from ..strategies.favorites import cost_each
 from . import backtest
 
@@ -208,35 +207,9 @@ def tiling(markets):
     return len(by_event), ok
 
 
-def quiet(client, series, obs, markets, hours_before_close):
-    """The markets load_observations skipped for low lifetime volume, priced the same way.
-    That filter uses volume known only after settling, and the brackets far from the
-    result (the losers) are the quiet ones, so leaving them out flatters YES."""
-    have, anchor = {o["ticker"] for o in obs}, {o["event"]: o["anchor"] for o in obs}
-    out = []
-    for m in markets:
-        tk, ev = m.get("ticker"), m.get("event_ticker")
-        if not tk or tk in have or ev not in anchor or num(m, "volume") >= backtest.MIN_VOLUME:
-            continue
-        try:
-            value = yes_payout(m)
-        except UnknownSettlement:
-            continue
-        if value is None or m.get("result") not in ("yes", "no"):
-            continue
-        t = backtest.decision_time(m, hours_before_close, anchor=anchor[ev])
-        snap = t and backtest.snapshot(client, series, m, hours_before_close, anchor=anchor[ev])
-        if snap:
-            out.append({"series": series, "event": ev, "ticker": tk, "close": backtest._close(m) or anchor[ev],
-                        "anchor": anchor[ev],
-                        "decided": t, "yes_ask": snap[0], "yes_bid": snap[1], "result": m["result"],
-                        "yes_value": value})
-    return out
-
-
 def priced(obs, markets, fc):
     """Each priced market with its forecast chance of YES, from fits on earlier days only.
-    obs: price rows for one series (load_observations plus quiet). markets: its settled
+    obs: price rows for one series (load_observations). markets: its settled
     markets. fc: {event: (mu, ...) or None}. Returns rows with "p" (and "mu", "bias", "s")."""
     info = {m["ticker"]: m for m in markets}
     won = winners(markets)

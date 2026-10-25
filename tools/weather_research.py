@@ -56,8 +56,7 @@ def main():
             try:
                 obs = backtest.load_observations(client, series, h, max_markets=args.markets_per_series)
                 markets = client.settled_markets(series, args.markets_per_series)
-                hushed = weather.quiet(client, series, obs, markets, h)   # what the volume filter left out
-                obs = obs + hushed
+                hushed = [o for o in obs if (o.get("volume") or 0) < backtest.BUSY]   # quiet the day before
                 events, tiled = weather.tiling(markets)
                 wants = {o["event"]: (weather.run_for(o["decided"]), weather.day_of(o["anchor"])) for o in obs}
                 cache = os.path.join(backtest.folder("cache"), f"nbm_{station}.json")

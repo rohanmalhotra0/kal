@@ -39,9 +39,12 @@ def good_markets():
     return [m1, m2]
 
 
-def candle(t, bid="0.4500", ask="0.4700"):
-    return {"end_period_ts": int(t), "yes_bid": {"close_dollars": bid}, "yes_ask": {"close_dollars": ask},
-            "price": {"close_dollars": "0.4600"}}
+def candle(t, bid="0.4500", ask="0.4700", volume="12.00"):
+    c = {"end_period_ts": int(t), "yes_bid": {"close_dollars": bid}, "yes_ask": {"close_dollars": ask},
+         "price": {"close_dollars": "0.4600"}}
+    if volume is not None:
+        c["volume_fp"] = volume
+    return c
 
 
 class GoodFake(FakeKalshi):
@@ -693,6 +696,13 @@ class SelftestTests(TempHome):
         c = GoodFake()
         c.candle_data = {}
         self.assertFails(c, "candlesticks")
+        # Research counts a market as busy from candle volume: without it, nothing is tested.
+        c.candle_data = {"KXA-1": [candle(NOW - 60, volume=None)]}
+        self.assertFails(c, "candlesticks")
+        c.candle_data = {"KXA-1": [candle(NOW - 60, volume="lots")]}
+        self.assertFails(c, "candlesticks")
+        c.candle_data = {"KXA-1": [dict(candle(NOW - 60, volume=None), volume=250)]}   # historical shape
+        self.assertTrue(rows_by_check(selftest.run(c))["candlesticks"]["ok"])
 
     def test_candles_move_past_a_wrong_series(self):
         c = GoodFake()

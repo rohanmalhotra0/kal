@@ -29,11 +29,12 @@ from ..strategies.base import scheduled_end
 from ..strategies.mentions import MAX_PER_TRADE, MIN_HISTORY, mention_side, word_estimate, word_of
 
 BUCKETS = [0, 0.05, 0.10, 0.20, 0.30, 0.40, 0.50, 0.60, 0.70, 0.80, 0.90, 0.95, 1.0]
-MIN_VOLUME = 100            # settled markets almost nobody traded tell us little
+BUSY = favorites.MIN_VOLUME_24H   # contracts traded in the day before the decision, as the live strategies ask
 MIN_TRADES, MIN_EVENTS = 30, 10   # events: series-days (see group)
 MARGINS = [0.10, 0.15, 0.20, 0.25]
 ALPHA = 0.05                # 95% confidence, before the Bonferroni split
 LOOKBACK_HOURS = 12         # an older price is too stale to call "the price at decision time"
+VOLUME_HOURS = 24           # "busy" is measured over the day before the decision
 LEARN_LAG = 3600            # a mention event's words are known an hour after its scheduled end
 CACHE_MAX = 3000            # markets kept per series: as many as any backtest here asks for
 
@@ -104,19 +105,37 @@ def strike_dates(client, series, markets):
     return out
 
 
-def snapshot(client, series, m, hours_before_close=6, hours_after_open=None, anchor=None):
-    """(yes_ask, yes_bid) from the last candle that ENDED by the decision time.
-    Later candles are dropped even if the API sends them: that's the no-look-ahead rule."""
+def _volume(c):
+    for k in ("volume_fp", "volume"):   # live candles send volume_fp, historical ones volume
+        v = c.get(k)
+        if v not in (None, ""):
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                return 0.0
+    return 0.0
+
+
+def snapshot(client, series, m, hours_before_close=6, hours_after_open=None, anchor=None, with_volume=False):
+    """(yes_ask, yes_bid) from the last candle that ENDED by the decision time, at most
+    LOOKBACK_HOURS old. with_volume adds the contracts traded in the VOLUME_HOURS before
+    the decision: (ask, bid, volume). Later candles are dropped even if the API sends
+    them: that's the no-look-ahead rule."""
     t = decision_time(m, hours_before_close, hours_after_open, anchor)
     if t is None:
         return None
-    start = t - LOOKBACK_HOURS * 3600
+    start = t - max(LOOKBACK_HOURS, VOLUME_HOURS) * 3600
     candles = [c for c in client.candles(series, m["ticker"], start, t)
                if isinstance(c.get("end_period_ts"), (int, float)) and start <= c["end_period_ts"] <= t]
     for c in sorted(candles, key=lambda c: -c["end_period_ts"]):
+        if c["end_period_ts"] < t - LOOKBACK_HOURS * 3600:
+            return None   # nothing fresh enough
         ask, bid = candle_close(c, "yes_ask"), candle_close(c, "yes_bid")
         if 0 < ask <= 1 and bid < ask:
-            return ask, bid
+            if not with_volume:
+                return ask, bid
+            day = t - VOLUME_HOURS * 3600
+            return ask, bid, sum(_volume(x) for x in candles if x["end_period_ts"] > day)
     return None
 
 
@@ -128,10 +147,12 @@ def _when(hours_before_close, hours_after_open):
 
 def cache_path(series, hours_before_close=6, hours_after_open=None):
     safe = re.sub(r"[^A-Za-z0-9_.-]", "_", series)
+    # v5: every market, with the volume traded in the day before the decision (v4 skipped
+    # markets with little volume over their whole life, known only once they settled).
     # v4: the decision time comes from times set when the market was listed (v2's could be
     # the news itself; v3 skipped nearly everything, since Kalshi marks almost every market
     # as able to close early)
-    return os.path.join(folder("cache"), f"{safe}_{_when(hours_before_close, hours_after_open)}_v4.json")
+    return os.path.join(folder("cache"), f"{safe}_{_when(hours_before_close, hours_after_open)}_v5.json")
 
 
 def _read_cache(path):
@@ -188,7 +209,9 @@ def load_observations(client, series, hours_before_close=6, hours_after_open=Non
                     value = yes_payout(m)  # 1, 0, or in between: cancelled games really pay $0.33
                 except UnknownSettlement:
                     value = None
-                if not tk or tk in cache or value is None or num(m, "volume") < MIN_VOLUME:
+                # No filter on the market's total volume: it's known only once it settles,
+                # and markets far from the result go quiet, so it would drop mostly losers.
+                if not tk or tk in cache or value is None:
                     continue
                 res = m["result"] if m.get("result") in ("yes", "no") else "scalar"
                 ev = m.get("event_ticker") or tk
@@ -198,7 +221,7 @@ def load_observations(client, series, hours_before_close=6, hours_after_open=Non
                 if decision_time(m, hours_before_close, hours_after_open, anchor) is None:
                     continue  # not cached: a strike date found later may give it a time
                 try:
-                    snap = snapshot(client, series, m, hours_before_close, hours_after_open, anchor)
+                    snap = snapshot(client, series, m, hours_before_close, hours_after_open, anchor, with_volume=True)
                 except Exception as e:  # one market's candles failing shouldn't sink the series
                     errors, last_error = errors + 1, e
                     if errors >= 10 and errors > new:
@@ -210,17 +233,23 @@ def load_observations(client, series, hours_before_close=6, hours_after_open=Non
                     "series": series, "event": ev, "ticker": tk,
                     "word": word_of(m), "close": ts(m["close_time"]), "anchor": anchor,
                     "decided": decision_time(m, hours_before_close, hours_after_open, anchor),
-                    "yes_ask": snap[0], "yes_bid": snap[1], "result": res, "yes_value": value}
+                    "yes_ask": snap[0], "yes_bid": snap[1], "volume": snap[2], "result": res, "yes_value": value}
         finally:
             if new:  # Kalshi lists up to max_markets recent ones plus as many from /historical
                 cache = _write_cache(path, cache, max(CACHE_MAX, 2 * max_markets), listed)
-                for v in ("_v2.json", "_v3.json"):
-                    old = path[:-len("_v4.json")] + v
+                for v in ("_v2.json", "_v3.json", "_v4.json"):
+                    old = path[:-len("_v5.json")] + v
                     if os.path.exists(old):
                         os.remove(old)  # an old format, never read again: free the disk
         if errors:
             log.warning("%s: %d markets skipped (candles failed): %s", series, errors, last_error)
     return sorted((o for o in cache.values() if _priced(o)), key=lambda o: (o["close"], o["ticker"]))
+
+
+def busy(obs):
+    """The rows the live strategies could have traded: BUSY+ contracts traded in the day
+    before the decision (they check volume_24h the same way)."""
+    return [o for o in obs if (o.get("volume") or 0) >= BUSY]
 
 
 # ---------- statistics ----------
@@ -427,9 +456,11 @@ def run(series, hours_before_close=6, hours_after_open=None, client=None, refres
     obs = []
     for s in series:
         obs += load_observations(client, s, hours_before_close, hours_after_open, max_markets, refresh)
-    rows = calibration(obs)
-    mentions = mention_backtest(obs)
-    results = {"observations": len(obs), "events": len({o["event"] for o in obs}), "calibration": rows,
+    traded = busy(obs)                # prices: only what the live strategies could have traded
+    rows = calibration(traded)
+    mentions = mention_backtest(obs)  # words: every market
+    results = {"observations": len(obs), "events": len({o["event"] for o in obs}), "busy": len(traded),
+               "busy_min": BUSY, "calibration": rows,
                "edges": [r for r in rows if is_edge(r)],
                "mentions": {"best": mentions["best"], "margins": mentions["margins"]}}
     record("manual", {"series": list(series), "hours_before_close": hours_before_close,

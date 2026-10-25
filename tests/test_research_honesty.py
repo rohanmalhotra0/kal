@@ -3,12 +3,15 @@
 One class per review finding: hourly luck, demo data on prod, the news-time anchor, the
 promotion budget over time, rounded fees, retirements that survive a rebuild, research
 memory, and research that daily restarts kept killing."""
+import contextlib
+import io
 import math
 import os
 import random
 import shutil
 import signal
 import statistics
+import sys
 import time
 from datetime import datetime, timezone
 from unittest import mock
@@ -422,9 +425,10 @@ class CoverageGuardTests(TempHome):
                 "status": "finalized", "result": "no", "volume_fp": "500.00", "can_close_early": True,
                 "occurrence_datetime": iso(close)})
             c.candle_data[tk] = [{"end_period_ts": close - 7 * H, "yes_ask": {"close": "0.3100"},
-                                  "yes_bid": {"close": "0.3000"}}]
+                                  "yes_bid": {"close": "0.3000"}, "volume": "500.00"}]
         ok, lines = tool.check(c, {"S": 25})
         self.assertTrue(ok, lines)
+        self.assertIn("30 busy", lines[0])
         for m in c.settled["S"]:
             del m["occurrence_datetime"]  # what #6 did to real markets: nothing anchors them
         ok, lines = tool.check(c, {"S": 25})
@@ -432,6 +436,24 @@ class CoverageGuardTests(TempHome):
         self.assertIn("LOW  S: 0 priced markets", lines[0])
         c.settled_markets = mock.Mock(side_effect=KalshiError("down", 503))
         self.assertFalse(tool.check(c, {"S": 25})[0])  # an API failure fails it too
+
+    def test_unreadable_candle_volume_fails_the_check(self):
+        # Research tests only busy markets. If Kalshi renamed the volume field, every
+        # market would look quiet and research would test nothing, with prices still read.
+        tool = self.tool()
+        c = FakeKalshi(can_trade=False)
+        for i in range(30):
+            close = M0 + (i + 10) * DAY
+            tk = f"S-{i}"
+            c.settled.setdefault("S", []).append({
+                "ticker": tk, "event_ticker": tk, "open_time": iso(close - 2 * DAY), "close_time": iso(close),
+                "status": "finalized", "result": "no", "volume_fp": "500.00", "can_close_early": False})
+            c.candle_data[tk] = [{"end_period_ts": close - 7 * H, "yes_ask": {"close": "0.3100"},
+                                  "yes_bid": {"close": "0.3000"}, "traded": "500.00"}]
+        ok, lines = tool.check(c, {"S": 25})
+        self.assertFalse(ok)
+        self.assertIn("30 priced markets, 0 busy", lines[0])
+        self.assertIn("LOW  busy markets in all: 0", lines[1])
 
 
 # ---------- 4. one false-promotion budget for every candidate, ever ----------
@@ -524,7 +546,7 @@ def crashing_job():
 class MemoryTests(TempHome):
     def test_the_price_cache_stops_growing(self):
         path = backtest.cache_path("S", 6)
-        olds = [path.replace("_v4.json", v) for v in ("_v2.json", "_v3.json")]
+        olds = [path.replace("_v5.json", v) for v in ("_v2.json", "_v3.json", "_v4.json")]
         for v in olds:
             with open(v, "w") as f:
                 f.write('{"version": 1, "markets": {}}')   # an old cache: its prices may peek
@@ -665,3 +687,183 @@ class ResearchKeepsOneExchangeTests(TempHome):
             self.assertEqual(len(db.query("SELECT * FROM runs WHERE kind = 'research'")), 1)
         with db.pinned("demo"):
             self.assertEqual(db.query("SELECT * FROM runs WHERE kind = 'research'"), [])
+
+
+# ---------- 5. no filter on volume known only after settling ----------
+
+class VolumeTests(TempHome):
+    """The backtest used to skip markets with under 100 contracts traded over their whole
+    life. That's known only once a market settles, and markets far from the result go
+    quiet, so it dropped mostly losers and flattered YES."""
+
+    def market(self, c, i, won, life_volume, day_volume, price=0.30):
+        close = M0 + (i + 10) * DAY
+        tk = f"Q-{i}"
+        c.settled.setdefault("Q", []).append({
+            "ticker": tk, "event_ticker": tk, "open_time": iso(close - 3 * DAY), "can_close_early": False,
+            "close_time": iso(close), "status": "finalized", "result": "yes" if won else "no",
+            "volume_fp": f"{life_volume:.2f}"})
+        t = close - 6 * H
+        c.candle_data[tk] = [
+            {"end_period_ts": t - 30 * H, "volume_fp": "9999.00"},          # more than a day before: not counted
+            {"end_period_ts": t - 20 * H, "volume_fp": f"{day_volume / 2:.2f}"},
+            {"end_period_ts": t - H, "volume_fp": f"{day_volume / 2:.2f}",
+             "yes_ask": {"close": f"{price + 0.01:.4f}"}, "yes_bid": {"close": f"{price - 0.01:.4f}"}}]
+
+    def test_quiet_losers_no_longer_fake_a_yes_edge(self):
+        c, rng = FakeKalshi(can_trade=False), random.Random(4)
+        for i in range(400):
+            won = rng.random() < 0.31                   # fair at a 31c ask
+            quiet = not won and rng.random() < 0.5      # half the losers barely trade after
+            self.market(c, i, won, 40 if quiet else 900, 300)
+        obs = backtest.load_observations(c, "Q", 6, max_markets=10_000)
+        self.assertEqual(len(obs), 400)                 # the quiet ones count too
+        row = next(r for r in backtest.calibration(obs, by_side=True) if r["side"] == "yes" and r["lo"] == 0.30)
+        self.assertLess(row["roi_lo"], 0)               # no edge in a fair market
+        self.assertGreater(row["roi"], -0.25)
+
+    def test_busy_is_measured_in_the_day_before_the_decision(self):
+        c = FakeKalshi(can_trade=False)
+        self.market(c, 0, True, 40, 300)                # quiet over its life, busy before the decision
+        self.market(c, 1, True, 900, 100)               # busy over its life, quiet before the decision
+        obs = {o["ticker"]: o for o in backtest.load_observations(c, "Q", 6, max_markets=10_000)}
+        self.assertEqual(obs["Q-0"]["volume"], 300)     # the 9,999 from 30 hours before isn't counted
+        self.assertEqual([o["ticker"] for o in backtest.busy(obs.values())], ["Q-0"])
+
+    def test_research_for_live_strategies_uses_busy_markets_only(self):
+        seen = []
+        real = backtest.calibration
+
+        def spy(obs, *a, **k):
+            seen.append(list(obs))
+            return real(obs, *a, **k)
+        c = FakeKalshi(can_trade=False)
+        for i in range(40):
+            self.market(c, i, i % 3 == 0, 900, 300 if i % 2 else 50)
+        c.series_list = [{"ticker": "Q", "category": "Weather", "frequency": "daily"}]
+        with mock.patch.object(backtest, "calibration", side_effect=spy):
+            discover.run(c, config.load(), series=["Q"])
+        self.assertTrue(seen)
+        self.assertTrue(all(o["volume"] >= backtest.BUSY for o in seen[0]))
+        self.assertEqual(len(seen[0]), 20)
+
+    def test_the_manual_backtest_prices_busy_markets_only(self):
+        seen = []
+        real = backtest.calibration
+
+        def spy(obs, *a, **k):
+            seen.append(list(obs))
+            return real(obs, *a, **k)
+        c = FakeKalshi(can_trade=False)
+        for i in range(40):
+            self.market(c, i, i % 3 == 0, 900, 300 if i % 2 else 50)
+        with mock.patch.object(backtest, "calibration", side_effect=spy):
+            res = backtest.run(["Q"], client=c)
+        self.assertEqual(len(seen[0]), 20)
+        self.assertEqual(res["observations"], 40)       # mention words still learn from every market
+
+    def deep_research(self):
+        import importlib.util
+        path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tools", "deep_research.py")
+        spec = importlib.util.spec_from_file_location("deep_research", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def test_deep_research_counts_busy_markets_and_every_table(self):
+        tool = self.deep_research()
+        c = FakeKalshi(can_trade=False)
+        for i in range(40):
+            self.market(c, i, i % 3 == 0, 900, 300 if i % 2 else 50)
+        c.series_list = [{"ticker": "Q", "category": "Weather", "frequency": "daily"}]
+        for extra, n in (([], 20), (["--all-markets"], 40)):
+            out = io.StringIO()
+            with mock.patch.object(tool, "Kalshi", return_value=c), \
+                    mock.patch.object(sys, "argv", ["deep_research.py", "--series-per-category", "1"] + extra), \
+                    contextlib.redirect_stdout(out):
+                tool.main()
+            text = out.getvalue()
+            self.assertIn(f"\n{n} priced markets, {n} events", text)
+            # 2 sides x 12 price ranges x 2 tables (any spread, tight) x (1 category + ALL)
+            self.assertIn("for 96 tries", text)
+
+    def candles(self, c, tk, *candles):
+        c.candle_data[tk] = [dict(x) for x in candles]
+
+    def decided(self, c, i):
+        return next(m for m in c.settled["Q"] if m["ticker"] == f"Q-{i}"), M0 + (i + 10) * DAY - 6 * H
+
+    def test_a_price_older_than_12_hours_is_not_used(self):
+        c = FakeKalshi(can_trade=False)
+        self.market(c, 0, True, 900, 300)
+        m, t = self.decided(c, 0)
+        quote = {"yes_ask": {"close": "0.3100"}, "yes_bid": {"close": "0.2900"}, "volume_fp": "300.00"}
+        self.candles(c, "Q-0", dict(quote, end_period_ts=t - 12 * H))
+        self.assertEqual(backtest.snapshot(c, "Q", m, 6), (0.31, 0.29))
+        self.assertEqual(backtest.snapshot(c, "Q", m, 6, with_volume=True), (0.31, 0.29, 300.0))
+        self.candles(c, "Q-0", dict(quote, end_period_ts=t - 12 * H - 1))
+        self.assertIsNone(backtest.snapshot(c, "Q", m, 6))            # the day's window must not let it in
+        self.assertIsNone(backtest.snapshot(c, "Q", m, 6, with_volume=True))
+
+    def test_the_day_is_24_hours_and_both_volume_fields_count(self):
+        c = FakeKalshi(can_trade=False)
+        self.market(c, 0, True, 900, 300)
+        m, t = self.decided(c, 0)
+        quote = {"end_period_ts": t - H, "yes_ask": {"close": "0.3100"}, "yes_bid": {"close": "0.2900"}}
+        self.candles(c, "Q-0", {"end_period_ts": t - 24 * H, "volume_fp": "9999.00"},   # ends a day before: out
+                     {"end_period_ts": t - 23 * H, "volume": 150},                       # historical shape
+                     dict(quote, volume="50.00"))
+        self.assertEqual(backtest.snapshot(c, "Q", m, 6, with_volume=True), (0.31, 0.29, 200.0))
+
+    def test_200_contracts_is_busy_like_the_live_check(self):
+        rows = [{"ticker": "A", "volume": 200}, {"ticker": "B", "volume": 199.99}, {"ticker": "C"}]
+        self.assertEqual([o["ticker"] for o in backtest.busy(rows)], ["A"])
+        self.assertEqual(backtest.BUSY, favorites.MIN_VOLUME_24H)   # the live strategies skip under 200
+
+    def test_a_live_edge_with_no_busy_markets_left_is_retired(self):
+        # An edge found before this change may rest on data that flattered it. If no busy
+        # market is left to re-test it, it must stop, not keep betting on old numbers.
+        c = FakeKalshi(can_trade=False)
+        for i in range(60):
+            self.market(c, i, False, 500, 150)          # quiet the day before; every one lost
+        c.series_list = [{"ticker": "Q", "category": "Weather", "frequency": "daily"}]
+        eid = discover.edge_id("Q", 0.30, 0.40, "yes")
+        other = discover.edge_id("Q", 0.30, 0.40, "no")
+        discover.save_edges([
+            {"id": eid, "series": "Q", "side": "yes", "lo": 0.30, "hi": 0.40, "hours_before_close": 6.0,
+             "status": "live", "roi": 0.2, "roi_lo": 0.10, "trades": 300, "events": 300, "first_seen": "d0"},
+            {"id": other, "series": "Q", "side": "no", "lo": 0.30, "hi": 0.40, "hours_before_close": 12.0,
+             "status": "live", "roi": 0.2, "roi_lo": 0.10, "trades": 300, "events": 300, "first_seen": "d0"}])
+        s = discover.run(c, config.load(), series=["Q"])
+        edges = {e["id"]: e for e in discover.load_edges()}
+        self.assertEqual((edges[eid]["status"], edges[eid]["retired_by"]), ("retired", "backtest"))
+        self.assertIn(eid, s["retired"])
+        self.assertTrue(edges[eid]["last_tested"])
+        self.assertEqual(edges[other]["status"], "live")   # tested at another decision time: not judged here
+        self.assertEqual([e["id"] for e in favorites.active_edges(engine.research_outputs())], [other])
+        # Busy markets that show the edge again bring it back, on paper first.
+        for i in range(60, 120):
+            self.market(c, i, True, 900, 300)
+        discover.run(c, config.load(), series=["Q"])
+        self.assertEqual({e["id"]: e for e in discover.load_edges()}[eid]["status"], "candidate")
+
+
+
+class NoStaleNamesTests(TempHome):
+    def test_nothing_uses_a_name_backtest_no_longer_has(self):
+        # Weather research (#11) used backtest.MIN_VOLUME, which this change removed. Python
+        # finds that only when the line runs, so a merge can leave it broken and green.
+        import ast
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        missing = []
+        for top in ("kal", "tools"):
+            for d, _, files in os.walk(os.path.join(root, top)):
+                for f in (f for f in files if f.endswith(".py")):
+                    path = os.path.join(d, f)
+                    with open(path) as fh:
+                        tree = ast.parse(fh.read())
+                    missing += [f"{os.path.relpath(path, root)}:{n.lineno} backtest.{n.attr}"
+                                for n in ast.walk(tree)
+                                if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name)
+                                and n.value.id == "backtest" and not hasattr(backtest, n.attr)]
+        self.assertEqual(missing, [])

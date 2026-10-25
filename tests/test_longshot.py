@@ -45,7 +45,7 @@ def add_series(c, series, category, n, hit, bid=0.07, ask=0.08, seed=1, title=""
                 "ticker": tk, "event_ticker": ev, "open_time": iso(close - 3 * 86400), "can_close_early": False, "close_time": iso(close),
                 "status": "settled", "volume_fp": "1000.00", "result": "yes" if won else "no"})
             c.candle_data[tk] = [{"end_period_ts": close - 7 * H, "yes_ask": {"close_dollars": f"{a:.4f}"},
-                                  "yes_bid": {"close_dollars": f"{b:.4f}"}}]
+                                  "yes_bid": {"close_dollars": f"{b:.4f}"}, "volume_fp": "500.00"}]
     if liquid:  # an open event with volume: discover.active_series counts the series as busy
         c.event_list.append({"event_ticker": f"{series}-OPEN", "series_ticker": series,
                              "markets": [{"ticker": f"{series}-OPEN-L", "volume_24h_fp": "500.00"}]})
@@ -100,6 +100,26 @@ class ResearchTests(TempHome):
         self.assertEqual(cells[CELL]["groups"], 240)  # two cities on one day are two groups
         self.assertEqual(cells["Sports:0.10-0.20"]["series"], ["KXNFL"])  # not KXNBA: no evidence there
         self.assertEqual(s["categories"], {WEATHER: 480, "Sports": 960})
+
+    def test_a_live_cell_with_no_busy_markets_left_is_retired(self):
+        # Quiet markets (under 200 contracts in the day before) are never tested, so a live
+        # cell can't be re-judged on them: it stops until a backtest shows it again.
+        c = FakeKalshi()
+        add_series(c, "KXHIGHNY", WEATHER, 60, hit=0.5, seed=1)
+        for candles in c.candle_data.values():
+            for x in candles:
+                x["volume_fp"] = "100.00"
+        live = {"lo": 0.05, "hi": 0.10, "hours_before_close": 6.0, "status": "live", "roi": 0.05, "roi_lo": 0.01,
+                "trades": 300, "events": 300, "groups": 300}
+        longshot.save_cells([dict(live, id=CELL, category=WEATHER, series=["KXHIGHNY"]),
+                             dict(live, id="Sports:0.05-0.10", category="Sports", series=["KXNBA"])])
+        s = longshot.run(c, cfg())
+        self.assertTrue(s["ok"], s)
+        self.assertEqual(s["categories"], {WEATHER: 0})   # quiet markets aren't counted
+        cells = {x["id"]: x for x in longshot.load_cells()}
+        self.assertEqual((cells[CELL]["status"], cells[CELL]["retired_by"]), ("retired", "backtest"))
+        self.assertEqual(s["retired"], [CELL])
+        self.assertEqual(cells["Sports:0.05-0.10"]["status"], "live")   # not tested this run: not judged
 
     def test_cpi_fed_and_combos_are_never_tested(self):
         c = FakeKalshi()

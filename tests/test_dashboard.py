@@ -69,7 +69,7 @@ def add_history(c, series, n, ask, bid, result="yes"):
             "ticker": tk, "event_ticker": f"{series}-E{i}", "open_time": iso(close - 3 * 86400),
             "can_close_early": False, "close_time": iso(close), "status": "settled", "volume_fp": "1000.00", "result": result})
         c.candle_data[tk] = [{"end_period_ts": close - 7 * 3600, "yes_ask": {"close_dollars": f"{ask:.4f}"},
-                              "yes_bid": {"close_dollars": f"{bid:.4f}"}}]
+                              "yes_bid": {"close_dollars": f"{bid:.4f}"}, "volume_fp": "500.00"}]
 
 
 def order(ticker, side, n, p, filled=None, status="executed", strategy="basket_arb", ts=None, signal_id=None,
@@ -554,7 +554,8 @@ class BacktestApiTests(Base):
         self.assertEqual(len(d["results"]), 1)
         res = d["results"][0]
         self.assertEqual((res["kind"], res["series"], res["hours_before_close"]), ("manual", ["KXWIN"], 6))
-        self.assertEqual((res["observations"], res["events"]), (400, 400))
+        self.assertEqual((res["observations"], res["events"], res["busy"]), (400, 400, 400))
+        self.assertEqual(res["busy_min"], backtest.BUSY)
         rows = {x["lo"]: x for x in res["calibration"]}
         for k in ("hi", "trades", "events", "win_rate", "roi", "roi_lo", "edge"):
             self.assertIn(k, rows[0.9])

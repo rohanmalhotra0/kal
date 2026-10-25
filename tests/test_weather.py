@@ -207,25 +207,6 @@ class NoPeekingTests(unittest.TestCase):
         roi, lo = backtest.roi_stats(t, backtest.z_for(8))
         self.assertGreater(lo, 0)
 
-    def test_quiet_markets_are_priced_too(self):
-        # The backtest drops markets under 100 lifetime volume, known only after settling.
-        # Dead brackets are the quiet ones, so weather prices them back in.
-        markets, obs, fc = city_days(3)
-        for m in markets:
-            m.update({"status": "finalized", "volume_fp": "40.00" if m["result"] == "no" else "900.00",
-                      "settlement_value_dollars": "1.0000" if m["result"] == "yes" else "0.0000",
-                      "open_time": "2026-01-01T00:00:00Z", "close_time": "2026-12-31T00:00:00Z"})
-        kept = [o for o in obs if o["result"] == "yes"]   # what load_observations would return
-        c = FakeKalshi(can_trade=False)
-        for o in obs:
-            c.candle_data[o["ticker"]] = [{"end_period_ts": o["decided"] - 1800,
-                                           "yes_bid": {"close": "0.2000"}, "yes_ask": {"close": "0.2200"}}]
-        back = weather.quiet(c, "KXHIGHNY", kept, markets, 18)
-        self.assertEqual(len(back), len(obs) - len(kept))
-        self.assertTrue(all(o["result"] == "no" and o["yes_ask"] == 0.22 for o in back))
-        lone = dict(markets[0], event_ticker="KXHIGHNY-ELSEWHERE", ticker="X")
-        self.assertEqual(weather.quiet(c, "KXHIGHNY", kept, [lone], 18), [])   # no anchor known: skipped
-
     def test_calibration_and_far_misses(self):
         markets, obs, fc = city_days(120)
         rows = weather.priced(obs, markets, fc)

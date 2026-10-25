@@ -47,6 +47,11 @@ status: **testing** (add the PR link), **built**, or **rejected** (say why in on
   of its markets had settled when research ran, and that picks winners.
 - A market already closed at the decision time is skipped, as the bot would have found
   it closed. Mention words are learned an hour after the event's scheduled end.
+- No filter on a market's total volume: that's known only once it settles, and markets
+  far from the result go quiet, so it dropped mostly losers (a fair market showed +50%).
+  "Busy" means 200+ contracts traded in the day before the decision, the same check
+  the live strategies make. Research for live strategies uses busy markets only. An edge
+  with no busy market left to re-test it is switched off until a backtest shows it again.
 - The 5% chance of promoting luck is spent over looks and over ideas, for good. The
   20th idea ever judged needs far more proof than the first.
 - Demo keeps its own research (`research-demo/`, `cache-demo/`). Nothing is promoted
@@ -77,7 +82,10 @@ status: **testing** (add the PR link), **built**, or **rejected** (say why in on
 - What: buy in price ranges that won more often than the price said.
 - Evidence: strong that the bias exists; weak that a taker keeps much. Bürgi, Deng & Whelan (300,000+ Kalshi contracts): under 10c loses over 60%. But most of the bias goes to makers: a taker at the real ask keeps about 0-1% at 90-99c (research swarm, 2026-10-25). The gap is shrinking.
 - Risk: medium. The edge is a few cents. One upset wipes out many wins. Cancelled games pay a split ($0.33 each on a 3-way), now counted in backtests.
-- Test: built in (backtest, then 30 paper trades). Next: try 1, 3 and 24 hours before close (the research says the last 24 h is best); keep spreads at 2c or less.
+- Test: built in (backtest, then 30 paper trades). Tried 1, 6 and 24 hours before close on
+  busy markets only (2026-10-25, PR #12): no price range clears the bar at any horizon. Best:
+  NO 95c+ with spreads of 2c or less, +0.1% to +0.6% (worst case -1.6% to -2.9%). Next: count
+  its paper trades; nothing to promote.
 
 **4. Bracket arbitrage** - built, paper
 - What: brackets cover every value, so one must win. Buy YES on all when under $1.
@@ -90,6 +98,11 @@ status: **testing** (add the PR link), **built**, or **rejected** (say why in on
 - Risk: medium-high. Those same markets have the most insiders.
 - Test: reuse `backtest.calibration`, split by market type and side. Need a lower bound above 0 after fees. The research swarm ranks this the second most likely edge for a small taker, after near-resolution favorites.
 - Result (deep research on PR #9, 24,878 markets, 12 categories, 6 h before the end): no NO range has an edge in any category. Best: NO 95c+ with spreads of 2c or less, +0.2% (worst case -2.7%); politics NO 95c+, +0.7% (worst -4.1%).
+- Rerun on busy markets only (PR #12: 200+ contracts in the day before, as live strategies
+  ask), at 1 h, 6 h and 24 h before the end: 15,605 to 19,752 markets each, 576 tries per
+  run, and the bar raised for 3x the tries (z = 4.02). No row clears it at any horizon. No
+  row has even a lower bound above 0. Best: NO 95c+ with tight spreads at 24 h, +0.1% (worst
+  -1.6%). The verdict stands: no taker edge.
 
 **6. Related markets that must agree** - untested
 - What: linked prices must fit. E.g. "Fed cuts in Dec" vs "rate below X in Jan".
