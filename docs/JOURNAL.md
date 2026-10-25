@@ -2,6 +2,19 @@
 
 Newest first. Each 2-hour check-in adds one entry: what it checked, what it found, links.
 
+## 2026-10-25 14:50 UTC — check-in: weather test says the market knows more
+
+- Checked: CI green on main. No server yet, so no status report.
+- **Weather (idea #7), with the supervisor's fixes: rejected.** Kalshi's prices beat the
+  National Weather Service's NBM forecast in all 7 cities (Brier 0.095 vs 0.121). The
+  forecast is overconfident in the likeliest bracket. Every trading rule lost (YES about
+  -50%, NO -11% to -17%). The strike mapping checks out: every day's brackets cover
+  every degree once. https://github.com/rohanmalhotra0/kal/pull/11#issuecomment-6399095695
+- **Maker (idea #10), rerun with each series' real fee:** still no lead.
+  https://github.com/rohanmalhotra0/kal/pull/10#issuecomment-6399096100
+- Honest state: three real-data tests today (taker, maker, weather), no edge after fees.
+  The bot stays safe and mostly idle until one shows up. #9's check is at 21:05.
+
 ## 2026-10-25 12:50 UTC — check-in: two real-data answers, both "no edge"
 
 - Checked: CI green on main, market-check green. No server yet, so no status report.
