@@ -2,7 +2,7 @@
 import re
 from dataclasses import dataclass, field
 
-from ..client import fee
+from ..client import fee, ts
 
 # Rules that let Kalshi settle at the last traded price or a "fair" price of its choosing
 # (seen on real markets: death clauses on "leader leaves office" events). Then a market
@@ -24,6 +24,39 @@ def plain_payouts(markets):
         if any(w in rules for w in FAIR_PRICE_WORDS):
             return False
     return True
+
+
+def _time(v):
+    try:
+        return ts(v) if v else None
+    except (TypeError, ValueError, AttributeError):
+        return None
+
+
+def scheduled_end(m, strike_date=None):
+    """When a market is due to end, from times Kalshi sets when it lists it, or None.
+
+    Never a settled market's close_time if it can close early: that's when it really
+    closed, often on the news (the game ended, it rained), and deciding "6 hours before"
+    it peeks at the outcome. Kalshi marks almost every market as able to close early,
+    even ones that close on a fixed schedule (weather, indexes, crypto), so in order:
+    1. close_time, if the market says it can't close early (then it's fixed);
+    2. the event's strike_date (weather, indexes, crypto: when trading ends);
+    3. occurrence_datetime (games: when they're expected to end), on the whole minute.
+    Kalshi lists it on the minute (03:15:00). After some events it's set to when they
+    really happened (a Fed press conference: 19:56:17, a minute after the close), and
+    that's a peek too.
+    Not expected_expiration_time: on real settled markets that closed a day before their
+    occurrence_datetime it equals that early close, so it may be rewritten after the fact."""
+    if m.get("can_close_early") is False:  # missing counts as "can": fail closed
+        t = _time(m.get("close_time"))
+        if t:
+            return t
+    t = _time(strike_date)
+    if t:
+        return t
+    t = _time(m.get("occurrence_datetime"))
+    return t if t and t % 60 == 0 else None
 
 
 # The fair-price clauses nearly every game and weather market has (2,257 of 5,658 one-winner

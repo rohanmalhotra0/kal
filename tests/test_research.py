@@ -33,14 +33,14 @@ def add_series(c, series, n, ask, bid, win_rate, seed, words=None, title=""):
         for word, rate in (words or [(None, win_rate)]):
             tk = f"{series}-{i}" + (f"-{word[:4].upper()}" if word else "")
             m = {"ticker": tk, "event_ticker": f"{series}-E{i}", "open_time": iso(close - 3 * 86400),
-                 "close_time": iso(close), "status": "settled", "volume_fp": "1000.00",
+                 "can_close_early": False, "close_time": iso(close), "status": "settled", "volume_fp": "1000.00",
                  "result": "yes" if rng.random() < rate else "no"}
             if word:
                 m["yes_sub_title"] = word.title()
             c.settled.setdefault(series, []).append(m)
             t = close - 6 * 3600
             c.candle_data[tk] = [{"end_period_ts": t - 3600, "yes_ask": {"close_dollars": f"{ask:.4f}"},
-                                  "yes_bid": {"close_dollars": f"{bid:.4f}"}}]
+                                  "yes_bid": {"close_dollars": f"{bid:.4f}"}, "volume_fp": "500.00"}]
 
 
 class AllCandles(FakeKalshi):
@@ -86,7 +86,7 @@ class BacktestTests(TempHome):
         self.assertLess(lo, 0)
 
     def test_mention_walk_forward_has_no_lookahead(self):
-        obs = [{"series": "S", "event": f"e{i}", "word": "tariff", "close": i, "yes_ask": 0.5,
+        obs = [{"series": "S", "event": f"e{i}", "word": "tariff", "close": i * 86400, "yes_ask": 0.5,
                 "yes_bid": 0.48, "result": "yes"} for i in range(10)]
         trades, hist, _ = backtest.mention_test(obs, 0.15)
         self.assertEqual(len(trades), 10 - mentions.MIN_HISTORY)  # no trades before enough history
@@ -115,27 +115,50 @@ class BacktestTests(TempHome):
             backtest.word_estimate = real
         self.assertNotIn(4, seen)  # B never saw A's result (it would be the 4th)
 
-    def test_early_close_uses_the_events_scheduled_close(self):
+    def test_words_are_learned_after_the_event_not_at_the_close(self):
+        # Mention markets can close before the event ends; the words are known after it.
+        # A's markets close at 15:00 but it's listed to end at 17:00. B is decided at 16:00.
         H = 3600
-        sched = T0 + 100 * H
-        said = {"ticker": "EV-SAID", "event_ticker": "EV", "open_time": iso(sched - 30 * H),
-                "close_time": iso(sched - 20 * H), "status": "settled", "result": "yes", "volume_fp": "500"}
-        not_said = {"ticker": "EV-NOT", "event_ticker": "EV", "open_time": iso(sched - 30 * H),
-                    "close_time": iso(sched), "status": "settled", "result": "no", "volume_fp": "500"}
-        anchors = backtest.event_anchors([said, not_said])
-        self.assertEqual(anchors["EV"], sched)
-        # Decided 6h before the scheduled close: the early YES had already closed then,
-        # so neither "6h before its own close" (a peek at the outcome) nor a skewed sample.
-        self.assertIsNone(backtest.decision_time(said, 6, anchor=anchors["EV"]))
-        self.assertEqual(backtest.decision_time(not_said, 6, anchor=anchors["EV"]), sched - 6 * H)
+        base = [{"series": "S", "event": f"old{i}", "word": "tariff", "close": i * H, "decided": i * H - 6 * H,
+                 "anchor": i * H, "yes_ask": 0.5, "yes_bid": 0.48, "result": "no"} for i in range(3)]
+        a = {"series": "S", "event": "A", "word": "tariff", "close": 15 * H, "anchor": 17 * H, "decided": 11 * H,
+             "yes_ask": 0.5, "yes_bid": 0.48, "result": "yes"}
+        b = {"series": "S", "event": "B", "word": "tariff", "close": 22 * H, "anchor": 22 * H, "decided": 16 * H,
+             "yes_ask": 0.5, "yes_bid": 0.48, "result": "yes"}
+        seen = {}
+        real = backtest.word_estimate
 
-    def test_single_market_that_can_close_early_is_skipped(self):
+        def spy(hits, n, base_rate):
+            seen.setdefault(n, hits)
+            return real(hits, n, base_rate)
+        with mock.patch.object(backtest, "word_estimate", spy):
+            backtest.mention_test(base + [a, b], 0.15)
+        self.assertNotIn(4, seen)  # at 16:00, A wasn't over: B never saw A's result
+
+    def test_early_close_uses_the_listed_end(self):
+        H = 3600
+        sched = (T0 + 100 * H) // 60 * 60
+        said = {"ticker": "EV-SAID", "event_ticker": "EV", "open_time": iso(sched - 30 * H),
+                "close_time": iso(sched - 20 * H), "status": "settled", "result": "yes", "volume_fp": "500",
+                "can_close_early": True, "occurrence_datetime": iso(sched)}
+        not_said = dict(said, ticker="EV-NOT", close_time=iso(sched), result="no")
+        ends = backtest.anchors([said, not_said])
+        self.assertEqual(ends, {"EV-SAID": sched, "EV-NOT": sched})
+        # Decided 6h before the listed end: the early YES had already closed then,
+        # so neither "6h before its own close" (a peek at the outcome) nor a skewed sample.
+        self.assertIsNone(backtest.decision_time(said, 6, anchor=ends["EV-SAID"]))
+        self.assertEqual(backtest.decision_time(not_said, 6, anchor=ends["EV-NOT"]), sched - 6 * H)
+
+    def test_single_market_that_can_close_early_needs_a_listed_end(self):
         c = AllCandles()
         add_series(c, "S", 5, 0.93, 0.92, 0.95, seed=1)
         for m in c.settled["S"]:
             m["can_close_early"] = True
             m["event_ticker"] = m["ticker"]  # one market per event
-        self.assertEqual(backtest.load_observations(c, "S", 6, refresh=True), [])
+        self.assertEqual(backtest.load_observations(c, "S", 6, refresh=True), [])  # its close may be the news
+        for m in c.settled["S"]:
+            m["occurrence_datetime"] = iso(ts(m["close_time"]) // 60 * 60)  # listed to end then (on the minute)
+        self.assertEqual(len(backtest.load_observations(c, "S", 6, refresh=True)), 5)
 
     def test_cancelled_markets_count_at_what_they_paid(self):
         # Real Kalshi: a called-off match settled all three outcomes "scalar" at $0.33.
@@ -163,7 +186,7 @@ class BacktestTests(TempHome):
         obs = backtest.load_observations(c, "S", 6)
         self.assertEqual(len(obs), 20)
         self.assertEqual(c.candle_calls, 20)
-        self.assertTrue(os.path.exists(os.path.join(self.home, "cache", "S_close6_v3.json")))
+        self.assertTrue(os.path.exists(os.path.join(self.home, "cache", "S_close6_v5.json")))
         self.assertEqual(len(backtest.load_observations(c, "S", 6)), 20)
         self.assertEqual(c.candle_calls, 20)  # second time: all from cache
         res = backtest.run(["S"], client=c)
@@ -393,7 +416,7 @@ def open_market(ticker="FAV-X-1", event="FAV-X", yes_ask=0.93, yes_bid=0.92, hou
     return {"ticker": ticker, "event_ticker": event, "title": "Test", "status": "active",
             "yes_ask_dollars": f"{yes_ask:.4f}", "yes_bid_dollars": f"{yes_bid:.4f}",
             "no_ask_dollars": f"{1 - yes_bid:.4f}", "no_bid_dollars": f"{1 - yes_ask:.4f}",
-            "volume_24h_fp": f"{vol:.2f}", "close_time": iso(time.time() + hours * 3600), **kw}
+            "volume_24h_fp": f"{vol:.2f}", "can_close_early": False, "close_time": iso(time.time() + hours * 3600), **kw}
 
 
 def ctx_for(client, research, budget=1000.0, bankroll=1000.0, held=()):
@@ -440,7 +463,8 @@ class FavoritesTests(TempHome):
         self.assertEqual(leg.count, sizing.contracts(p, 0.93, 1000.0, 0.25, 10.0))
         self.assertLessEqual(sig.cost, 10.0)
         group = favorites.group_of("FAV", ts(self.good["close_time"]))
-        self.assertEqual(sig.meta, {"edge": "FAV:yes:0.90-0.95", "group": group, "paper_only": True})
+        self.assertEqual(sig.meta, {"edge": "FAV:yes:0.90-0.95", "group": group,
+                                    "closes": ts(self.good["close_time"]), "paper_only": True})
         self.assertAlmostEqual(sig.exp_profit, leg.count * p - sig.cost)
         live = dict(self.EDGE, status="live")
         self.assertFalse(favorites.STRATEGY.scan(ctx_for(self.c, {"edges": [live]}))[0].meta["paper_only"])
@@ -486,6 +510,42 @@ class FavoritesTests(TempHome):
         book_for(self.c, self.good)
         self.c.market_info["FAV-X-1"] = dict(self.good, status="closed")
         self.assertIsNone(favorites.STRATEGY.recheck(ctx, sig))
+
+    def test_games_and_weather_trade_at_the_tested_time(self):
+        """The backtest decides before an event's listed end (base.scheduled_end), not its
+        close_time: for a game that's a deadline two days out. Trades match that."""
+        def only(m):
+            self.c.market_list = [m]
+            book_for(self.c, m)
+            self.c.market_info[m["ticker"]] = m
+            return favorites.STRATEGY.scan(ctx_for(self.c, {"edges": [self.EDGE]}))
+        minute = time.time() // 60 * 60  # Kalshi lists occurrence times on the minute
+        soon = iso(minute + 5.5 * 3600)
+        game = open_market("FAV-G-1", "FAV-G", hours=50, can_close_early=True, occurrence_datetime=soon)
+        sig = only(game)[0]
+        self.assertEqual((sig.legs[0].ticker, sig.meta["closes"]), ("FAV-G-1", ts(soon)))
+        live = ctx_for(self.c, {"edges": [dict(self.EDGE, status="live")]})
+        self.assertIsNotNone(favorites.STRATEGY.recheck(live, favorites.STRATEGY.scan(live)[0]))
+        self.assertEqual(only(dict(game, close_time=soon, occurrence_datetime=iso(minute + 50 * 3600))), [])
+        # Weather stops trading at its event's strike_date. Without it: not due for 14.5h.
+        wx = open_market("FAV-H-1", "FAV-H", hours=5.5, can_close_early=True,
+                         occurrence_datetime=iso(minute + 14.5 * 3600))
+        self.assertEqual(only(wx), [])
+        self.c.event_list = [{"event_ticker": "FAV-H", "strike_date": wx["close_time"]}]
+        self.assertEqual(len(only(wx)), 1)
+        # No time set at listing (expected_expiration_time doesn't count): never traded.
+        self.assertEqual(only(open_market("FAV-N-1", "FAV-N", can_close_early=True,
+                                          expected_expiration_time=soon)), [])
+
+    def test_a_held_market_with_no_known_end_counts_on_every_day(self):
+        # One series-day may hold 10% of capital: $10 of $100, one full $10 bet.
+        held = open_market("FAV-Q-1", "FAV-Q", hours=50, can_close_early=True)  # no listed end
+        self.c.market_list = [self.good, held]
+        for m in self.c.market_list:
+            book_for(self.c, m)
+        self.assertEqual(len(favorites.STRATEGY.scan(ctx_for(self.c, {"edges": [self.EDGE]}, bankroll=100.0))), 1)
+        full = ctx_for(self.c, {"edges": [self.EDGE]}, bankroll=100.0, held={"FAV-Q-1"})
+        self.assertEqual(favorites.STRATEGY.scan(full), [])  # it might end today: today is full
 
     def test_proven_needs_a_live_edge(self):
         ok, _ = favorites.STRATEGY.proven(ctx_for(self.c, {"edges": [self.EDGE]}))

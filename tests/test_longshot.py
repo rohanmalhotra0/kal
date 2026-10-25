@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from unittest import mock
 
 from kal import config, db, engine, sizing
-from kal.client import fee
+from kal.client import fee, ts
 from kal.research import longshot
 from kal.strategies import longshot_fade as fade
 from kal.strategies.base import Context
@@ -42,10 +42,10 @@ def add_series(c, series, category, n, hit, bid=0.07, ask=0.08, seed=1, title=""
         for leg, b, a, won in (("L", bid, ask, long_won), ("F", 0.90, 0.91, not long_won)):
             tk = f"{ev}-{leg}"
             c.settled.setdefault(series, []).append({
-                "ticker": tk, "event_ticker": ev, "open_time": iso(close - 3 * 86400), "close_time": iso(close),
+                "ticker": tk, "event_ticker": ev, "open_time": iso(close - 3 * 86400), "can_close_early": False, "close_time": iso(close),
                 "status": "settled", "volume_fp": "1000.00", "result": "yes" if won else "no"})
             c.candle_data[tk] = [{"end_period_ts": close - 7 * H, "yes_ask": {"close_dollars": f"{a:.4f}"},
-                                  "yes_bid": {"close_dollars": f"{b:.4f}"}}]
+                                  "yes_bid": {"close_dollars": f"{b:.4f}"}, "volume_fp": "500.00"}]
     if liquid:  # an open event with volume: discover.active_series counts the series as busy
         c.event_list.append({"event_ticker": f"{series}-OPEN", "series_ticker": series,
                              "markets": [{"ticker": f"{series}-OPEN-L", "volume_24h_fp": "500.00"}]})
@@ -100,6 +100,26 @@ class ResearchTests(TempHome):
         self.assertEqual(cells[CELL]["groups"], 240)  # two cities on one day are two groups
         self.assertEqual(cells["Sports:0.10-0.20"]["series"], ["KXNFL"])  # not KXNBA: no evidence there
         self.assertEqual(s["categories"], {WEATHER: 480, "Sports": 960})
+
+    def test_a_live_cell_with_no_busy_markets_left_is_retired(self):
+        # Quiet markets (under 200 contracts in the day before) are never tested, so a live
+        # cell can't be re-judged on them: it stops until a backtest shows it again.
+        c = FakeKalshi()
+        add_series(c, "KXHIGHNY", WEATHER, 60, hit=0.5, seed=1)
+        for candles in c.candle_data.values():
+            for x in candles:
+                x["volume_fp"] = "100.00"
+        live = {"lo": 0.05, "hi": 0.10, "hours_before_close": 6.0, "status": "live", "roi": 0.05, "roi_lo": 0.01,
+                "trades": 300, "events": 300, "groups": 300}
+        longshot.save_cells([dict(live, id=CELL, category=WEATHER, series=["KXHIGHNY"]),
+                             dict(live, id="Sports:0.05-0.10", category="Sports", series=["KXNBA"])])
+        s = longshot.run(c, cfg())
+        self.assertTrue(s["ok"], s)
+        self.assertEqual(s["categories"], {WEATHER: 0})   # quiet markets aren't counted
+        cells = {x["id"]: x for x in longshot.load_cells()}
+        self.assertEqual((cells[CELL]["status"], cells[CELL]["retired_by"]), ("retired", "backtest"))
+        self.assertEqual(s["retired"], [CELL])
+        self.assertEqual(cells["Sports:0.05-0.10"]["status"], "live")   # not tested this run: not judged
 
     def test_cpi_fed_and_combos_are_never_tested(self):
         c = FakeKalshi()
@@ -403,7 +423,7 @@ def open_event(c, et, series="KXHIGHNY", hours=5.5, longshots=((0.07, 0.08),), c
     markets = []
     for i, (bid, ask) in enumerate(((0.90, 0.91),) + tuple(longshots)):
         tk = f"{et}-M{i}"
-        m = {"ticker": tk, "event_ticker": et, "title": f"{title} {i}", "status": "active", "close_time": close,
+        m = {"ticker": tk, "event_ticker": et, "title": f"{title} {i}", "status": "active", "can_close_early": False, "close_time": close,
              "yes_bid_dollars": f"{bid:.4f}", "yes_ask_dollars": f"{ask:.4f}", "volume_24h_fp": "500.00",
              "previous_yes_bid_dollars": f"{bid:.4f}", "rules_primary": "Pays if the high is in range."}
         markets.append(m)
@@ -441,8 +461,9 @@ class StrategyTests(TempHome):
         self.assertGreater(sig.exp_profit, 0)
         self.assertFalse(sig.guaranteed)
         self.assertEqual(sig.event, "KXHIGHNY-1")
-        self.assertEqual(sig.meta, {"cell": CELL, "group": fade.group_of("KXHIGHNY", fade._close(self.m)),
-                                    "closes": fade._close(self.m), "paper_only": True})
+        end = ts(self.m["close_time"])  # no can_close_early flag: a fixed close is the scheduled end
+        self.assertEqual(sig.meta, {"cell": CELL, "group": fade.group_of("KXHIGHNY", end),
+                                    "closes": end, "paper_only": True})
         self.assertFalse(self.scan([cell("live")])[0].meta["paper_only"])
         self.assertEqual(fade.STRATEGY.kind, "statistical")
 
@@ -493,10 +514,13 @@ class StrategyTests(TempHome):
             self.c = FakeKalshi()
             open_event(self.c, "KXHIGHNY-1", hours=hours)
             self.assertEqual(len(self.scan()), n, hours)
-        # A sibling that closes later shows the event's real close: still too far away.
+        # Each market keeps its own scheduled end: a sibling that closes later doesn't move it.
         self.c = FakeKalshi()
         open_event(self.c, "KXHIGHNY-1")[0]["close_time"] = iso(time.time() + 30 * H)
-        self.assertEqual(self.scan(), [])
+        self.assertEqual(len(self.scan()), 1)
+        self.c = FakeKalshi()
+        open_event(self.c, "KXHIGHNY-1")[1]["close_time"] = iso(time.time() + 30 * H)
+        self.assertEqual(self.scan(), [])  # the longshot itself isn't due for 30h
         # A lone market that can close early: its close may be its outcome. Never tested.
         self.c = FakeKalshi()
         m = open_event(self.c, "KXHIGHNY-1")[1]
@@ -506,6 +530,30 @@ class StrategyTests(TempHome):
         self.assertEqual(self.scan(), [])
         m["can_close_early"], m["close_time"] = False, "soon"  # unreadable close: never guess
         self.assertEqual(self.scan(), [])
+
+    def test_games_trade_before_their_listed_end_not_their_deadline(self):
+        # A real game market: close_time is a deadline ~45h after the game, and it really
+        # closes when the game ends. The backtest decided before the listed end, so here too.
+        def game(end, close):
+            minute = time.time() // 60 * 60  # Kalshi lists occurrence times on the minute
+            for m in self.c.event_list[0]["markets"]:
+                m.update({"can_close_early": True, "close_time": iso(time.time() + close * H),
+                          "occurrence_datetime": iso(minute + end * H),
+                          "expected_expiration_time": iso(minute + end * H)})
+        game(end=5.5, close=50.5)
+        self.assertEqual(len(self.scan()), 1)
+        game(end=50, close=5.5)
+        self.assertEqual(self.scan(), [])  # it closes soon, but isn't listed to end for 50h
+
+    def test_weather_trades_before_its_strike_date(self):
+        # Real weather: trading stops at the event's strike_date; its other times are later.
+        ev = self.c.event_list[0]
+        for m in ev["markets"]:
+            m.update({"can_close_early": True, "occurrence_datetime": iso(time.time() + 14.5 * H),
+                      "expected_expiration_time": iso(time.time() + 19.5 * H)})
+        self.assertEqual(self.scan(), [])
+        ev["strike_date"] = ev["markets"][0]["close_time"]  # 5.5h from now
+        self.assertEqual(len(self.scan()), 1)
 
     def test_held_untested_and_excluded_events(self):
         self.assertEqual(self.scan(held={"KXHIGHNY-1-M1"}), [])

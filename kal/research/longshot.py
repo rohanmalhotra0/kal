@@ -125,17 +125,20 @@ def is_edge(row):
             and row["trades"] >= backtest.MIN_TRADES and row["groups"] >= backtest.MIN_EVENTS)
 
 
-def merge_cells(cells, rows, hours, stamp):
+def merge_cells(cells, rows, hours, stamp, tested=()):
     """Fold calibration rows into the cell list (in place), like discover.merge_edges:
     a cell that passes is added or refreshed; an active one that now fails with enough
-    data is retired; one retired for losing paper or real money stays retired."""
+    data is retired, and so is one in a `tested` category with no busy market left to
+    test it; one retired for losing paper or real money stays retired."""
     changes = {"new": [], "retired": [], "revived": []}
     by_id = {c["id"]: c for c in cells}
+    seen = set()
     for r in rows:
         cid = cell_id(r["category"], r["lo"], r["hi"])
         c = by_id.get(cid)
         if c is not None and c.get("hours_before_close") != hours:
             continue  # tested at another decision time: not comparable
+        seen.add(cid)
         stats = {k: r[k] for k in ("roi", "roi_lo", "trades", "events", "groups", "series")}
         if is_edge(r):
             if c is None:
@@ -155,6 +158,12 @@ def merge_cells(cells, rows, hours, stamp):
             if c.get("status") in fade.ACTIVE and r["trades"] >= backtest.MIN_TRADES:
                 c.update(status="retired", retired_by="backtest", note="backtest no longer shows an edge")
                 changes["retired"].append(cid)
+    for c in cells:
+        if (c.get("category") in tested and c.get("hours_before_close") == hours
+                and c.get("id") not in seen and c.get("status") in fade.ACTIVE):
+            c.update(status="retired", retired_by="backtest", last_tested=stamp,
+                     note="no busy markets left to test it: off until a backtest shows it again")
+            changes["retired"].append(c["id"])
     return changes
 
 
@@ -202,6 +211,7 @@ def _run(client, cfg, quick, now, named, summary):
     trades, seen, counts = defaultdict(list), [], defaultdict(int)
 
     def take(s, obs):
+        obs = backtest.busy(obs)   # only what the live strategy could have traded
         cat = str(info[s]["category"]).strip()
         compact(cat, obs, hours, trades)
         counts[cat] += len(obs)
@@ -233,7 +243,7 @@ def _run(client, cfg, quick, now, named, summary):
     summary["categories"] = dict(sorted(counts.items()))
     rows = rows_of(trades)
     cells = load_cells()
-    changes = merge_cells(cells, rows, hours, stamp)
+    changes = merge_cells(cells, rows, hours, stamp, tested=set(counts))
     save_cells(cells)
     backtest.record("longshot", {"hours_before_close": hours, "series": sorted(seen), "max_spread": fade.MAX_SPREAD},
                     {"observations": sum(counts.values()), "rows": rows,
