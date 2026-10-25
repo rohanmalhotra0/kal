@@ -36,9 +36,17 @@ status: **testing** (add the PR link), **built**, or **rejected** (say why in on
 - One series on one day counts as one "event", in backtests and in paper results.
   Promotion needs 20 of those days, not 20 hourly events.
 - Backtest trades pay the real fee: a full-size order, rounded up to the cent.
-- The decision time comes from markets that can't close early. If every market in an
-  event can close early (a "by date" event, mention words), the event is skipped: its
-  last close may be the news itself.
+- The decision time comes from times Kalshi sets when it lists a market, never from
+  when it really closed (that may be the news itself). In order: a close that can't
+  move (the market must say so), the event's strike_date (weather, indexes, crypto),
+  occurrence_datetime on the whole minute (games). Not expected_expiration_time: it can
+  equal an early close. Not an occurrence time with seconds: Kalshi sets those after
+  the event (Fed mentions). Kalshi marks almost every market "can close early", even
+  weather, so that flag alone tells nothing.
+- Each market has its own decision time. An event's latest end would depend on which
+  of its markets had settled when research ran, and that picks winners.
+- A market already closed at the decision time is skipped, as the bot would have found
+  it closed. Mention words are learned an hour after the event's scheduled end.
 - The 5% chance of promoting luck is spent over looks and over ideas, for good. The
   20th idea ever judged needs far more proof than the first.
 - Demo keeps its own research (`research-demo/`, `cache-demo/`). Nothing is promoted
@@ -98,10 +106,8 @@ status: **testing** (add the PR link), **built**, or **rejected** (say why in on
 - What: YES on words said more often than the price says. NO on less.
 - Evidence: weak-medium (our own backtest only). Risk: high. Capped at $5 a trade.
 - Test: needs 30 paper trades. Try `shrunk_p` with the series' base rate as the prior.
-- Note: the backtest now skips events whose markets can all close early. Mention events
-  likely are, so `words.json` may stop updating. Next: check with api-probe whether
-  `expected_expiration_time` keeps the scheduled close after an early close. If it does,
-  use it as the decision time.
+- Note: mention markets are listed to end at the event (occurrence_datetime), so the
+  backtest decides 6 hours before that, never just before the word was said.
 
 **9. One-sided order flow guard** - built (`kal/flow.py`, a filter, not a strategy)
 - What: skip a bet when 70%+ of the last hour's volume took the other side, or one trade 5x the median ($50+) just did. Paper and live alike. Never for locked-in trades.

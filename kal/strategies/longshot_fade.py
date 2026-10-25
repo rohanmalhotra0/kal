@@ -17,7 +17,7 @@ trading decides which go live (apply_longshot there), and every guard here only 
 trades:
 - a tight book (YES ask <= YES bid + 2c) and enough contracts at the NO price
 - busy markets, in series the research tested for that very cell
-- only in the hour after the tested time before the event's scheduled close
+- only in the hour after the tested time before the market's scheduled end
 - no fair-price or death-clause rules, no combos (KXMVE), no CPI/Fed brackets
 - one bet per event, losing at most min(max_per_trade, $5, 2% of capital)
 - bets in one series closing on one day: at most 10% of capital together
@@ -34,8 +34,8 @@ from collections import defaultdict
 from datetime import datetime, timezone
 
 from .. import sizing
-from ..client import fee, num, price, ts
-from .base import Leg, Signal, Strategy, plain_payouts
+from ..client import fee, num, price
+from .base import Leg, Signal, Strategy, plain_payouts, scheduled_end
 from .favorites import is_open
 
 NAME = "longshot_fade"
@@ -152,18 +152,13 @@ def bet_cap(ctx):
                         CAPITAL_SHARE * ctx.bankroll))
 
 
-def _close(m):
-    try:
-        return ts(m["close_time"])
-    except (KeyError, TypeError, ValueError, AttributeError):
-        return None
-
-
 def event_info(ev, series_wanted):
     """What we need from one open event, or None if it's not one to trade.
 
-    The anchor is the event's scheduled close: the latest close among its markets, the
-    same anchoring the backtest uses (kal.research.backtest.event_anchors)."""
+    "ends" holds each market's scheduled end (base.scheduled_end, None if it shows none),
+    the same anchoring the backtest uses (kal.research.backtest.anchors). Not its
+    close_time: on a game that's a deadline two days after it, long after the market
+    really closes."""
     if not isinstance(ev, dict) or not ev.get("event_ticker"):
         return None
     et = ev["event_ticker"]
@@ -173,14 +168,11 @@ def event_info(ev, series_wanted):
     if excluded({"ticker": series, "category": ev.get("category"), "title": ev.get("title")}):
         return None
     markets = [m for m in ev.get("markets") or [] if isinstance(m, dict) and m.get("ticker")]
-    closes = [_close(m) for m in markets]
-    if not markets or None in closes:
-        return None  # can't tell the scheduled close: never guess the timing
-    if len(markets) == 1 and markets[0].get("can_close_early") is True:
-        return None  # the backtest skips these: a lone market's close may be its outcome
-    anchor = max(closes)
-    return {"ticker": et, "series": series, "title": ev.get("title") or et, "anchor": anchor,
-            "group": group_of(series, anchor), "markets": markets, "tickers": {m["ticker"] for m in markets}}
+    if not markets:
+        return None
+    return {"ticker": et, "series": series, "title": ev.get("title") or et, "markets": markets,
+            "tickers": {m["ticker"] for m in markets},
+            "ends": {m["ticker"]: scheduled_end(m, ev.get("strike_date")) for m in markets}}
 
 
 class LongshotFade(Strategy):
@@ -203,8 +195,14 @@ class LongshotFade(Strategy):
         events = [e for e in (event_info(ev, by_series)
                               for ev in ctx.client.events(status="open", with_nested_markets="true")) if e]
         held = defaultdict(int)  # group -> tickers already held there (anyone's)
+        held_any_day = defaultdict(int)  # series -> held tickers with no known end: they count on every day
         for e in events:
-            held[e["group"]] += len(e["tickers"] & ctx.held)
+            for tk in e["tickers"] & ctx.held:
+                end = e["ends"].get(tk)
+                if end:
+                    held[group_of(e["series"], end)] += 1
+                else:
+                    held_any_day[e["series"]] += 1
         picks = []
         for e in events:
             if e["tickers"] & ctx.held:
@@ -216,13 +214,15 @@ class LongshotFade(Strategy):
         picks.sort(key=lambda x: (-x[2]["roi_lo"], x[1]["ticker"]))
         found, spent, group_spent = [], 0.0, defaultdict(float)
         for e, m, cell, offer in picks:
-            g = e["group"]
+            end = e["ends"][m["ticker"]]
+            g = group_of(e["series"], end)
             # Each held ticker counts as a full-size bet: the most a longshot bet can be.
-            room = GROUP_SHARE * ctx.bankroll - held[g] * MAX_PER_TRADE - group_spent[g]
+            n_held = held[g] + held_any_day[e["series"]]
+            room = GROUP_SHARE * ctx.bankroll - n_held * MAX_PER_TRADE - group_spent[g]
             cap = min(bet_cap(ctx), ctx.budget_left - spent, room)
             if cap <= 0:
                 continue
-            sig = self._signal(ctx, e, m, cell, offer, cap, ctx.open_exposure + spent)
+            sig = self._signal(ctx, e, m, end, g, cell, offer, cap, ctx.open_exposure + spent)
             if sig:
                 found.append(sig)
                 spent += sig.cost
@@ -231,7 +231,7 @@ class LongshotFade(Strategy):
 
     def _pick(self, ctx, cells, e, now):
         """(market, cell, offer) for the event's best-backed longshot whose book checks out."""
-        fits = [(m, c) for m in e["markets"] for c in [self._fit(cells, e, m, now)] if c]
+        fits = [(m, c) for m in e["markets"] for c in [self._fit(cells, e, m, now, e["ends"].get(m["ticker"]))] if c]
         for m, c in sorted(fits, key=lambda x: (-x[1]["roi_lo"], x[0]["ticker"])):
             try:
                 offer = self._offer(ctx, m["ticker"], c)
@@ -242,9 +242,12 @@ class LongshotFade(Strategy):
                 return m, c, offer
         return None
 
-    def _fit(self, cells, e, m, now):
-        """The cell a market fits, judged from its listing (the order book checks again)."""
+    def _fit(self, cells, e, m, now, end):
+        """The cell a market fits, judged from its listing (the order book checks again).
+        `end`: its scheduled end. None (no time set at listing) never fits."""
         tk = m["ticker"]
+        if end is None:
+            return None
         if tk.upper().startswith("KXMVE") or not is_open(m) or not plain_payouts([m]):
             return None
         if m.get("event_ticker") not in (None, e["ticker"]):
@@ -254,7 +257,7 @@ class LongshotFade(Strategy):
         bid, ask = price(m, "yes_bid"), price(m, "yes_ask")
         if not tight(bid, ask):
             return None
-        fits = [c for c in cells if c["lo"] <= bid < c["hi"] and in_window(e["anchor"], now, c["hours_before_close"])]
+        fits = [c for c in cells if c["lo"] <= bid < c["hi"] and in_window(end, now, c["hours_before_close"])]
         return max(fits, key=lambda c: c["roi_lo"]) if fits else None
 
     def _offer(self, ctx, ticker, cell):
@@ -271,7 +274,7 @@ class LongshotFade(Strategy):
             return None
         return round(1 - bid, 4), bid, depth
 
-    def _signal(self, ctx, e, m, cell, offer, cap, open_exposure, max_count=None):
+    def _signal(self, ctx, e, m, end, group, cell, offer, cap, open_exposure, max_count=None):
         """Size one NO bet with a cautious win chance and every cap, or None."""
         no_p, bid, depth = offer
         tk = m["ticker"]
@@ -293,9 +296,9 @@ class LongshotFade(Strategy):
         sig = Signal(NAME, e["ticker"], m.get("title") or e["title"], [leg],
                      note=(f"NO at ${no_p:.2f} on a {bid * 100:.0f}c longshot. Cheap YES in "
                            f"{cell['category']} lost before (worst case {cell['roi_lo']:+.1%})"),
-                     meta={"cell": cell["id"], "group": e["group"], "closes": e["anchor"],
+                     meta={"cell": cell["id"], "group": group, "closes": end,
                            "paper_only": cell["status"] != "live"},
-                     closes_at=e["anchor"])
+                     closes_at=end)
         sig.exp_profit = exp_profit
         return sig
 
@@ -306,22 +309,23 @@ class LongshotFade(Strategy):
         if not cell or cell["status"] != "live" or len(sig.legs) != 1:
             return None
         try:
-            anchor = float(sig.meta["closes"])
+            end = float(sig.meta["closes"])
         except (KeyError, TypeError, ValueError):
             return None
+        group = sig.meta.get("group")
         leg = sig.legs[0]
         m = ctx.client.market(leg.ticker)
-        if not m:
+        if not m or not group:
             return None
         m = {**m, "ticker": leg.ticker}
-        e = {"ticker": sig.event, "title": sig.title, "anchor": anchor, "group": sig.meta.get("group")}
-        if not self._fit([cell], e, m, time.time()):
+        e = {"ticker": sig.event, "title": sig.title}
+        if not self._fit([cell], e, m, time.time(), end):
             return None
         offer = self._offer(ctx, leg.ticker, cell)
         if not offer:
             return None
         cap = min(bet_cap(ctx), ctx.budget_left, sig.cost)
-        return self._signal(ctx, e, m, cell, offer, cap, ctx.open_exposure, max_count=leg.count)
+        return self._signal(ctx, e, m, end, group, cell, offer, cap, ctx.open_exposure, max_count=leg.count)
 
     def proven(self, ctx):
         live = [c for c in active_cells(ctx.research) if c["status"] == "live"]

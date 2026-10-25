@@ -67,7 +67,7 @@ def add_history(c, series, n, ask, bid, result="yes"):
         tk = f"{series}-{i}"
         c.settled.setdefault(series, []).append({
             "ticker": tk, "event_ticker": f"{series}-E{i}", "open_time": iso(close - 3 * 86400),
-            "close_time": iso(close), "status": "settled", "volume_fp": "1000.00", "result": result})
+            "can_close_early": False, "close_time": iso(close), "status": "settled", "volume_fp": "1000.00", "result": result})
         c.candle_data[tk] = [{"end_period_ts": close - 7 * 3600, "yes_ask": {"close_dollars": f"{ask:.4f}"},
                               "yes_bid": {"close_dollars": f"{bid:.4f}"}}]
 
