@@ -1,7 +1,7 @@
 """What every strategy implements, and what it hands the engine."""
 from dataclasses import dataclass, field
 
-from ..client import fee
+from ..client import fee, ts
 
 # Rules that let Kalshi settle at the last traded price or a "fair" price of its choosing
 # (seen on real markets: death clauses on "leader leaves office" events). Then a market
@@ -23,6 +23,42 @@ def plain_payouts(markets):
         if any(w in rules for w in FAIR_PRICE_WORDS):
             return False
     return True
+
+
+def _time(v):
+    try:
+        return ts(v) if v else None
+    except (TypeError, ValueError, AttributeError):
+        return None
+
+
+def scheduled_end(m, strike_date=None):
+    """When a market is due to end, from times Kalshi sets when it lists it, or None.
+
+    Never a settled market's close_time if it can close early: that's when it really
+    closed, often on the news (the game ended, it rained), and deciding "6 hours before"
+    it peeks at the outcome. Kalshi marks almost every market as able to close early,
+    even ones that close on a fixed schedule (weather, indexes, crypto), so in order:
+    1. close_time, if the market can't close early (then it's fixed);
+    2. the event's strike_date (weather, indexes, crypto: when trading ends);
+    3. occurrence_datetime (games: when they're expected to end);
+    4. expected_expiration_time."""
+    if m.get("can_close_early") is not True:
+        t = _time(m.get("close_time"))
+        if t:
+            return t
+    for v in (strike_date, m.get("occurrence_datetime"), m.get("expected_expiration_time")):
+        t = _time(v)
+        if t:
+            return t
+    return None
+
+
+def event_end(markets, strike_date=None):
+    """An event's scheduled end: the latest scheduled_end of its markets. None if any
+    market shows none: then the event's end is a guess, and the timing is never guessed."""
+    ends = [scheduled_end(m, strike_date) for m in markets]
+    return max(ends) if ends and None not in ends else None
 
 
 @dataclass

@@ -129,13 +129,16 @@ class BacktestTests(TempHome):
         self.assertIsNone(backtest.decision_time(said, 6, anchor=anchors["EV"]))
         self.assertEqual(backtest.decision_time(not_said, 6, anchor=anchors["EV"]), sched - 6 * H)
 
-    def test_single_market_that_can_close_early_is_skipped(self):
+    def test_single_market_that_can_close_early_needs_a_listed_end(self):
         c = AllCandles()
         add_series(c, "S", 5, 0.93, 0.92, 0.95, seed=1)
         for m in c.settled["S"]:
             m["can_close_early"] = True
             m["event_ticker"] = m["ticker"]  # one market per event
-        self.assertEqual(backtest.load_observations(c, "S", 6, refresh=True), [])
+        self.assertEqual(backtest.load_observations(c, "S", 6, refresh=True), [])  # its close may be the news
+        for m in c.settled["S"]:
+            m["occurrence_datetime"] = m["close_time"]  # listed to end then: decided 6h before that
+        self.assertEqual(len(backtest.load_observations(c, "S", 6, refresh=True)), 5)
 
     def test_cancelled_markets_count_at_what_they_paid(self):
         # Real Kalshi: a called-off match settled all three outcomes "scalar" at $0.33.
@@ -163,7 +166,7 @@ class BacktestTests(TempHome):
         obs = backtest.load_observations(c, "S", 6)
         self.assertEqual(len(obs), 20)
         self.assertEqual(c.candle_calls, 20)
-        self.assertTrue(os.path.exists(os.path.join(self.home, "cache", "S_close6_v3.json")))
+        self.assertTrue(os.path.exists(os.path.join(self.home, "cache", "S_close6_v4.json")))
         self.assertEqual(len(backtest.load_observations(c, "S", 6)), 20)
         self.assertEqual(c.candle_calls, 20)  # second time: all from cache
         res = backtest.run(["S"], client=c)
@@ -440,7 +443,8 @@ class FavoritesTests(TempHome):
         self.assertEqual(leg.count, sizing.contracts(p, 0.93, 1000.0, 0.25, 10.0))
         self.assertLessEqual(sig.cost, 10.0)
         group = favorites.group_of("FAV", ts(self.good["close_time"]))
-        self.assertEqual(sig.meta, {"edge": "FAV:yes:0.90-0.95", "group": group, "paper_only": True})
+        self.assertEqual(sig.meta, {"edge": "FAV:yes:0.90-0.95", "group": group,
+                                    "closes": ts(self.good["close_time"]), "paper_only": True})
         self.assertAlmostEqual(sig.exp_profit, leg.count * p - sig.cost)
         live = dict(self.EDGE, status="live")
         self.assertFalse(favorites.STRATEGY.scan(ctx_for(self.c, {"edges": [live]}))[0].meta["paper_only"])
@@ -486,6 +490,28 @@ class FavoritesTests(TempHome):
         book_for(self.c, self.good)
         self.c.market_info["FAV-X-1"] = dict(self.good, status="closed")
         self.assertIsNone(favorites.STRATEGY.recheck(ctx, sig))
+
+    def test_games_and_weather_trade_at_the_tested_time(self):
+        """The backtest decides before an event's listed end (base.scheduled_end), not its
+        close_time: for a game that's a deadline two days out. Trades match that."""
+        def only(m):
+            self.c.market_list = [m]
+            book_for(self.c, m)
+            self.c.market_info[m["ticker"]] = m
+            return favorites.STRATEGY.scan(ctx_for(self.c, {"edges": [self.EDGE]}))
+        soon = iso(time.time() + 5.5 * 3600)
+        game = open_market("FAV-G-1", "FAV-G", hours=50, can_close_early=True, occurrence_datetime=soon)
+        sig = only(game)[0]
+        self.assertEqual((sig.legs[0].ticker, sig.meta["closes"]), ("FAV-G-1", ts(soon)))
+        live = ctx_for(self.c, {"edges": [dict(self.EDGE, status="live")]})
+        self.assertIsNotNone(favorites.STRATEGY.recheck(live, favorites.STRATEGY.scan(live)[0]))
+        self.assertEqual(only(dict(game, close_time=soon, occurrence_datetime=iso(time.time() + 50 * 3600))), [])
+        # Weather stops trading at its event's strike_date. Without it: not due for 14.5h.
+        wx = open_market("FAV-H-1", "FAV-H", hours=5.5, can_close_early=True,
+                         occurrence_datetime=iso(time.time() + 14.5 * 3600))
+        self.assertEqual(only(wx), [])
+        self.c.event_list = [{"event_ticker": "FAV-H", "strike_date": wx["close_time"]}]
+        self.assertEqual(len(only(wx)), 1)
 
     def test_proven_needs_a_live_edge(self):
         ok, _ = favorites.STRATEGY.proven(ctx_for(self.c, {"edges": [self.EDGE]}))

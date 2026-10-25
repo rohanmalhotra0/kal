@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from unittest import mock
 
 from kal import config, db, engine, sizing
-from kal.client import fee
+from kal.client import fee, ts
 from kal.research import longshot
 from kal.strategies import longshot_fade as fade
 from kal.strategies.base import Context
@@ -441,8 +441,9 @@ class StrategyTests(TempHome):
         self.assertGreater(sig.exp_profit, 0)
         self.assertFalse(sig.guaranteed)
         self.assertEqual(sig.event, "KXHIGHNY-1")
-        self.assertEqual(sig.meta, {"cell": CELL, "group": fade.group_of("KXHIGHNY", fade._close(self.m)),
-                                    "closes": fade._close(self.m), "paper_only": True})
+        end = ts(self.m["close_time"])  # no can_close_early flag: a fixed close is the scheduled end
+        self.assertEqual(sig.meta, {"cell": CELL, "group": fade.group_of("KXHIGHNY", end),
+                                    "closes": end, "paper_only": True})
         self.assertFalse(self.scan([cell("live")])[0].meta["paper_only"])
         self.assertEqual(fade.STRATEGY.kind, "statistical")
 
@@ -506,6 +507,29 @@ class StrategyTests(TempHome):
         self.assertEqual(self.scan(), [])
         m["can_close_early"], m["close_time"] = False, "soon"  # unreadable close: never guess
         self.assertEqual(self.scan(), [])
+
+    def test_games_trade_before_their_listed_end_not_their_deadline(self):
+        # A real game market: close_time is a deadline ~45h after the game, and it really
+        # closes when the game ends. The backtest decided before the listed end, so here too.
+        def game(end, close):
+            for m in self.c.event_list[0]["markets"]:
+                m.update({"can_close_early": True, "close_time": iso(time.time() + close * H),
+                          "occurrence_datetime": iso(time.time() + end * H),
+                          "expected_expiration_time": iso(time.time() + end * H)})
+        game(end=5.5, close=50.5)
+        self.assertEqual(len(self.scan()), 1)
+        game(end=50, close=5.5)
+        self.assertEqual(self.scan(), [])  # it closes soon, but isn't listed to end for 50h
+
+    def test_weather_trades_before_its_strike_date(self):
+        # Real weather: trading stops at the event's strike_date; its other times are later.
+        ev = self.c.event_list[0]
+        for m in ev["markets"]:
+            m.update({"can_close_early": True, "occurrence_datetime": iso(time.time() + 14.5 * H),
+                      "expected_expiration_time": iso(time.time() + 19.5 * H)})
+        self.assertEqual(self.scan(), [])
+        ev["strike_date"] = ev["markets"][0]["close_time"]  # 5.5h from now
+        self.assertEqual(len(self.scan()), 1)
 
     def test_held_untested_and_excluded_events(self):
         self.assertEqual(self.scan(held={"KXHIGHNY-1-M1"}), [])

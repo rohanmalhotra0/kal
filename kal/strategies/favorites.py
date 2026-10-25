@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 
 from .. import sizing
 from ..client import fee, num, price, ts
-from .base import Leg, Signal, Strategy
+from .base import Leg, Signal, Strategy, event_end
 
 MAX_SPREAD = 0.02       # wider than this and the "price" isn't really known
 MIN_VOLUME_24H = 200    # thin markets: our order would be most of the trading
@@ -107,14 +107,31 @@ def closes_within(m, now, hours):
 TIME_BAND = 1.0  # hours: the edge was measured at one time before close, so trade near it
 
 
-def near_tested_time(m, now, hours):
-    """True if the market closes about `hours` from now: the moment the backtest measured.
-    A 92c contract 5 minutes before close is a different bet from one 6 hours out."""
-    try:
-        left = (ts(m["close_time"]) - now) / 3600
-    except (KeyError, TypeError, ValueError, AttributeError):
+def near_tested_time(end, now, hours):
+    """True if the event is due to end (`end`, its scheduled end) about `hours` from now:
+    the moment the backtest measured. A 92c contract 5 minutes before the end is a
+    different bet from one 6 hours out."""
+    if end is None:
         return False
+    left = (end - now) / 3600
     return max(0.0, hours - TIME_BAND) < left <= hours
+
+
+def event_ends(client, series, markets):
+    """{event: scheduled end} for these open markets (base.event_end), with their events'
+    strike dates: the same anchoring the backtest uses. Not close_time: on a game that's a
+    deadline two days after it, long after the market really closes."""
+    strikes = {}
+    try:
+        for ev in client.events(status="open", series_ticker=series):
+            if isinstance(ev, dict) and ev.get("event_ticker") and ev.get("strike_date"):
+                strikes[ev["event_ticker"]] = ev["strike_date"]
+    except Exception as e:  # without them, weather and indexes just don't match the window
+        log.warning("favorites: %s events failed: %s", series, e)
+    by_event = defaultdict(list)
+    for m in markets:
+        by_event[m.get("event_ticker") or m.get("ticker")].append(m)
+    return {ev: event_end(ms, strikes.get(ev)) for ev, ms in by_event.items()}
 
 
 def quote(client, ticker, side):
@@ -148,14 +165,15 @@ class Favorites(Strategy):
         best = {}  # event -> (signal, market, side, edge): markets in one event move together, so one bet each
         held = defaultdict(int)  # series-day -> markets already held there (anyone's)
         for series, edges in sorted(by_series.items()):
-            hours = max(e["hours_before_close"] for e in edges)
             try:
-                markets = ctx.client.markets(status="open", series_ticker=series, min_close_ts=now,
-                                             max_close_ts=now + int(hours * 3600))
+                # Every open market: a game's close_time is days after its scheduled end.
+                markets = ctx.client.markets(status="open", series_ticker=series, min_close_ts=now)
+                ends = event_ends(ctx.client, series, markets)
                 for m in markets:
+                    end = ends.get(m.get("event_ticker") or m.get("ticker"))
                     if m.get("ticker") in ctx.held and in_series(m, series):
-                        held[market_group(m, series)] += 1
-                    pick = self._consider(ctx, m, series, edges, now)
+                        held[group_of(series, end) if end else market_group(m, series)] += 1
+                    pick = self._consider(ctx, m, series, edges, now, end)
                     if pick and (pick[0].event not in best or pick[0].exp_profit > best[pick[0].event][0].exp_profit):
                         best[pick[0].event] = pick
             except Exception as e:
@@ -167,14 +185,15 @@ class Favorites(Strategy):
             g = sig.meta["group"]
             room = GROUP_SHARE * ctx.bankroll - held[g] * bet_cap(ctx) - spent[g]
             if sig.cost > room + 1e-9:
-                sig = self._signal(ctx, m, side, e, cap=room)  # smaller, to fit (or none)
+                sig = self._signal(ctx, m, side, e, sig.meta["closes"], cap=room)  # smaller, to fit (or none)
             if sig:
                 found.append(sig)
                 spent[g] += sig.cost
         return sorted(found, key=lambda s: -s.exp_profit)
 
-    def _consider(self, ctx, m, series, edges, now):
-        """(signal, market, side, edge) for the market, or None."""
+    def _consider(self, ctx, m, series, edges, now, end):
+        """(signal, market, side, edge) for the market, or None. `end`: its event's
+        scheduled end."""
         tk = m.get("ticker")
         if not tk or tk in ctx.held or not in_series(m, series) or not is_open(m):
             return None
@@ -190,17 +209,17 @@ class Favorites(Strategy):
                 # YES+NO data, which can hide a losing side, so it's never traded.
                 if e.get("side") != side:
                     continue
-                if e["lo"] <= ask < e["hi"] and near_tested_time(m, now, e["hours_before_close"]):
+                if e["lo"] <= ask < e["hi"] and near_tested_time(end, now, e["hours_before_close"]):
                     picks.append((side, e))
         if len({side for side, _ in picks}) != 1:
             return None  # nothing matched, or two edges disagree about this market: stay out
         side, e = max(picks, key=lambda x: x[1]["roi_lo"])
-        sig = self._signal(ctx, m, side, e)
+        sig = self._signal(ctx, m, side, e, end)
         return (sig, m, side, e) if sig else None
 
-    def _signal(self, ctx, m, side, e, cap=math.inf, max_count=None):
+    def _signal(self, ctx, m, side, e, end, cap=math.inf, max_count=None):
         """Price from the order book (fresh, with depth), then size. Never over `cap`
-        dollars or `max_count` contracts."""
+        dollars or `max_count` contracts. `end`: the event's scheduled end."""
         tk = m["ticker"]
         q = quote(ctx.client, tk, side)
         if not q:
@@ -208,9 +227,9 @@ class Favorites(Strategy):
         ask, depth, bid = q
         if not (e["lo"] <= ask < e["hi"]) or not tight(ask, bid):
             return None
-        group = market_group(m, e["series"])
-        if group is None:
-            return None  # no readable close: can't tell which day's cap it falls under
+        if end is None:
+            return None  # no scheduled end: can't tell which day's cap it falls under
+        group = group_of(e["series"], end)
         # Cautious: the win chance that pays exactly the backtest's worst-case ROI, on the
         # cost the backtest charged (a full-size order, fee rounded up).
         p = min(cost_each(ask) * (1 + e["roi_lo"]), 0.999)
@@ -228,7 +247,7 @@ class Favorites(Strategy):
         sig = Signal(self.name, m.get("event_ticker") or tk, m.get("title") or tk, [leg],
                      note=f"{side.upper()} at ${ask:.2f}: range {e['lo']:.2f}-{e['hi']:.2f} won before "
                           f"(worst case {e['roi_lo']:+.1%})",
-                     meta={"edge": e["id"], "group": group, "paper_only": e["status"] != "live"})
+                     meta={"edge": e["id"], "group": group, "closes": end, "paper_only": e["status"] != "live"})
         sig.exp_profit = count * p - sig.cost
         return sig
 
@@ -238,12 +257,16 @@ class Favorites(Strategy):
         e = {x["id"]: x for x in active_edges(ctx.research)}.get(sig.meta.get("edge"))
         if not e or e["status"] != "live":
             return None
+        try:
+            end = float(sig.meta["closes"])
+        except (KeyError, TypeError, ValueError):
+            return None
         leg = sig.legs[0]
         m = ctx.client.market(leg.ticker)
-        if not is_open(m) or not near_tested_time(m, int(time.time()), e["hours_before_close"]):
+        if not is_open(m) or not near_tested_time(end, int(time.time()), e["hours_before_close"]):
             return None
         return self._signal(ctx, {**m, "ticker": leg.ticker, "event_ticker": sig.event, "title": sig.title},
-                            leg.side, e, cap=sig.cost, max_count=leg.count)
+                            leg.side, e, end, cap=sig.cost, max_count=leg.count)
 
     def proven(self, ctx):
         live = [e for e in active_edges(ctx.research) if e["status"] == "live"]

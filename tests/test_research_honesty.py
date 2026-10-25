@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from unittest import mock
 
 from kal import config, db, engine, report, scheduler
-from kal.client import fee, fee_per_contract
+from kal.client import KalshiError, fee, fee_per_contract, ts
 from kal.dashboard import app as dash
 from kal.research import backtest, discover, promote
 from kal.strategies import favorites
@@ -207,7 +207,7 @@ class ExchangeTests(TempHome):
 def by_date_series(c, events=150, seed=3):
     """'Will X happen by day 1, 2, 3?' events, priced fairly. X comes at a random time (about
     once in 4 days), and every YES market closes early, on the news. Like the reviewers'
-    sim_anchor_lookahead.py."""
+    sim_anchor_lookahead.py. As on Kalshi, each market is listed to end at its deadline."""
     rng = random.Random(seed)
     rate = 1 / (4 * DAY)
     markets = []
@@ -221,7 +221,8 @@ def by_date_series(c, events=150, seed=3):
             tk = f"KXWHEN-{e}-D{days}"
             markets.append({"ticker": tk, "event_ticker": f"KXWHEN-{e}", "open_time": iso(start),
                             "close_time": iso(close), "status": "finalized", "result": "yes" if yes else "no",
-                            "volume_fp": "5000.00", "can_close_early": True})
+                            "volume_fp": "5000.00", "can_close_early": True,
+                            "occurrence_datetime": iso(deadline), "expected_expiration_time": iso(deadline)})
             candles = []
             for h in range(int((close - start) // H)):
                 end = start + (h + 1) * H
@@ -233,21 +234,76 @@ def by_date_series(c, events=150, seed=3):
     c.settled["KXWHEN"] = markets
 
 
+def fake_edges(obs):
+    rows = backtest.calibration(obs, max_spread=0.02, by_side=True)
+    return [r for r in rows if backtest.is_edge(r) or (r["side"] == "yes" and r["lo"] < 0.5 and r["win_rate"] == 1)]
+
+
 class AnchorTests(TempHome):
     def test_news_time_is_not_the_decision_time(self):
         c = FakeKalshi(can_trade=False)
         by_date_series(c)
         obs = backtest.load_observations(c, "KXWHEN", 6, max_markets=10_000)
-        rows = backtest.calibration(obs, max_spread=0.02, by_side=True)
-        self.assertEqual([r for r in rows if backtest.is_edge(r)], [])  # fair prices: nothing to find
-        self.assertFalse([r for r in rows if r["side"] == "yes" and r["lo"] < 0.5 and r["win_rate"] == 1])
+        self.assertGreater(len(obs), 50)  # tested: decided 6h before the event's listed end
+        self.assertEqual(fake_edges(obs), [])  # fair prices: nothing to find
 
-    def test_only_markets_that_cant_close_early_set_the_schedule(self):
+    def test_deciding_before_the_real_close_finds_a_fake_edge(self):
+        """The test above has teeth: decide 6h before each event really closed (on the news)
+        and the same fair prices show edges that aren't there."""
+        c = FakeKalshi(can_trade=False)
+        by_date_series(c)
+        real_close = lambda markets, strike_date=None: max(ts(m["close_time"]) for m in markets)
+        with mock.patch.object(backtest, "event_end", real_close):
+            obs = backtest.load_observations(c, "KXWHEN", 6, max_markets=10_000)
+        self.assertTrue(fake_edges(obs))
+
+    def test_the_schedule_comes_from_times_set_at_listing(self):
+        """Kalshi marks almost every market able to close early (all of 5,000+ sampled),
+        even weather that stops trading on a fixed schedule. So the schedule comes from
+        times set when it was listed, never from when it really closed."""
         sched = T0 + 100 * H
         fixed = {"ticker": "EV-A", "event_ticker": "EV", "close_time": iso(sched), "can_close_early": False}
-        early = {"ticker": "EV-B", "event_ticker": "EV", "close_time": iso(sched + 5 * H), "can_close_early": True}
+        early = {"ticker": "EV-B", "event_ticker": "EV", "close_time": iso(sched - 5 * H), "can_close_early": True,
+                 "occurrence_datetime": iso(sched)}
         self.assertEqual(backtest.event_anchors([fixed, early]), {"EV": sched})
-        self.assertEqual(backtest.event_anchors([early]), {})  # nothing shows the schedule: skip it
+        # A game closes when it ends (here 40 minutes early). It was listed to end at `sched`.
+        game = {"ticker": "G-A", "event_ticker": "G", "open_time": iso(sched - 5 * DAY),
+                "close_time": iso(sched - 40 * 60), "can_close_early": True,
+                "occurrence_datetime": iso(sched), "expected_expiration_time": iso(sched)}
+        self.assertEqual(backtest.event_anchors([game]), {"G": sched})
+        # Weather stops trading at its event's strike_date; its other times come later.
+        weather = {"ticker": "HI-T70", "event_ticker": "HI", "open_time": iso(sched - 2 * DAY),
+                   "close_time": iso(sched), "can_close_early": True,
+                   "occurrence_datetime": iso(sched + 9 * H), "expected_expiration_time": iso(sched + 14 * H)}
+        anchor = backtest.event_anchors([weather], {"HI": iso(sched)})["HI"]
+        self.assertEqual(backtest.decision_time(weather, 6, anchor=anchor), sched - 6 * H)
+        # Without the strike date, the next time is after the close: skipped, never misdated.
+        anchor = backtest.event_anchors([weather])["HI"]
+        self.assertIsNone(backtest.decision_time(weather, 6, anchor=anchor))
+        # Nothing set at listing on one market: the event's end is a guess. Skip it.
+        bare = {"ticker": "X-A", "event_ticker": "X", "close_time": iso(sched), "can_close_early": True}
+        self.assertEqual(backtest.event_anchors([bare, dict(game, ticker="X-B", event_ticker="X")]), {})
+
+    def test_weather_gets_its_strike_date_from_the_events_list(self):
+        c = FakeKalshi(can_trade=False)
+        for d in range(12):
+            close = T0 + (d + 10) * DAY
+            ev = f"KXHIGHNY-{d}"
+            for strike, won in ((70, d % 3 == 0), (72, d % 3 == 1)):
+                tk = f"{ev}-T{strike}"
+                c.settled.setdefault("KXHIGHNY", []).append({
+                    "ticker": tk, "event_ticker": ev, "open_time": iso(close - 2 * DAY), "close_time": iso(close),
+                    "status": "finalized", "result": "yes" if won else "no", "volume_fp": "500.00",
+                    "can_close_early": True, "occurrence_datetime": iso(close + 9 * H),
+                    "expected_expiration_time": iso(close + 14 * H)})
+                c.candle_data[tk] = [{"end_period_ts": close - 7 * H, "yes_ask": {"close": "0.3100"},
+                                      "yes_bid": {"close": "0.3000"}}]
+            c.event_list.append({"event_ticker": ev, "series_ticker": "KXHIGHNY", "strike_date": iso(close)})
+        obs = backtest.load_observations(c, "KXHIGHNY", 6, refresh=True)
+        self.assertEqual(len(obs), 24)
+        self.assertTrue(all(o["decided"] == o["close"] - 6 * H for o in obs))
+        c.events = mock.Mock(side_effect=KalshiError("down", 503))  # no strike dates: skipped, not misdated
+        self.assertEqual(backtest.load_observations(c, "KXHIGHNY", 6, refresh=True), [])
 
 
 # ---------- 4. one false-promotion budget for every candidate, ever ----------
@@ -340,9 +396,10 @@ def crashing_job():
 class MemoryTests(TempHome):
     def test_the_price_cache_stops_growing(self):
         path = backtest.cache_path("S", 6)
-        v2 = path.replace("_v3.json", "_v2.json")
-        with open(v2, "w") as f:
-            f.write('{"version": 1, "markets": {}}')   # an old cache: its prices may peek
+        olds = [path.replace("_v4.json", v) for v in ("_v2.json", "_v3.json")]
+        for v in olds:
+            with open(v, "w") as f:
+                f.write('{"version": 1, "markets": {}}')   # an old cache: its prices may peek
         old = {f"S-OLD{i}": {"series": "S", "event": f"S-OLD{i}", "ticker": f"S-OLD{i}", "close": T0 + i,
                              "anchor": T0 + i, "decided": T0 + i - 6 * H, "yes_ask": 0.5, "yes_bid": 0.49,
                              "result": "no", "yes_value": 0.0} for i in range(5000)}
@@ -362,7 +419,7 @@ class MemoryTests(TempHome):
         self.assertEqual(len(obs), len([o for o in cached.values() if o and "yes_ask" in o]))
         self.assertTrue(all(f"S-NEW{i}" in cached for i in range(10)))   # what Kalshi lists now stays
         self.assertNotIn("S-OLD0", cached)                                # the oldest go first
-        self.assertFalse(os.path.exists(v2))                              # and the old format is gone
+        self.assertEqual([v for v in olds if os.path.exists(v)], [])      # and the old formats are gone
 
     def test_research_runs_in_its_own_process(self):
         out = scheduler.in_child(child_job)

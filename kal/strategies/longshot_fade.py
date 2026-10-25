@@ -34,8 +34,8 @@ from collections import defaultdict
 from datetime import datetime, timezone
 
 from .. import sizing
-from ..client import fee, num, price, ts
-from .base import Leg, Signal, Strategy, plain_payouts
+from ..client import fee, num, price
+from .base import Leg, Signal, Strategy, event_end, plain_payouts
 from .favorites import is_open
 
 NAME = "longshot_fade"
@@ -152,18 +152,12 @@ def bet_cap(ctx):
                         CAPITAL_SHARE * ctx.bankroll))
 
 
-def _close(m):
-    try:
-        return ts(m["close_time"])
-    except (KeyError, TypeError, ValueError, AttributeError):
-        return None
-
-
 def event_info(ev, series_wanted):
     """What we need from one open event, or None if it's not one to trade.
 
-    The anchor is the event's scheduled close: the latest close among its markets, the
-    same anchoring the backtest uses (kal.research.backtest.event_anchors)."""
+    The anchor is the event's scheduled end (base.event_end), the same anchoring the
+    backtest uses (kal.research.backtest.event_anchors). Not the markets' close_time: on
+    a game that's a deadline two days after it, long after the market really closes."""
     if not isinstance(ev, dict) or not ev.get("event_ticker"):
         return None
     et = ev["event_ticker"]
@@ -173,12 +167,9 @@ def event_info(ev, series_wanted):
     if excluded({"ticker": series, "category": ev.get("category"), "title": ev.get("title")}):
         return None
     markets = [m for m in ev.get("markets") or [] if isinstance(m, dict) and m.get("ticker")]
-    closes = [_close(m) for m in markets]
-    if not markets or None in closes:
-        return None  # can't tell the scheduled close: never guess the timing
-    if len(markets) == 1 and markets[0].get("can_close_early") is True:
-        return None  # the backtest skips these: a lone market's close may be its outcome
-    anchor = max(closes)
+    anchor = event_end(markets, ev.get("strike_date")) if markets else None
+    if anchor is None:
+        return None  # can't tell the scheduled end: never guess the timing
     return {"ticker": et, "series": series, "title": ev.get("title") or et, "anchor": anchor,
             "group": group_of(series, anchor), "markets": markets, "tickers": {m["ticker"] for m in markets}}
 
