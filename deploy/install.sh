@@ -4,21 +4,91 @@
 #   sudo git clone https://github.com/YOU/kal.git /opt/kal
 #   sudo bash /opt/kal/deploy/install.sh
 #
-# Safe to run again after `git pull`: it updates the Python packages and the
-# service, and never touches your settings, key or data.
+# Safe to run again after `git pull`: it updates the Python packages, the service, and
+# the `kal` command, and never touches your settings, key or data.
 #
 # Code: /opt/kal   Python: /opt/kal-venv   Data: /var/lib/kal   Settings: /etc/kal/kal.env
 set -euo pipefail
 
-APP=/opt/kal
-VENV=/opt/kal-venv
-DATA=/var/lib/kal
-ETC=/etc/kal
+APP="${APP:-/opt/kal}"
+VENV="${VENV:-/opt/kal-venv}"
+DATA="${DATA:-/var/lib/kal}"
+ETC="${ETC:-/etc/kal}"
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 say() { printf '\n== %s\n' "$*"; }
 die() { printf '\nSTOP: %s\n' "$*" >&2; exit 1; }
 random() { python3 -c 'import secrets; print(secrets.token_urlsafe(18))'; }
+
+# A phone-friendly alert topic: lowercase letters and digits, no look-alikes (l 1 o 0),
+# so it can't be mistyped into the ntfy app. Same alphabet as the dashboard.
+ntfy_topic_name() {
+  python3 - <<'PY'
+import secrets
+abc = "abcdefghijkmnpqrstuvwxyz23456789"   # no l, 1, o or 0
+print("kal-" + "".join(secrets.choice(abc) for _ in range(20)))
+PY
+}
+
+# The `kal` command. It NEVER executes kal.env (a typo there must not stop `sudo kal off`);
+# it reads KEY=VALUE lines, skips comments and bad lines, and exports only real settings.
+kal_wrapper() {
+  cat <<'WRAP'
+#!/bin/sh
+# Runs `python -m kal ...` as the kal user, with the service's settings.
+# Use it with sudo:  sudo kal status
+set -e
+[ "$(id -u)" -eq 0 ] || { echo "Use: sudo kal $*"; exit 1; }
+ENV_FILE="${KAL_ENV_FILE:-/etc/kal/kal.env}"
+if [ -r "$ENV_FILE" ]; then
+  CR=$(printf '\r')
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in ''|'#'*) continue ;; esac   # blank or comment
+    case "$line" in *=*) : ;; *) continue ;; esac  # must have an '='
+    name=${line%%=*}
+    case "$name" in [A-Z_]*) : ;; *) echo "kal: skipping a bad settings line" >&2; continue ;; esac
+    case "$name" in *[!A-Z0-9_]*) echo "kal: skipping a bad settings line" >&2; continue ;; esac
+    val=${line#*=}
+    val=${val%"$CR"}
+    case "$val" in \"*\") val=${val#\"}; val=${val%\"} ;; \'*\') val=${val#\'}; val=${val%\'} ;; esac
+    export "$name=$val"
+  done < "$ENV_FILE"
+fi
+export KAL_HOME="${KAL_DATA:-/var/lib/kal}"
+cd "${KAL_APP:-/opt/kal}"
+exec runuser -u "${KAL_USER:-kal}" -- env KAL_HOME="${KAL_DATA:-/var/lib/kal}" KAL_CMD="sudo kal" \
+  "${KAL_VENV:-/opt/kal-venv}/bin/python" -m kal "$@"
+WRAP
+}
+
+# Turn off SSH password login, but only if root already has an SSH key (never lock you out).
+harden_ssh() {
+  local keys="${KAL_ROOT_AUTHKEYS:-/root/.ssh/authorized_keys}"
+  local dir="${KAL_SSHD_DIR:-/etc/ssh/sshd_config.d}"
+  if [ -r "$keys" ] && grep -qE '^[[:space:]]*(ssh-|ecdsa-sha2-|sk-ssh-|sk-ecdsa-)' "$keys"; then
+    mkdir -p "$dir"
+    cat > "$dir/10-kal.conf" <<'SSHD'
+# Written by kal's deploy/install.sh. You log in with an SSH key, so password login is
+# off: it stops password-guessing attacks on root.
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+SSHD
+    chmod 644 "$dir/10-kal.conf"
+    systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || true
+    say "SSH: password login is off (you log in with a key)."
+  else
+    say "SSH: no SSH key found for root, so password login is STILL ON."
+    echo "   !! A password-only server can be guessed into. Add an SSH key and turn"
+    echo "   !! password login off. See README step 3."
+  fi
+}
+
+# Tests call one helper without needing root or a full install.
+case "${1:-}" in
+  --emit-topic)   ntfy_topic_name; exit 0 ;;
+  --emit-wrapper) kal_wrapper; exit 0 ;;
+  --harden-ssh)   harden_ssh; exit 0 ;;
+esac
 
 [ "$(id -u)" -eq 0 ] || die "Run it with sudo: sudo bash $0"
 command -v apt-get >/dev/null || die "This script is for Ubuntu (it needs apt-get)."
@@ -55,6 +125,9 @@ cat > /etc/systemd/journald.conf.d/kal.conf <<'JOURNAL'
 SystemMaxUse=200M
 JOURNAL
 systemctl restart systemd-journald >/dev/null 2>&1 || true
+
+say "Locking down SSH"
+harden_ssh
 
 say "Putting the code in $APP"
 if [ "$SRC" != "$APP" ]; then
@@ -100,9 +173,10 @@ KAL_DASHBOARD_PASSWORD=$PASSWORD
 # Demo (fake money) vs real money is a setting, not an env var:
 #   kal set env demo    /    kal set env prod
 
-# Hourly status report on the "status" branch of a PRIVATE repo (see docs/DEPLOY.md).
+# Hourly status report on the "status" branch of a repo. Must be a PRIVATE repo.
+# See docs/DEPLOY.md, step 10.
 #KAL_GITHUB_TOKEN=
-#KAL_GITHUB_REPO=you/kal-status   (must be a private repo)
+#KAL_GITHUB_REPO=you/kal-status
 ENV
   chmod 600 "$ETC/kal.env"
   NEW_PASSWORD="$PASSWORD"
@@ -111,7 +185,7 @@ fi
 say "Setting up phone alerts"
 # The same file `kal setup` uses, so both always show the same topic.
 if [ ! -s "$DATA/ntfy_topic" ] && ! grep -qs '^KAL_NTFY_TOPIC=.' "$ETC/kal.env"; then
-  (umask 077 && printf '%s\n' "kal-$(random)" > "$DATA/ntfy_topic")
+  (umask 077 && ntfy_topic_name > "$DATA/ntfy_topic")
   NEW_TOPIC=1
 fi
 if [ -f "$DATA/ntfy_topic" ]; then
@@ -120,19 +194,7 @@ if [ -f "$DATA/ntfy_topic" ]; then
 fi
 
 say "Adding the 'kal' command"
-cat > /usr/local/bin/kal <<'WRAP'
-#!/bin/sh
-# Runs `python -m kal ...` as the kal user, with the service's settings.
-# Use it with sudo:  sudo kal status
-set -e
-[ "$(id -u)" -eq 0 ] || { echo "Use: sudo kal $*"; exit 1; }
-set -a
-[ -r /etc/kal/kal.env ] && . /etc/kal/kal.env
-set +a
-export KAL_HOME=/var/lib/kal
-cd /opt/kal
-exec runuser -u kal -- env KAL_HOME=/var/lib/kal KAL_CMD="sudo kal" /opt/kal-venv/bin/python -m kal "$@"
-WRAP
+kal_wrapper > /usr/local/bin/kal
 chmod 755 /usr/local/bin/kal
 
 if [ -f "$DATA/kalshi.pem" ]; then
@@ -142,11 +204,15 @@ fi
 
 say "Installing the service"
 install -m 644 "$APP/deploy/kal.service" /etc/systemd/system/kal.service
-# Daily safe updates: installed, but off until you turn them on (see the end).
+# Daily updates: installed, but OFF until you turn them on (see the end).
 install -m 644 "$APP/deploy/kal-update.service" /etc/systemd/system/kal-update.service
 install -m 644 "$APP/deploy/kal-update.timer" /etc/systemd/system/kal-update.timer
+# Watchdog: alerts you if the bot dies or crash-loops. On by default (it only reads and alerts).
+install -m 644 "$APP/deploy/kal-watch.service" /etc/systemd/system/kal-watch.service
+install -m 644 "$APP/deploy/kal-watch.timer" /etc/systemd/system/kal-watch.timer
 systemctl daemon-reload
 systemctl enable kal >/dev/null 2>&1
+systemctl enable --now kal-watch.timer >/dev/null 2>&1
 systemctl restart kal
 
 say "Quick check of Kalshi's API (no key needed)"
@@ -166,7 +232,8 @@ Next steps (README.md, "Turn it on"):
  4. Dashboard, from your computer:
                         ssh -L 8787:localhost:8787 root@THIS_SERVER
                         then open http://localhost:8787
- 5. Optional, daily safe updates (tests must pass first):
+ 5. Optional, daily auto-update. This runs whatever is on GitHub main, on your server.
+    Turn it on only if you trust every push to main:
                         sudo systemctl enable --now kal-update.timer
 Is it healthy? sudo kal health. Settings: $ETC/kal.env (then: sudo systemctl restart kal)
 NEXT
@@ -176,7 +243,11 @@ if [ -n "${NEW_PASSWORD:-}" ]; then
   echo "(It is saved in $ETC/kal.env. Keep it secret.)"
 fi
 if [ -n "${NEW_TOPIC:-}" ]; then
+  topic=$(cat "$DATA/ntfy_topic")
   echo
-  echo "Phone alerts topic: $(cat "$DATA/ntfy_topic")"
-  echo "(It is saved in $DATA/ntfy_topic. Keep it secret.)"
+  echo "Phone alerts topic (type it into the ntfy app exactly):"
+  echo "   $topic"
+  echo "To read it, in groups of 4 (the spaces are NOT part of the name):"
+  echo "   $(printf '%s' "$topic" | sed -E 's/(.{4})/\1 /g')"
+  echo "(Saved in $DATA/ntfy_topic. Keep it secret. Test: sudo kal summary --send)"
 fi

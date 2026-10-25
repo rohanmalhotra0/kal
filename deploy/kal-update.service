@@ -1,9 +1,10 @@
 [Unit]
-Description=kal safe update (tests must pass before a restart)
+Description=kal update (pull request code only; tests must pass before a restart)
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=oneshot
-EnvironmentFile=-/etc/kal/kal.env
+# No EnvironmentFile: this must never run with the key, tokens or topic in its
+# environment. kal-update.sh reads only the alert topic/server from kal.env itself.
 ExecStart=/opt/kal/deploy/kal-update.sh

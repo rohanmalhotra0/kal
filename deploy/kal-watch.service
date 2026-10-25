@@ -1,0 +1,9 @@
+[Unit]
+Description=kal watchdog (alerts if the bot is dead or crash-looping)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# No EnvironmentFile: it reads only the alert topic/server from kal.env itself.
+ExecStart=/opt/kal/deploy/kal-watch.sh
