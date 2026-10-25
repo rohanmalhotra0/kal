@@ -75,6 +75,9 @@ tests/            unittest; tests/fakes.py has FakeKalshi, tests/helpers.py has 
 - An order whose reply was lost is marked `unknown`; the next run looks it up on
   Kalshi (by client_order_id) before trading. Can't tell yet -> no live trading.
 - An order left resting -> cancelled, and the bot trips.
+- No trade (paper or real) unless the market's series fee, and any event fee change
+  Kalshi has scheduled, is a known quadratic type with multiplier 0-1 (`kal/fees.py`).
+  Only then is the bot's fee estimate an upper bound. Unreadable fees -> skip.
 - Bets (never locked-in trades) are skipped when the last hour of public trades on that
   market went 70%+ the other way, or one big trade (5x the median, $50+) just did
   (`kal/flow.py`). Paper too, so practice matches real. Unreadable trades -> skip.

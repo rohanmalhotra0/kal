@@ -163,6 +163,15 @@ class Kalshi:
     def markets(self, limit=None, **params):
         return self.paginate("/markets", "markets", {"limit": 1000, **params}, limit)
 
+    def series_info(self, ticker):
+        """One series, with its fee_type and fee_multiplier. 404 (KalshiError) if no such series."""
+        return self.get(f"/series/{ticker}").get("series") or {}
+
+    def event_fee_changes(self):
+        """Event-level fee overrides Kalshi has scheduled: event_ticker, fee_type_override,
+        fee_multiplier_override, scheduled_ts."""
+        return self.paginate("/events/fee_changes", "event_fee_changes", {})
+
     def trades(self, ticker, min_ts=None, limit=500):
         """Public trades in one market, newest first. Each says which side its taker bought
         (taker_side), how many (count_fp) and when (created_time)."""

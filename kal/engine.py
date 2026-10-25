@@ -12,7 +12,7 @@ import time
 import traceback
 import uuid
 
-from . import books, config, db, flow, gate, ledger, paper, risk, sizing
+from . import books, config, db, fees, flow, gate, ledger, paper, risk, sizing
 from .client import Kalshi, KalshiError, UnknownSettlement, fee, filled, is_transient, resting
 from .strategies import load_all
 from .strategies.base import Context
@@ -383,6 +383,8 @@ def _trade(client, cfg, summary):
             reason = limits.refuse(sig)
             if not reason and not sig.guaranteed:
                 reason = flow.veto(client, sig)  # paper too, so practice results match real ones
+            if not reason:
+                reason = fees.check(client, sig)
             sid = db.insert("signals", strategy=name, event=sig.event, title=sig.title,
                             mode="live" if sig_live else "paper",
                             guaranteed=int(sig.guaranteed), cost=sig.cost, payout_min=sig.payout_min,
