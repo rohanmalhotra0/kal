@@ -17,9 +17,15 @@ the order. So it starts on paper.
 
 The deadline comes from each market's own wording ("Before Sep 1, 2026"), never its
 close_time: Kalshi rewrites close_time when a market settles early, and the order
-flips. We only trust an event where every market reads exactly "Before <date>", each
-with its own date, and every market's rules and custom_strike match once the dates are
-taken out. Anything odd and the event is skipped.
+flips. We only trust an event where:
+  - every market reads exactly "Before <date>", each with its own date;
+  - every market's rules say "If <it happens> before <that same date>, then the market
+    resolves to Yes", with no "not", "still", "in effect", "after issuance" and the like:
+    those flip or break which date implies which;
+  - the rules and custom_strike match across markets once each market's own deadline is
+    taken out (any other date must be the same everywhere).
+Anything odd and the event is skipped. The lock rests on reading rules text, so real money
+also needs a person to check it first (strategies.date_ladder_arb.verified), as bracket_arb does.
 """
 import datetime
 import re
@@ -29,12 +35,14 @@ from .base import Leg, Signal, Strategy
 from .ladder_arb import (MIN_TIME_LEFT, allocate, close_ts, locked_basket, looks_inverted, own_markets,
                          quote, thinnest_first, tradeable)
 
+UNVERIFIED = "date ladders not yet checked by hand on live data"
 _MONTHS = (r"jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?"
            r"|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?")
 MONTHS = {m: i + 1 for i, m in enumerate("jan feb mar apr may jun jul aug sep oct nov dec".split())}
-BEFORE = re.compile(rf"^\s*before\s+(?:({_MONTHS})\.?\s+(\d{{1,2}}),?\s+)?((?:19|20)\d\d)\s*$", re.I)
-# Dates in rules text, taken out before comparing: "Sep 1, 2026", "September 1st 2026",
-# "September 2026", "before 2028". Other numbers stay: "$2,050" vs "$2,060" is another question.
+BEFORE = re.compile(rf"^\s*before\s+(?:({_MONTHS})\.?\s+(\d{{1,2}})(?:st|nd|rd|th)?,?\s+)?((?:19|20)\d\d)\s*$",
+                    re.I)
+# Dates in rules text: "Sep 1, 2026", "September 1st 2026", "September 2026", "before 2028".
+# Only a market's own deadline is taken out before comparing; other numbers and dates stay.
 _DATES = re.compile(rf"\b(?:{_MONTHS})\.?\s+\d{{1,2}}(?:st|nd|rd|th)?(?:,?\s+(?:19|20)\d\d)?\b"
                     rf"|\b(?:{_MONTHS})\.?,?\s+(?:19|20)\d\d\b"
                     r"|(?<=before )(?:19|20)\d\d\b", re.I)
@@ -79,31 +87,51 @@ def deadline(m):
     return _date(m.get("yes_sub_title") or m.get("subtitle"))
 
 
-def _about(m):
-    """What the market is about besides its deadline, from its custom_strike, comparable across
-    markets. Kalshi puts the deadline there too, written many ways: {"Date": "Sep 1, 2026",
-    "Player": "Kade Anderson"}, {"deadline": "2026-10-15"}, {"Policy": "27Jan01"}. None if a
-    date there disagrees with the wording: then trust neither."""
-    cs = m.get("custom_strike") or {}
-    if not isinstance(cs, dict):
-        return None
-    out = []
-    for k, v in sorted(cs.items()):
-        d = _value_date(v) if isinstance(v, str) else None
-        if d is not None:
-            if d != deadline(m):
-                return None
-            v = "<deadline>"
-        out.append((k, v))
-    return repr(out)
+def same_about(markets):
+    """True if the markets are about the same thing besides their deadlines, by custom_strike.
+    Kalshi puts the deadline there too, written many ways: {"Date": "Sep 1, 2026", "Player":
+    "Kade Anderson"}, {"deadline": "2026-10-15"}, {"Policy": "27Jan01"}. A value the same on
+    every market is fine as it is. One that differs must be each market's own deadline."""
+    customs = [m.get("custom_strike") or {} for m in markets]
+    if not all(isinstance(cs, dict) for cs in customs):
+        return len({repr(cs) for cs in customs}) == 1
+    for k in set().union(*customs):
+        values = [cs.get(k) for cs in customs]
+        if all(v == values[0] for v in values):
+            continue
+        if not all(isinstance(v, str) and _value_date(v) == deadline(m) for m, v in zip(markets, values)):
+            return False   # another player, team or thing, or a date that disagrees
+    return True
 
 
 def _rules(m):
-    """A market's rules with every date taken out, or None if it has no rules."""
+    """A market's rules with only its own deadline taken out ("on or before Aug 31" counts as
+    before Sep 1), or None if it has no rules. Every other date stays, so markets whose windows
+    start on different days ("between <start> and <deadline>") don't look alike."""
     text = f"{m.get('rules_primary') or ''} {m.get('rules_secondary') or ''}".strip().lower()
     if not text:
         return None
-    return re.sub(r"\s+", " ", _DATES.sub("<date>", text))
+    own = deadline(m)
+    near = {own, own - datetime.timedelta(days=1)} if own else set()
+    text = _DATES.sub(lambda g: "<deadline>" if _value_date(g.group(0)) in near else g.group(0), text)
+    return re.sub(r"\s+", " ", text)
+
+
+# The one wording trusted: "If <it happens> before <this market's deadline>, then the market
+# resolves to Yes." A negation ("has not released"), a state ("is still", "in effect", "as of")
+# or a window that starts per market ("after issuance") breaks which date implies which.
+_CLAIM = re.compile(r"^\s*if\s+(?P<thing>.+?)\s+before\s+(?P<date>[^,.]+(?:,\s*(?:19|20)\d\d)?)\s*,\s*"
+                    r"(?:then\s+)?the market (?:will )?resolves? to yes\b", re.I | re.S)
+_NOT_A_HAPPENING = re.compile(r"\b(?:not|no longer|never|cannot|without|fails?|failed|still|remains?|remained"
+                              r"|continues?|continued|in effect|as of|after|since|until|unless|issuance|issued)\b"
+                              r"|n't\b", re.I)
+
+
+def claims_it_happens_before(m):
+    """True if the market's rules read "If <it happens> before <its own deadline>, then the
+    market resolves to Yes", and <it happens> is a plain event, not a negation or a state."""
+    g = _CLAIM.match(m.get("rules_primary") or "")
+    return bool(g) and not _NOT_A_HAPPENING.search(g["thing"]) and _value_date(g["date"].strip()) == deadline(m)
 
 
 def ladder(ev):
@@ -116,9 +144,8 @@ def ladder(ev):
     days = [deadline(m) for m in markets]
     if None in days or len(set(days)) != len(days):
         return None
-    about = {_about(m) for m in markets}
-    if len(about) != 1 or None in about:
-        return None   # another player, team or thing, or a date that disagrees
+    if not same_about(markets) or not all(claims_it_happens_before(m) for m in markets):
+        return None
     rules = {_rules(m) for m in markets}
     if len(rules) != 1 or None in rules:
         return None   # the same question at every date, or no trade
@@ -130,11 +157,16 @@ def ladder(ev):
 def settles_by(earlier, later):
     """When the $1 is sure to come: when the earlier market closes. Its NO pays then, or the
     thing already happened and the later market closed early with a YES. A later market that
-    can't close early pays only at its own close."""
+    may not close early (or doesn't say) pays only at its own close."""
     t = close_ts(earlier)
-    if later.get("can_close_early") is False:
+    if later.get("can_close_early") is not True:
         t = max(t, close_ts(later))
     return t
+
+
+def _day(t):
+    d = datetime.datetime.fromtimestamp(t, datetime.timezone.utc)
+    return f"{d:%b} {d.day}, {d.year}"
 
 
 def to_signal(event, title, basket, meta, closes_at):
@@ -142,7 +174,7 @@ def to_signal(event, title, basket, meta, closes_at):
     legs = [Leg(t, side, p, c) for t, side, p, _ in thinnest_first(basket["quotes"])]
     sig = Signal("date_ladder_arb", event, title, legs, payout_min=c * 1.0, meta=dict(meta), note=(
         f"buy {c} YES on {meta['later']} and {c} NO on {meta['earlier']}. "
-        f"Pays at least ${c:.2f} by {meta['earlier_date']}."))
+        f"Pays at least ${c:.2f} by {_day(closes_at)}."))
     sig.exp_profit = sig.payout_min - sig.cost
     sig.closes_at = closes_at
     return sig
@@ -155,6 +187,11 @@ class DateLadderArb(Strategy):
     description = ("Some markets ask one question with different deadlines, like 'before Aug 1' "
                    "and 'before Sep 1'. If the earlier date's YES sells for more than the later "
                    "date's, buy YES on the later date and NO on the earlier. One of them always pays $1.")
+
+    def proven(self, ctx):
+        if ctx.params.get("verified") is True:
+            return True, "date ladders checked by hand on live data"
+        return False, UNVERIFIED
 
     def _budget(self, ctx):
         return min(ctx.budget_left, float(ctx.cfg["max_per_arb"]))
@@ -172,8 +209,7 @@ class DateLadderArb(Strategy):
             for earlier, later in hot:
                 e, lt = earlier["ticker"], later["ticker"]
                 quotes = [(lt, "yes", *quote(books[lt], "yes")), (e, "no", *quote(books[e], "no"))]
-                when = deadline(earlier)
-                meta = {"earlier": e, "later": lt, "earlier_date": f"{when:%b} {when.day}, {when.year}",
+                meta = {"earlier": e, "later": lt,
                         "deadlines": {e: deadline(earlier).isoformat(), lt: deadline(later).isoformat()}}
                 candidates.append((quotes, lambda bk, ev=ev, meta=meta, at=settles_by(earlier, later): to_signal(
                     ev["event_ticker"], ev.get("title", ""), bk, meta, at)))

@@ -32,7 +32,7 @@ def market(ticker, ev, when, bid, ask, close=None, rules=RULES, status="active")
     words = f"{when:%b} {when.day}, {when.year}"
     stamp = datetime.datetime(when.year, when.month, when.day, 4, tzinfo=timezone.utc).timestamp()
     m = {"ticker": ticker, "event_ticker": ev, "status": status, "yes_sub_title": f"Before {words}",
-         "close_time": iso(close or stamp), "rules_primary": rules.format(d=words),
+         "close_time": iso(close or stamp), "rules_primary": rules.format(d=words), "can_close_early": True,
          "yes_bid_dollars": f"{bid:.4f}", "yes_ask_dollars": f"{ask:.4f}"}
     return m
 
@@ -194,8 +194,9 @@ class DateLadderTests(unittest.TestCase):
         ev = date_event()
         for m in ev["markets"]:
             d = datetime.datetime.strptime(m["yes_sub_title"][len("Before "):], "%b %d, %Y").date()
-            m["rules_primary"] = (f"If it happens before {d:%B} {d.day}th, {d.year} (by the end of "
-                                  f"{d:%B} {d.year}), the market resolves to Yes.")
+            m["rules_primary"] = (f"If Drake releases a new studio album before {d:%B} {d.day}th, {d.year}, "
+                                  f"the market resolves to Yes. On or before {d - datetime.timedelta(days=1):%B} "
+                                  f"{(d - datetime.timedelta(days=1)).day}, {d.year} counts.")
         self.assertEqual(len(self.scan(ev)), 1)
 
     def test_no_rules_no_trade(self):
@@ -262,6 +263,85 @@ class DateLadderTests(unittest.TestCase):
         ev["markets"][2]["close_time"] = iso(time.time() + 12 * DAY)
         rungs = date_ladder_arb.ladder(ev)
         self.assertEqual([m["yes_sub_title"] for m in rungs], ["Before 2030", "Before 2031", "Before 2032"])
+        self.assertEqual(len(self.scan(ev)), 1)   # and it trades
+
+    # ---- the rules must say "it happens before this date" (independent review) ----
+
+    def _rules(self, ev, text):
+        for m in ev["markets"]:
+            m["rules_primary"] = text.format(d=m["yes_sub_title"][len("Before "):])
+        return ev
+
+    def test_a_negated_question_is_not_a_ladder(self):
+        # "Has NOT released before" runs the other way: an earlier YES means NO later. Priced
+        # normally, it looks upside down every run, and both legs lose if it happens in between.
+        ev = date_event(quotes=((.70, .72), (.60, .62), (.53, .55)))
+        for text in ("If Drake has not released a new studio album before {d}, then the market resolves to Yes.",
+                     "If Drake hasn't released a new studio album before {d}, then the market resolves to Yes.",
+                     "If Drake never releases a new studio album before {d}, then the market resolves to Yes.",
+                     "If Drake fails to release a new studio album before {d}, then the market resolves to Yes."):
+            self.assertEqual(self.scan(self._rules(ev, text)), [], text)
+
+    def test_a_state_on_a_date_is_not_a_ladder(self):
+        for text in ("If the tariff on Canadian lumber is in effect before {d}, then the market resolves to Yes.",
+                     "If Pete Hegseth is still Secretary of Defense before {d}, then the market resolves to Yes.",
+                     "If the strike continues before {d}, then the market resolves to Yes.",
+                     "If the rate is above 4% as of the day before {d}, then the market resolves to Yes.",
+                     "If Drake releases an album on {d}, then the market resolves to Yes.",
+                     "If Drake releases an album before {d}, then the market resolves to No."):
+            self.assertEqual(self.scan(self._rules(date_event(), text)), [], text)
+
+    def test_windows_that_start_per_market_are_not_a_ladder(self):
+        # Each market counts from its own listing: something between two listings is YES on
+        # the earlier market only, and the pair pays nothing.
+        for text in ("If Trump declares a national emergency after issuance and before {d}, then the market "
+                     "resolves to Yes.",
+                     "If a budget resolution passes since this market was issued and before {d}, then the "
+                     "market resolves to Yes."):
+            self.assertEqual(self.scan(self._rules(date_event(), text)), [], text)
+
+    def test_buckets_with_their_own_start_dates_are_not_a_ladder(self):
+        ev = date_event()
+        starts = ["Jul 1, 2026", "Aug 1, 2026", "Sep 1, 2026"]
+        for m, start in zip(ev["markets"], starts):
+            d = m["yes_sub_title"][len("Before "):]
+            m["rules_primary"] = f"If Drake releases an album before {d}, then the market resolves to Yes."
+            m["rules_secondary"] = f"Only releases on or after {start} count."
+        self.assertEqual(self.scan(ev), [])
+        for m in ev["markets"]:
+            m["rules_secondary"] = "Only releases on or after Jul 1, 2026 count."   # one start for all: nested
+        self.assertEqual(len(self.scan(ev)), 1)
+
+    def test_the_rules_date_must_be_the_wording_date(self):
+        # Kalshi settles on the rules. Market 0 says "Before <day 10>" but its rules say day 22:
+        # it happening on day 21 would pay nothing.
+        ev = date_event()
+        late = ev["markets"][2]["yes_sub_title"][len("Before "):]
+        ev["markets"][0]["rules_primary"] = RULES.format(d=late)
+        self.assertEqual(self.scan(ev), [])
+
+    def test_a_later_market_that_doesnt_say_it_can_close_early_waits_for_its_close(self):
+        for flag in (None, "missing", False):
+            ev = date_event()
+            if flag == "missing":
+                del ev["markets"][1]["can_close_early"]
+            else:
+                ev["markets"][1]["can_close_early"] = flag
+            sig = self.scan(ev)[0]
+            self.assertEqual(sig.closes_at, date_ladder_arb.close_ts(ev["markets"][1]), flag)
+            self.assertIn(f"by {soon(20):%b} {soon(20).day}", sig.note)   # the note says the same date
+
+    def test_a_settled_first_market_never_trades_but_the_rest_still_can(self):
+        ev = date_event(quotes=((.40, .42), (.50, .52), (.30, .32)), days=(10, 20, 25))
+        ev["markets"][0].update(status="settled", result="no")
+        sigs = self.scan(ev)
+        self.assertEqual(len(sigs), 1)
+        self.assertEqual({leg.ticker for leg in sigs[0].legs}, {ev["markets"][1]["ticker"], ev["markets"][2]["ticker"]})
+
+    def test_custom_strike_values_the_same_on_every_market_are_fine(self):
+        for extra in ({"Season": "2026"}, {"Opened": "Jan 5, 2026"}):
+            ev = self._custom(date_event(), **extra)
+            self.assertEqual(len(self.scan(ev)), 1, extra)
 
     def test_held_or_closing_markets_are_skipped(self):
         ev = date_event()
@@ -332,7 +412,7 @@ class EngineTests(TempHome):
         self.assertIn("date_ladder_arb", MODULES)
         self.assertEqual(date_ladder_arb.STRATEGY.name, "date_ladder_arb")
         self.assertEqual(date_ladder_arb.STRATEGY.kind, "arbitrage")
-        self.assertEqual(config.DEFAULTS["strategies"]["date_ladder_arb"], {"mode": "paper"})
+        self.assertEqual(config.DEFAULTS["strategies"]["date_ladder_arb"], {"mode": "paper", "verified": False})
 
     def test_paper_run_records_both_legs_and_buys_nothing(self):
         config.update({"strategies": {"date_ladder_arb": {"mode": "paper"}}})
@@ -344,8 +424,17 @@ class EngineTests(TempHome):
         row = db.query("SELECT * FROM signals")[0]
         self.assertEqual((row["strategy"], row["status"], row["guaranteed"]), ("date_ladder_arb", "accepted", 1))
 
-    def test_live_by_hand_buys_both_legs_thinnest_first(self):
+    def test_live_needs_a_person_to_check_it_first(self):
+        # The lock rests on reading rules text, so "live" alone stays on paper, as bracket_arb does.
         config.update({"strategies": {"date_ladder_arb": {"mode": "live"}}})
+        c = fake_for(date_event())
+        s = engine.run_once(c)
+        self.assertTrue(s["ok"], s)
+        self.assertEqual((s["live_trades"], s["paper_trades"], c.orders), (0, 1, []))
+        self.assertTrue(any("not yet checked by hand" in n for n in s["notes"]))
+
+    def test_live_by_hand_buys_both_legs_thinnest_first(self):
+        config.update({"strategies": {"date_ladder_arb": {"mode": "live", "verified": True}}})
         ev = date_event()
         c = fake_for(ev)
         set_book(c, ev["markets"][0]["ticker"], .40, .42, bid_size=15)   # NO on the earlier date is thin
