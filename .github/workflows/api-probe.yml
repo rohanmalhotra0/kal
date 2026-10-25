@@ -1,11 +1,8 @@
-# Prints how the real Kalshi API behaves (public data only: no key, no orders).
+# Side branch only (probe/xvenue), never merged. Public data only: no key, no orders.
 name: api-probe
 
 on:
   workflow_dispatch:
-  push:
-    branches: [main]
-    paths: ["tools/api_probe.py", ".github/workflows/api-probe.yml"]
 
 permissions:
   contents: read
@@ -13,11 +10,14 @@ permissions:
 jobs:
   probe:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
+    env:
+      KAL_HOME: ./state
+      PYTHONUNBUFFERED: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install requests
-      - run: python tools/api_probe.py
+      - run: pip install -r requirements.txt
+      - run: python tools/xvenue_probe.py
