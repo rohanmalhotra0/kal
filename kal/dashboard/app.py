@@ -114,7 +114,7 @@ def order_test(cfg, key_id):
     """The $0.01 test order that real money waits for (kal/gate.py): has it passed for this
     key and exchange? A pass for another key or exchange doesn't count."""
     rec = gate.status()
-    ok = bool(rec.get("ok")) and key_id is not None and rec.get("fingerprint") == f"{cfg['env']}:{key_id}"
+    ok = bool(rec.get("ok")) and key_id is not None and rec.get("fingerprint") == gate.fingerprint(key_id, cfg["env"])
     return {"passed": ok, "detail": str(rec.get("detail") or "")[:200], "ts": _float(rec.get("ts")) or None}
 
 
@@ -799,7 +799,11 @@ def apply_config(changes, sched):
         raise BadRequest("First, pick how much money the bot can use.")
 
     try:
-        new = config.update(changes) if changes else config.load()
+        # switch(): a change of exchange waits for a trade run to finish, so no run's books
+        # end up split between the two exchanges.
+        new = config.switch(changes) if changes else config.load()
+    except config.Busy:
+        raise BadRequest("A trade run is still going. Try again in a minute.")
     except (ValueError, TypeError, KeyError) as e:
         raise BadRequest(str(e))
     if new["enabled"] and not now["enabled"]:

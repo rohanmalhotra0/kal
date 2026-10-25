@@ -69,7 +69,8 @@ WRITE_PACER = _Pacer(0.11)
 
 def load_key(home=None):
     """(key_id, private_key) from env vars, or the files `kal setup` writes in $KAL_HOME
-    (kalshi_key_id, kalshi.pem), or (None, None)."""
+    (kalshi_key_id, kalshi.pem), or (None, None). Env vars win (CI, Docker and the server's
+    kal.env set them); `kal setup` stops rather than save a key ID that one would override."""
     key_id = os.environ.get("KALSHI_API_KEY_ID")
     id_path = home and os.path.join(home, "kalshi_key_id")
     if not key_id and id_path and os.path.exists(id_path):
@@ -144,11 +145,18 @@ class Kalshi:
             raise KalshiError(f"GET {endpoint} -> {r.status_code}: {r.text[:300]}", r.status_code)
         return r.json()
 
-    def paginate(self, endpoint, key, params=None, limit=None):
+    def paginate(self, endpoint, key, params=None, limit=None, strict=False):
+        """Every page of a list. strict: a reply without `key` raises instead of reading as
+        an empty list. For account data (positions, orders, fills) a missing key means the
+        reply changed shape (Kalshi renamed fields in 2026), and reading that as "nothing"
+        would blind the checks that catch lost fills. A key that's there but null is empty."""
         params, out = dict(params or {}), []
         while True:
             d = self.get(endpoint, params)
-            out += d.get(key, [])
+            if strict and (not isinstance(d, dict) or key not in d):
+                keys = ", ".join(sorted(d)) if isinstance(d, dict) else type(d).__name__
+                raise KalshiError(f"{endpoint}: reply has no '{key}' (got: {keys[:200]})")
+            out += d.get(key) or []
             if not d.get("cursor") or (limit and len(out) >= limit):
                 return out[:limit] if limit else out
             params["cursor"] = d["cursor"]
@@ -162,6 +170,15 @@ class Kalshi:
 
     def markets(self, limit=None, **params):
         return self.paginate("/markets", "markets", {"limit": 1000, **params}, limit)
+
+    def series_info(self, ticker):
+        """One series, with its fee_type and fee_multiplier. 404 (KalshiError) if no such series."""
+        return self.get(f"/series/{ticker}").get("series") or {}
+
+    def event_fee_changes(self):
+        """Event-level fee overrides Kalshi has scheduled: event_ticker, fee_type_override,
+        fee_multiplier_override, scheduled_ts."""
+        return self.paginate("/events/fee_changes", "event_fee_changes", {})
 
     def trades(self, ticker, min_ts=None, limit=500):
         """Public trades in one market, newest first. Each says which side its taker bought
@@ -253,7 +270,7 @@ class Kalshi:
     def positions(self):
         """Open market positions: [{'ticker', 'position' (+yes/-no), 'exposure' dollars}]."""
         out = []
-        for p in self.paginate("/portfolio/positions", "market_positions", {"limit": 1000}):
+        for p in self.paginate("/portfolio/positions", "market_positions", {"limit": 1000}, strict=True):
             pos = num(p, "position")
             if pos:
                 out.append({"ticker": p["ticker"], "position": pos,
@@ -262,11 +279,11 @@ class Kalshi:
 
     def settlements(self, min_ts=None):
         params = {"limit": 1000, **({"min_ts": int(min_ts)} if min_ts else {})}
-        return self.paginate("/portfolio/settlements", "settlements", params)
+        return self.paginate("/portfolio/settlements", "settlements", params, strict=True)
 
     def fills(self, min_ts=None):
         params = {"limit": 1000, **({"min_ts": int(min_ts)} if min_ts else {})}
-        return self.paginate("/portfolio/fills", "fills", params)
+        return self.paginate("/portfolio/fills", "fills", params, strict=True)
 
     def orders(self, ticker=None, min_ts=None):
         params = {"limit": 1000}
@@ -274,7 +291,7 @@ class Kalshi:
             params["ticker"] = ticker
         if min_ts:
             params["min_ts"] = int(min_ts)
-        return self.paginate("/portfolio/orders", "orders", params)
+        return self.paginate("/portfolio/orders", "orders", params, strict=True)
 
     def cancel(self, order_id):
         r = self._req("DELETE", f"/portfolio/events/orders/{order_id}")

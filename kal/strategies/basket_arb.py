@@ -6,9 +6,11 @@ least c * (|S| - 1): every NO pays except the winner's. So when the YES bids
 add up to more than $1 (net of fees), the profit is locked in. This usually
 happens because people overpay for longshots.
 """
+import time
+
 from ..client import fee, price, ts
 from .base import Leg, Signal, Strategy, plain_payouts
-from .ladder_arb import yearly
+from .ladder_arb import MIN_TIME_LEFT, yearly
 
 MIN_PROFIT = 0.05   # dollars per basket, after fees
 MIN_ROI = 0.01
@@ -52,6 +54,20 @@ def latest_close(markets):
         return None
 
 
+def first_close(markets):
+    """When the first market in the basket closes, or None if any close time is unreadable."""
+    try:
+        return min(ts(m["close_time"]) for m in markets)
+    except (KeyError, TypeError, ValueError, AttributeError):
+        return None
+
+
+def time_left(first):
+    """Enough time to buy every leg before any market closes? A basket half-bought at the
+    bell can't be finished: the closed legs get refused and the rest are left on their own."""
+    return first is not None and first - time.time() > MIN_TIME_LEFT
+
+
 class BasketArb(Strategy):
     name = "basket_arb"
     title = "Basket arbitrage"
@@ -72,22 +88,29 @@ class BasketArb(Strategy):
             markets = [m for m in ev.get("markets", []) if m.get("status", "active") in ("active", "open")]
             if sum(price(m, "yes_bid") for m in markets) <= 1:
                 continue  # quick filter: no basket can lock in a profit
+            first = first_close(markets)
+            if not time_left(first):
+                continue
             legs = [(m["ticker"], *ctx.client.best_bid(m["ticker"], "yes")) for m in markets
                     if m["ticker"] not in ctx.held]
             basket = no_basket(legs, self._budget(ctx))
             if basket:
                 sig = to_signal(ev["event_ticker"], ev.get("title", ""), basket)
                 sig.closes_at = latest_close(markets)
+                sig.meta["first_close"] = first
                 found.append(sig)
         return sorted(found, key=lambda s: -yearly(s))  # money back soonest, per dollar, first
 
     def recheck(self, ctx, sig):
+        if not time_left(sig.meta.get("first_close")):
+            return None
         legs = [(leg.ticker, *ctx.client.best_bid(leg.ticker, "yes")) for leg in sig.legs]
         basket = no_basket(legs, self._budget(ctx))
         if not basket:
             return None
         fresh = to_signal(sig.event, sig.title, basket)
         fresh.closes_at = sig.closes_at
+        fresh.meta["first_close"] = sig.meta.get("first_close")
         return fresh
 
 

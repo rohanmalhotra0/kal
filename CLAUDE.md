@@ -29,6 +29,8 @@ A scheduled Claude session checks on the bot. Each one should:
 
 1. Read the latest report on the `status` branch of the private status repo named in
    `KAL_GITHUB_REPO` (`report.md`, `report.json`). It is never in this public repo.
+   If `report.json` is more than 3 hours old, the server may be down: tell the owner
+   that first, before anything else.
 2. If the bot tripped, find out why. Fix the cause in a PR. Never clear a trip itself.
 3. Check CI and the `market-check` workflow on `main`. Fix real failures in a PR.
 4. Pick the top untested idea in `docs/RESEARCH.md`. Research it, then build it as a

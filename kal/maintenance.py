@@ -11,7 +11,8 @@ that stop the bot before either can hurt it.
               leave an order the books don't know about.
   clock_ok()  compares our clock with Kalshi's. Kalshi refuses signed requests with a
               wrong timestamp, so a basket could stop half-built.
-  health()    disk, clock and trading: the scheduler runs it every 10 minutes.
+  health()    disk, clock, trading and the status report: the scheduler runs it every
+              10 minutes.
   daily()     disk, backup, then prune: the scheduler runs it once a day.
 
 A check result is a row: {"check", "ok", "level" ("ok" / "warn" / "fail"), "detail"}.
@@ -45,6 +46,8 @@ STRIKE_WINDOW = 1800    # the second bad clock reading must come within this man
 LOCK_WAIT = 300         # how long prune waits for a trade run to finish
 ALIVE = 300             # a heartbeat older than this means the scheduler loop stopped
 OUTAGE = 7200           # trade runs failing this long (network, Kalshi down) is worth a warning
+REPORT_STALE = 10800    # 3 h with no status report reaching GitHub (a token is set) is worth a warning
+REPORT_TRIES = 3        # ...once this many tries in a row failed (or they span those 3 h)
 BACKUP_STALE_DAYS = 2
 WARN_EVERY = 86400      # at most one phone alert a day for each warning
 MB = 1024 * 1024
@@ -281,14 +284,33 @@ def restore(day, env=None, wait=120):
             before = str(config.load().get("disabled_reason") or "")[:200]
         except Exception:
             before = ""
-        config.trip(f"Books restored from the {day} backup. Trades after that are missing from them. "
-                    "Check Kalshi before you press Reset." + (f" (It had stopped before: {before})" if before else ""))
+        config.trip(f"Books restored from the {day} backup. When you press Reset, the bot first adds the "
+                    "trades Kalshi shows since then." + (f" (It had stopped before: {before})" if before else ""))
         try:
             saved = _put_back(src, live, name, stamp)
+            _mark_restored(live, day)
         except Exception as e:
             config.trip(f"Restoring the {day} backup failed: {e}. Check the books before you press Reset.")
             raise
     return {"db": live, "from": src, "saved": saved}
+
+
+def _mark_restored(path, day):
+    """Tell the next live run to bring the books up to date: every buy Kalshi shows since the
+    backup's day (an hour early, for clock slack) that these books don't have gets added
+    (ledger.catch_up). Until then the bot doesn't trade: the restore tripped it. A backup
+    taken while an older restore still waited keeps the older, earlier start."""
+    since = day_start(day) - 3600
+    with _open(path) as c:
+        c.execute("CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT)")
+        row = c.execute("SELECT value FROM kv WHERE key = 'restored'").fetchone()
+        try:
+            since = min(since, float(json.loads(row[0])["since"])) if row else since
+        except (TypeError, ValueError, KeyError):
+            since = 0   # unreadable: look at every fill Kalshi has
+        c.execute("INSERT OR REPLACE INTO kv (key, value) VALUES ('restored', ?)",
+                  (json.dumps({"day": day, "since": since, "at": time.time()}),))
+        c.commit()
 
 
 def _put_back(src, live, name, stamp):
@@ -570,6 +592,52 @@ def trading_ok(now=None):
     return _row("trading", "warn", f"trade runs have failed for {ago(now - first)}. It keeps trying.{why}")
 
 
+def _when(v):
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def report_ok(now=None):
+    """Does the hourly status report reach GitHub? The 2-hourly check-in reads it, so a
+    GitHub token that ran out (they last 90 days) would leave it blind. Warns when it is
+    still failing, nothing has gone through for 3 hours, and it isn't a blip: 3 failed
+    tries in a row, or 3 hours of them. So a fresh start (no good push yet) is never
+    flagged, and a server back from a long stop isn't flagged before it tries again.
+    The token itself is never shown."""
+    if not os.environ.get("KAL_GITHUB_TOKEN"):
+        return _row("report", "ok", "not set up (no GitHub token)")
+    if not os.environ.get("KAL_GITHUB_REPO"):
+        return _row("report", "warn", "kal can't post its status report: KAL_GITHUB_REPO is not set. "
+                                      "See docs/DEPLOY.md step 10")
+    from . import report
+    st = db.get(report.PUSH_KEY) or {}
+    st = st if isinstance(st, dict) else {}
+    now = time.time() if now is None else now
+    ok_ts, fail_ts, first, fails = (_when(st.get(k)) for k in ("ok_ts", "fail_ts", "first_fail_ts", "fails"))
+    error = " ".join(str(st.get("error") or "").split()).rstrip(". ")[:150]
+    if not error:
+        return _row("report", "ok", f"sent {ago(now - ok_ts)} ago" if ok_ts else "not sent yet")
+    stale = ok_ts is None or now - ok_ts >= REPORT_STALE
+    lasting = (fails or 0) >= REPORT_TRIES or now - (first or now) >= REPORT_STALE
+    trying = fail_ts is not None and now - fail_ts < REPORT_STALE
+    if not (stale and lasting and trying):
+        return _row("report", "ok", f"the last try failed ({error}). It tries again every hour.")
+    if error.startswith("couldn't reach GitHub"):
+        fix = "It keeps trying."
+    elif "KAL_GITHUB_REPO" in error or "is public" in error:
+        fix = "See docs/DEPLOY.md step 10"
+    else:   # 401 and 403: the token ran out or can't write there
+        fix = "Make a new GitHub token: docs/DEPLOY.md step 10"
+    return _row("report", "warn", f"kal can't post its status report: {error}. {fix}")
+
+
+def _report_rows():
+    """The status report's row, where one is set up (a GitHub token is set)."""
+    return [_safe("report", report_ok)] if os.environ.get("KAL_GITHUB_TOKEN") else []
+
+
 def _safe(check, fn, *args, **kw):
     """Run one check; a bug in it becomes a warning row, never a crash that hides the others."""
     try:
@@ -580,10 +648,11 @@ def _safe(check, fn, *args, **kw):
 
 
 def health(trip=True, client=None):
-    """Disk, clock and trading: the scheduler runs this every 10 minutes. A hard failure
-    trips the bot (config.trip alerts the phone); a warning alerts the phone once a day."""
+    """Disk, clock, trading and the status report: the scheduler runs this every 10 minutes.
+    A hard failure trips the bot (config.trip alerts the phone); a warning alerts the phone
+    once a day."""
     rows = [_safe("disk", disk_ok, trip=trip), _safe("clock", clock_ok, client, trip=trip),
-            _safe("trading", trading_ok)]
+            _safe("trading", trading_ok)] + _report_rows()
     try:
         note_trips()
     except Exception:
@@ -675,8 +744,8 @@ def _bot_row():
 def checks(client=None):
     """Everything `kal health` shows, as rows. Never trips: a person is looking."""
     return [_safe("disk", disk_ok, trip=False), _safe("clock", clock_ok, client, trip=False),
-            _safe("timer", _timer_row), _safe("trading", trading_ok), _safe("backup", _backup_row),
-            _safe("bot", _bot_row)]
+            _safe("timer", _timer_row), _safe("trading", trading_ok), *_report_rows(),
+            _safe("backup", _backup_row), _safe("bot", _bot_row)]
 
 
 def alive():

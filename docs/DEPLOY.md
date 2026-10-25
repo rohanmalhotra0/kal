@@ -83,6 +83,9 @@ It takes a minute or two. It:
 - makes a `kal` user (the bot never runs as root),
 - installs Python packages, and **chrony**, which keeps the clock right,
 - sets up a service that starts on boot and restarts if it crashes,
+- turns off SSH password login **if root has an SSH key** (if not, it says so and leaves
+  it on, so it can never lock you out),
+- turns on a watchdog that alerts your phone if the bot dies or crash-loops,
 - adds a `kal` command,
 - runs a quick check of Kalshi's API.
 
@@ -135,6 +138,7 @@ Start with the **demo** exchange. It uses fake money.
 
 Shortcut: do steps 1 to 5 below. Then run `sudo kal setup`. It asks five plain
 questions and does the rest for you. At question 2, press Enter to use the key you copied.
+If the bot is on, setup turns it off first. It's only on again if you say yes at the end.
 
 1. Make a demo account at [demo.kalshi.co](https://demo.kalshi.co).
 2. In the demo site, open your account settings, then **API keys**. Make a new key.
@@ -278,6 +282,7 @@ It does show your balance and profit, which is why the repo must be private.
 |---|---|
 | Every 5 minutes | Looks for trades. |
 | Every 10 minutes | Checks disk space, the clock, and that trading works. |
+| Every 10 minutes | Watchdog (outside the bot): alerts you if the bot is dead or crash-looping. |
 | Every hour | Writes the status report to GitHub. |
 | Every day, 09:00 UTC | Backs up the books. Deletes history older than 180 days. |
 | Every day, 13:00 UTC | Sends yesterday's summary to your phone. |
@@ -291,14 +296,22 @@ To change it (the hour is in UTC): `sudo kal set summary_hour_utc 14`
 | Alert | What it means | What to do |
 |---|---|---|
 | **kal stopped itself** (loud) | A safety stop. The bot is off. The alert says why. | See the next table. |
+| **kal is not running** (loud) | The watchdog found the bot stopped. | Start it: `sudo systemctl start kal`. If it won't stay up: `sudo kal logs` |
+| **kal keeps restarting** (loud) | The bot is crash-looping. | `sudo kal logs`. The check-in will look into it. |
+| **kal looks unhealthy** (loud) | The bot runs, but a check fails (e.g. the scheduler stopped). | `sudo kal health` |
 | **kal made 1 real trade(s)** | It bought something with real money. | Nothing. Look at the dashboard if you like. |
 | **kal yesterday: +$1.23** (silent, daily) | Yesterday's results. | Nothing. Just read it. |
+| **kal updated** (silent) | The daily auto-update moved to new code and the bot is alive. | Nothing. |
+| **kal update rolled back / failed / refused** (loud) | The daily auto-update stayed on the old code (bad tests, unhealthy restart, or code not merged through a pull request). | `sudo journalctl -u kal-update`. "Refused" blocks updates until you look at that commit on GitHub; if it's fine, update by hand (see "Update to new code"). |
 | **kal warning: disk** | The disk is getting full. Under 200 MB it stops itself. | Free some space (see below). |
 | **kal warning: clock** | The server clock is off. Kalshi may refuse orders. | `timedatectl`. If it says not synchronized: `sudo systemctl restart chrony` |
 | **kal warning: trading** | Trade runs keep failing. Kalshi or the internet is down. It keeps trying. | Usually nothing. If it lasts a day: `sudo kal logs` |
+| **kal warning: report** | The status report can't reach GitHub. Usually the token ran out (they last 90 days). | Make a new token: step 10 below. Until then the check-in can't see the bot. |
 | **kal backup failed** | Last night's backup didn't work. | `sudo kal backup` shows why. |
 
-Warnings come at most once a day each.
+Warnings and watchdog alerts come at most once a day each.
+The watchdog runs every 10 minutes from outside the bot, so you hear even if the bot is
+dead. See it: `sudo journalctl -u kal-watch`.
 
 ## If it stopped itself
 
@@ -348,12 +361,10 @@ Only do this if the books (`kal.db`) are broken.
 2. Put one back: `sudo kal restore 2026-10-24 --yes`
    If it says to stop the service first: `sudo systemctl stop kal`,
    run step 2 again, then `sudo systemctl start kal`.
-3. The bot stops. On Kalshi, look at your trades since that day.
-   They are not in the restored books.
-4. Lower the budget by what those trades lost. Count any still open as lost.
-   For example, $50: `sudo kal set budget 250`
-   (The $300 limit is worked out from the books. This keeps it true.)
-5. Turn it back on: `sudo kal on --clear-trip`
+3. The bot stops. Turn it back on: `sudo kal on --clear-trip`
+4. Before it trades again, it adds the trades Kalshi shows since that day
+   to the books, so the $300 limit stays true. If it can't read them, it
+   stops again and says so.
 
 The old books are kept in `/var/lib/kal/backups/before-restore-.../`.
 
@@ -380,24 +391,34 @@ The old books are kept in `/var/lib/kal/backups/before-restore-.../`.
 
 ## Update to new code
 
-By hand:
+By hand (keeps your settings, key and data):
 
 ```bash
 cd /opt/kal && sudo git pull && sudo bash deploy/install.sh
 ```
 
-This keeps your settings, key and data.
+Re-running `install.sh` also refreshes the `kal` command and the units, so after you
+update kal, existing servers pick up any fixes to them.
 
-Or let it update itself once a day (recommended):
+You can also let it update itself once a day. **This runs whatever is on GitHub `main`,
+on your server, so turn it on only if you trust every push to `main`.**
 
 ```bash
 sudo systemctl enable --now kal-update.timer
 ```
 
-Each morning (about 09:30 UTC) it fetches the newest code and runs every test first.
-Only if all pass does it restart the bot, and your phone gets "kal updated".
-If any test fails, it stays on the old version and sends "kal update failed its tests"
-(once per bad version). The tests never see your key, topic or data.
+Each morning (about 09:30 UTC) it fetches `main` and then, to stay safe:
+
+- **Docs-only changes** (like the check-in's journal) fast-forward with no restart.
+- **Code must have come through a pull request.** Code pushed straight to `main` is
+  refused, and your phone gets "kal update refused" naming the commit.
+- It **builds the new code and runs every test in a throwaway copy**, as a locked-down
+  user that can't read your key, topic or books. Only if the tests pass does it swap the
+  new code into `/opt/kal`. If a test fails, it stays put and sends "kal update failed
+  its tests" (once per bad version).
+- After the restart it **checks the bot is really alive**. If not, it puts the old code
+  and packages back and sends "kal update rolled back".
+
 See what it did: `sudo journalctl -u kal-update`. Turn it off:
 `sudo systemctl disable --now kal-update.timer`
 

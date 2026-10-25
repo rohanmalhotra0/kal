@@ -147,6 +147,52 @@ class ConfigTests(TempHome):
             config.update({"budget": -1})
         with self.assertRaises(ValueError):
             config.update({"strategies": {"basket_arb": {"mode": "yolo"}}})
+        with self.assertRaises(ValueError):
+            config.update({"trade_interval_min": float("inf")})   # was an OverflowError, not a refusal
+
+    def test_summary_hour_is_a_real_setting(self):
+        """docs/DEPLOY.md says `kal set summary_hour_utc 14`. It is in DEFAULTS (so `set`
+        knows it), with the hour the scheduler always used, and a bad hour is refused instead
+        of being saved and then ignored."""
+        from kal import scheduler
+        self.assertEqual(config.load()["summary_hour_utc"], scheduler.SUMMARY_HOUR)
+        self.assertEqual(scheduler.daily_hours(config.load())["summary"], scheduler.SUMMARY_HOUR)
+        config.update({"summary_hour_utc": 7})
+        self.assertEqual(scheduler.daily_hours(config.load())["summary"], 7)
+        for bad in (24, -1, 7.5, "7", True, None, float("inf"), float("nan")):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                config.update({"summary_hour_utc": bad})
+        self.assertEqual(config.load()["summary_hour_utc"], 7)
+
+    def test_a_switch_of_exchange_waits_for_a_trade_run(self):
+        """Each exchange has its own books, and a run looks the file up as it goes."""
+        import threading
+        import time
+        from unittest import mock
+        with mock.patch.object(config, "SWITCH_WAIT", 0.3), risk.run_lock():
+            with self.assertRaises(config.Busy):
+                config.switch({"env": "demo"})
+            config.switch({"budget": 5})        # not a switch: no wait
+            config.switch({"env": "prod"})      # nor is the exchange it's already on
+        self.assertEqual((config.load()["env"], config.load()["budget"]), ("prod", 5))
+        held, finished = threading.Event(), []
+
+        def run():                              # a run that ends a moment after the switch is asked
+            with risk.run_lock():
+                held.set()
+                time.sleep(0.5)
+                finished.append(config.load()["env"])
+        t = threading.Thread(target=run)
+        t.start()
+        held.wait(5)
+        config.switch({"env": "demo"}, wait=10)
+        self.assertEqual(finished, ["prod"])    # it waited for the run to end, then switched
+        self.assertEqual(config.load()["env"], "demo")
+        t.join()
+        config.update({"enabled": True})
+        with self.assertRaises(ValueError):
+            config.switch({"env": "prod"})      # never while the bot is on
+        self.assertEqual(config.load()["env"], "demo")
 
 
 class BasketArbTests(TempHome):
@@ -329,6 +375,39 @@ class EngineTests(TempHome):
         engine.run_once(c)
         self.assertEqual(len({o[0].split("-")[0] for o in c.orders}), 1)  # only the first event
 
+    def test_the_exchange_cant_change_under_a_run(self):
+        """Mid-basket, the owner types `kal on --env demo` (bot on), then `kal off` and
+        `kal set env demo` (bot off, but the run is still finishing). Both are refused, so
+        every leg is booked in the real-money books (critic repro: EnvSwitchMidRun)."""
+        import io
+        import os
+        import sqlite3
+        from contextlib import redirect_stdout
+        from unittest import mock
+        from kal.__main__ import main as cli
+        c = fake_with_arb(balance=10_000)
+        real_buy = c.buy
+        codes = []
+
+        def buy(*a, **k):
+            if not codes:
+                with redirect_stdout(io.StringIO()):
+                    codes.append(cli(["on", "--env", "demo"]))
+                    config.turn_off()
+                    codes.append(cli(["set", "env", "demo"]))   # waits for the run, which can't end yet
+            return real_buy(*a, **k)
+        c.buy = buy
+        with mock.patch.object(config, "SWITCH_WAIT", 0.3):
+            s = engine.run_once(c)
+        self.assertTrue(s["ok"], s)
+        self.assertEqual(codes, [2, 1])
+        self.assertEqual(config.load()["env"], "prod")
+        self.assertEqual(len(c.orders), 4)
+        prod = sqlite3.connect(db.path("prod"))
+        self.assertEqual(prod.execute("SELECT COUNT(*) FROM orders WHERE filled > 0").fetchone()[0], 4)
+        prod.close()
+        self.assertFalse(os.path.exists(db.path("demo")))
+
     def test_first_leg_miss_is_harmless(self):
         c = fake_with_arb()
         c.fill = lambda t, side, n, p: 0
@@ -379,7 +458,7 @@ class EngineTests(TempHome):
 
 
 class NotifyTests(TempHome):
-    def test_trip_sends_an_urgent_alert_and_survives_failure(self):
+    def test_trip_sends_an_alert_and_survives_failure(self):
         import os
         from unittest import mock
         from kal import notify
@@ -387,11 +466,34 @@ class NotifyTests(TempHome):
         self.addCleanup(os.environ.pop, "KAL_NTFY_TOPIC", None)
         with mock.patch.object(notify.requests, "post") as post:
             config.trip("lost too much")
-        self.assertIn("lost too much", post.call_args.kwargs["data"].decode())
-        self.assertEqual(post.call_args.kwargs["headers"]["Priority"], "urgent")
+        text = post.call_args.kwargs["data"].decode()
+        self.assertIn("lost too much", text)
+        # The bot is already off: it says so, and that there's no rush. It never sends the
+        # owner to the dashboard, which a phone can't reach, and it isn't a 3 AM alarm.
+        self.assertIn("The bot is off", text)
+        self.assertIn("No rush", text)
+        self.assertIn("sudo kal health", text)
+        self.assertNotIn("dashboard", text)
+        self.assertEqual(post.call_args.kwargs["headers"]["Priority"], "high")
         with mock.patch.object(notify.requests, "post", side_effect=OSError("no network")):
             config.trip("again")  # must not raise
         self.assertEqual(config.load()["disabled_reason"], "again")
+
+    def test_a_failed_alert_never_logs_the_topic(self):
+        """The error's text quotes the URL, which holds the secret topic."""
+        import os
+        import requests
+        from unittest import mock
+        from kal import notify
+        os.environ["KAL_NTFY_TOPIC"] = "kal-SECRET-topic-77"
+        self.addCleanup(os.environ.pop, "KAL_NTFY_TOPIC", None)
+        boom = requests.ConnectionError("HTTPSConnectionPool(host='ntfy.sh', port=443): Max retries exceeded "
+                                        "with url: /kal-SECRET-topic-77")
+        with mock.patch.object(notify.requests, "post", side_effect=boom), \
+                self.assertLogs("kal.notify", "WARNING") as logs:
+            self.assertFalse(notify.send("t", "m"))
+        self.assertNotIn("SECRET", "\n".join(logs.output))
+        self.assertIn("ConnectionError", "\n".join(logs.output))
 
     def test_no_topic_no_alert(self):
         from unittest import mock

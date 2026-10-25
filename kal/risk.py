@@ -113,15 +113,20 @@ def mark_to_market(client, positions):
     return value
 
 
-def daily_loss(cfg, equity):
-    """A reason to stop if today's loss passed the limit, else None. Day = UTC date."""
+def daily_loss(cfg, equity, at_risk=None):
+    """A reason to stop if today's loss passed the limit, else None. Day = UTC date.
+    `at_risk` (what the bot could really lose: capital, capped by what the account holds)
+    caps the base, so a budget typed bigger than the account can't loosen the stop."""
     today = datetime.now(timezone.utc).date().isoformat()
     start = db.get("day_start")
     if not start or start["day"] != today:
         db.put("day_start", {"day": today, "equity": equity})
         return None
     loss = start["equity"] - equity
-    limit = cfg["daily_loss_limit"] * max(cfg["budget"], start["equity"])
+    base = max(cfg["budget"], start["equity"])
+    if at_risk is not None:
+        base = min(base, at_risk)
+    limit = cfg["daily_loss_limit"] * base
     if cfg["budget"] > 0 and loss > limit:
         return f"lost ${loss:.2f} today, over the ${limit:.2f} daily limit"
     return None

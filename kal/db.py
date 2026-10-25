@@ -3,6 +3,7 @@ paper positions, equity history, backtests and research results."""
 import json
 import os
 import sqlite3
+import threading
 import time
 from contextlib import contextmanager
 
@@ -27,12 +28,34 @@ CREATE TABLE IF NOT EXISTS settlements (ticker TEXT PRIMARY KEY, settled_ts REAL
 CREATE TABLE IF NOT EXISTS backtests (id INTEGER PRIMARY KEY, ts REAL, kind TEXT, params TEXT,
     results TEXT);
 CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT);
+CREATE TABLE IF NOT EXISTS writeoffs (id INTEGER PRIMARY KEY, ts REAL, ticker TEXT, side TEXT,
+    count REAL, cost REAL, note TEXT);
 """
+
+_pin = threading.local()
+
+
+def current_env():
+    """The exchange whose books this thread uses: the one pinned for a trade run, else the
+    one in the settings."""
+    return getattr(_pin, "env", None) or config.load().get("env", "prod")
+
+
+@contextmanager
+def pinned(env):
+    """Keep this thread on `env`'s books until the block ends. A trade run pins its exchange,
+    so switching env part way through can't split one run's orders across two books."""
+    old = getattr(_pin, "env", None)
+    _pin.env = env
+    try:
+        yield
+    finally:
+        _pin.env = old
 
 
 def path(env=None):
     """One database per exchange, so fake-money (demo) fills can never touch the real ledger."""
-    env = env or config.load().get("env", "prod")
+    env = env or current_env()
     return os.path.join(config.home(), "kal.db" if env == "prod" else f"kal-{env}.db")
 
 

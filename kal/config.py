@@ -13,10 +13,12 @@ import json
 import math
 import os
 import threading
-from contextlib import contextmanager
+import time
+from contextlib import ExitStack, contextmanager
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _lock = threading.RLock()
+SWITCH_WAIT = 60   # seconds a switch of exchange waits for a trade run to finish
 
 DEFAULTS = {
     "enabled": False,            # master switch
@@ -38,6 +40,7 @@ DEFAULTS = {
     "research_max_series": 15,
     "research_hours_before_close": 6,
     "research_max_markets": 1500,
+    "summary_hour_utc": 13,      # the daily phone summary goes out at this hour, UTC (kal.scheduler)
     "auto_promote": True,        # move paper ideas to live once they prove themselves
     "paper_bankroll": 1000.0,
     "strategies": {
@@ -135,8 +138,12 @@ def validate(cfg):
             raise ValueError(f"{k} can't be negative")
     for k in _POSITIVE_INTS:
         v = cfg.get(k)
-        if isinstance(v, bool) or not isinstance(v, (int, float)) or v < 1 or v != int(v):
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) or v < 1 or v != int(v):
             raise ValueError(f"{k} must be a whole number, 1 or more")
+    v = cfg.get("summary_hour_utc")
+    if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) or v != int(v) \
+            or not 0 <= v <= 23:
+        raise ValueError("summary_hour_utc must be a whole hour from 0 to 23 (UTC)")
     fractions = {"daily_loss_limit": (0, 1), "kelly_fraction": (0, 1), "max_exposure": (0, 1)}
     for k, (lo, hi) in fractions.items():
         v = cfg.get(k)
@@ -160,9 +167,19 @@ def validate(cfg):
             raise ValueError(f"{name}: mode must be one of {', '.join(MODES)}")
 
 
+# What a stop alert (and the daily summary) says to do. It is read on a phone, where the
+# dashboard can't be reached, and the bot is already off: so nothing is urgent.
+STOPPED_HELP = ("The bot is off. It won't trade until you turn it back on. No rush.\n"
+                "When you can, see why: sudo kal health\n"
+                "When it's fixed: sudo kal on --clear-trip")
+
+
 def trip(reason):
     """Turn the bot off for safety. Stays off until clear_trip(). Works even if the file
-    holds invalid values, because it touches only these two keys and skips validation."""
+    holds invalid values, because it touches only these two keys and skips validation.
+
+    The phone alert is "high", not "urgent": a stop already ends all trading, so it is
+    news to read when awake, not an alarm for 3 AM."""
     with _locked():
         try:
             data = _raw()
@@ -172,8 +189,7 @@ def trip(reason):
         _write(data)
     try:
         from . import notify
-        notify.send("kal stopped itself", f"{reason}\n\nOpen the dashboard, find out why, then press Reset.",
-                    priority="urgent", tags=("rotating_light",))
+        notify.send("kal stopped itself", f"{reason}\n\n{STOPPED_HELP}", priority="high", tags=("no_entry",))
     except Exception:
         pass  # an alert must never block a trip
 
@@ -191,3 +207,49 @@ def turn_off():
 
 def clear_trip():
     update({"disabled_reason": ""})
+
+
+def command(rest):
+    """How to type a kal command here. The server's `kal` wrapper sets KAL_CMD="sudo kal",
+    so the hints match what the owner really types. (Display only: it changes nothing.)"""
+    return f"{os.environ.get('KAL_CMD') or 'python -m kal'} {rest}"
+
+
+# ---------- switching exchange ----------
+
+class Busy(RuntimeError):
+    """A trade run is still going, so the exchange can't be switched yet."""
+
+
+@contextmanager
+def no_trade_run(wait=None):
+    """Hold the trade-run lock (kal.risk.run_lock), waiting up to `wait` seconds (default
+    SWITCH_WAIT) for a run in progress to finish. Raises Busy if it doesn't."""
+    from . import risk
+    deadline = time.monotonic() + (SWITCH_WAIT if wait is None else wait)
+    while True:
+        stack = ExitStack()
+        try:
+            stack.enter_context(risk.run_lock())
+            break
+        except risk.Locked:
+            stack.close()
+            if time.monotonic() >= deadline:
+                raise Busy("a trade run is still going") from None
+            time.sleep(0.25)
+    with stack:
+        yield
+
+
+def switch(changes, wait=None):
+    """update() for a change that may switch exchange ("env"). Each exchange keeps its own
+    books, and a trade run looks up which file to write as it goes, so a switch mid-run
+    would split one basket across both. So a switch waits for any run to finish, is
+    written while holding the run lock, and needs the bot off (the change itself may turn
+    it on). Raises Busy if a run doesn't finish in time, ValueError while the bot is on."""
+    if changes.get("env") in (None, load()["env"]):
+        return update(changes)
+    with no_trade_run(wait):
+        if load()["enabled"]:
+            raise ValueError("turn the bot off before you switch")
+        return update(changes)

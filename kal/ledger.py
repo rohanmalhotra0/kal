@@ -10,7 +10,13 @@ inflate it.
 import time
 
 from . import db
-from .client import fee, price, yes_payout
+from .client import fee, num, price, ts, yes_payout
+
+OPEN = ("active", "open")
+
+
+class CatchUpError(RuntimeError):
+    """Kalshi's fills can't be read, so the books can't be brought up to date."""
 
 
 def _open_fills():
@@ -32,10 +38,22 @@ def _cost(row):
     return total
 
 
+def _written_off():
+    """{(ticker, side): (count, cost)} written off on markets that haven't settled yet."""
+    rows = db.query("""SELECT w.ticker, w.side, SUM(w.count) AS count, SUM(w.cost) AS cost
+        FROM writeoffs w LEFT JOIN settlements s ON s.ticker = w.ticker
+        WHERE s.ticker IS NULL GROUP BY w.ticker, w.side""")
+    return {(r["ticker"], r["side"]): (r["count"], r["cost"]) for r in rows}
+
+
 def open_positions():
-    rows = _open_fills()
+    """What the bot holds on markets that haven't settled, less anything written off. A
+    position written off in full stays, at 0 contracts, until its market settles."""
+    rows, gone = _open_fills(), _written_off()
     for r in rows:
-        r["cost"] = _cost(r)
+        n, cost = gone.get((r["ticker"], r["side"]), (0.0, 0.0))
+        r["count"] = max(0.0, r["count"] - n)
+        r["cost"] = max(0.0, _cost(r) - cost)
     return rows
 
 
@@ -44,7 +62,9 @@ def open_cost():
 
 
 def realized():
-    return db.query("SELECT COALESCE(SUM(pnl), 0) AS p FROM settlements")[0]["p"]
+    """Settled profit and loss, minus everything written off (counted as lost in full)."""
+    settled = db.query("SELECT COALESCE(SUM(pnl), 0) AS p FROM settlements")[0]["p"]
+    return settled - db.query("SELECT COALESCE(SUM(cost), 0) AS c FROM writeoffs")[0]["c"]
 
 
 def settle(client):
@@ -137,6 +157,87 @@ def open_directional():
 def peak_equity():
     rows = db.query("SELECT MAX(equity) AS p FROM equity WHERE balance > 0 OR exposure > 0 OR equity > 0")
     return rows[0]["p"] if rows and rows[0]["p"] is not None else None
+
+
+def shortfalls(positions):
+    """Markets where Kalshi holds fewer of the bot's contracts than its books say: someone
+    sold them outside the bot, most likely. Returns [(ticker, side, missing)]."""
+    held = {}
+    for p in positions:
+        held[p["ticker"]] = held.get(p["ticker"], 0.0) + p["position"]
+    books = {}
+    for r in open_positions():
+        books[r["ticker"]] = books.get(r["ticker"], 0.0) + (r["count"] if r["side"] == "yes" else -r["count"])
+    out = []
+    for t, mine in books.items():
+        kalshi = held.get(t, 0.0)
+        if kalshi and (kalshi > 0) != (mine > 0):
+            continue  # opposite sides: unexplained() stops the bot for that
+        missing = abs(mine) - abs(kalshi)
+        if missing > 0.5:
+            out.append((t, "yes" if mine > 0 else "no", missing))
+    return out
+
+
+def write_off(ticker, side, count, note=""):
+    """Count `count` of the bot's contracts on a market as lost: their share of the cost
+    leaves capital now, and they earn nothing when the market settles. Returns the dollars."""
+    row = next((r for r in open_positions() if r["ticker"] == ticker and r["side"] == side), None)
+    if not row or row["count"] <= 0:
+        return 0.0
+    count = min(float(count), row["count"])
+    cost = row["cost"] * count / row["count"]
+    db.insert("writeoffs", ticker=ticker, side=side, count=count, cost=cost, note=note[:300])
+    return cost
+
+
+def _parse_fill(f):
+    side, action = f.get("side"), f.get("action", "buy")
+    n = num(f, "count")
+    p = price(f, f"{side}_price") if side in ("yes", "no") else 0.0
+    if side not in ("yes", "no") or action not in ("buy", "sell") or not n > 0 or not 0 < p < 1 \
+            or not f.get("order_id") or not f.get("ticker"):
+        raise CatchUpError(f"a fill looks different than expected (fields: {', '.join(sorted(f))[:200]})")
+    try:
+        when = ts(f["created_time"]) if f.get("created_time") else time.time()
+    except (TypeError, ValueError, AttributeError):
+        raise CatchUpError(f"a fill has an unreadable time: {f.get('created_time')!r}")
+    return f["order_id"], f["ticker"], side, action, n, p, when
+
+
+def catch_up(client):
+    """After the books were restored from a backup, add the buys Kalshi shows since that
+    backup's day that the books don't have, at the highest price paid. Fills from the
+    owner's own trades in that window get counted too: the safe direction, since they only
+    make the bot think it spent more. Returns how many orders were added (0 if no restore
+    is waiting). Raises CatchUpError if a fill can't be read: never guess."""
+    gap = db.get("restored")
+    if not gap:
+        return 0
+    known = {r["order_id"] for r in db.query("SELECT DISTINCT order_id FROM orders WHERE order_id != ''")}
+    found = {}
+    for f in client.fills(min_ts=gap["since"]):
+        oid, ticker, side, action, n, p, when = _parse_fill(f)
+        if action != "buy" or oid in known:
+            continue  # the bot never sells; a sold position shows up in shortfalls()
+        o = found.setdefault(oid, {"ticker": ticker, "side": side, "n": 0.0, "p": 0.0, "ts": when})
+        o["n"] += n
+        o["p"] = max(o["p"], p)
+        o["ts"] = min(o["ts"], when)
+    for oid, o in found.items():
+        db.insert("orders", ts=o["ts"], strategy="restored", ticker=o["ticker"], side=o["side"],
+                  count=o["n"], price=o["p"], filled=o["n"], status="imported", order_id=oid,
+                  client_order_id="")
+    db.put("restore_check", True)   # strangers() gets one look at Kalshi's positions next
+    db.execute("DELETE FROM kv WHERE key = 'restored'")
+    return len(found)
+
+
+def strangers(positions):
+    """Markets Kalshi holds that the bot's books have never traded. Normally the owner's own
+    business; right after a restore they could be the bot's, missed by catch_up()."""
+    traded = {r["ticker"] for r in db.query("SELECT DISTINCT ticker FROM orders")}
+    return sorted({p["ticker"] for p in positions if p["ticker"] not in traded})
 
 
 def unexplained(positions):

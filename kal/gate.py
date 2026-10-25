@@ -5,7 +5,12 @@ trade for a key + exchange, the engine sends one zero-risk order: buy 1 YES at $
 immediate-or-cancel, in a busy market where nobody sells below $0.10. It can't fill.
 If Kalshi accepts it, live trading may start. Any refused order later clears the pass,
 so the next run checks again. Until then, live strategies trade on paper.
+
+The result names the key by a short hash of its ID, never the ID itself: the db is copied
+into every backup.
 """
+import hashlib
+import logging
 import time
 
 from . import config, db
@@ -17,13 +22,35 @@ PROBE_MIN_ASK = 0.10      # only where the cheapest seller asks at least this mu
 PROBE_TRIES = 10          # busy markets to look at
 RETRY_SECONDS = 3600      # after a failed probe, wait this long before the next one
 
+log = logging.getLogger(__name__)
+
+
+def fingerprint(key_id, env):
+    """Which key and exchange a result is for: "prod:" + the first 16 hex of sha256(key ID)."""
+    return f"{env}:{hashlib.sha256((key_id or 'no-key').encode()).hexdigest()[:16]}"
+
 
 def _fingerprint(client, env):
-    return f"{env}:{getattr(client, 'key_id', None) or 'no-key'}"
+    return fingerprint(getattr(client, "key_id", None), env)
 
 
 def status():
-    return db.get(KEY) or {}
+    rec = db.get(KEY) or {}
+    if isinstance(rec.get("fingerprint"), str) and not rec.get("hashed"):
+        rec = _upgrade(rec)
+    return rec
+
+
+def _upgrade(rec):
+    """Results saved before the hash say "prod:<key ID>". Hash that in place: the plain ID
+    leaves the books, and a pass still counts, so nobody is sent back to paper by it."""
+    env, _, key_id = rec["fingerprint"].partition(":")
+    rec = {**rec, "fingerprint": fingerprint(key_id, env), "hashed": True}
+    try:
+        db.put(KEY, rec)
+    except Exception:
+        log.warning("could not rewrite the old test order result", exc_info=True)
+    return rec
 
 
 def passed(client, env):
@@ -41,8 +68,8 @@ def due(client, env):
 
 
 def record(client, env, ok, detail):
-    db.put(KEY, {"ok": bool(ok), "fingerprint": _fingerprint(client, env), "detail": str(detail)[:300],
-                 "ts": time.time()})
+    db.put(KEY, {"ok": bool(ok), "fingerprint": _fingerprint(client, env), "hashed": True,
+                 "detail": str(detail)[:300], "ts": time.time()})
 
 
 def clear(reason):

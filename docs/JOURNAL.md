@@ -2,6 +2,27 @@
 
 Newest first. Each 2-hour check-in adds one entry: what it checked, what it found, links.
 
+## 2026-10-25 06:50 UTC — check-in: three reviewers tried to break it; fixes
+
+- Checked: CI and market-check green on main. No server yet, so no status report.
+- Three reviewers (money, operations, owner) attacked the code and proved 32 problems.
+  None lost money yet (nothing trades for real), but several could have. Fixes so far:
+  - **PR https://github.com/rohanmalhotra0/kal/pull/3:** half-built baskets after a lost
+    reply now stop the bot; one network blip no longer trips it; contracts sold outside
+    the bot are written off; a restore re-adds trades made after the backup; a budget
+    typo can't loosen the daily stop. New chaos test: hundreds of runs of random lost
+    replies, partial fills and failed cancels, with a careless owner pressing Reset: the
+    bot never had more than its budget out, and its books matched to the cent.
+  - **PR https://github.com/rohanmalhotra0/kal/pull/4:** the daily auto-update (still off)
+    tests new code as a locked-down user, takes code only from merged pull requests, and
+    rolls back if the bot isn't healthy after. New watchdog alerts if the bot dies.
+    SSH key login; alert names with no look-alike letters.
+  - **PR https://github.com/rohanmalhotra0/kal/pull/2** (longshot): its research used
+    489 MB on a big cache, over the server's 400 MB cap. Now 95 MB.
+- Still running: research fixes (luck on hourly series could pass the real-money test;
+  demo practice wrote prod's research files) and setup fixes (re-running setup on a
+  running bot, `kal set` typos). Two more PRs next.
+
 ## 2026-10-25 04:50 UTC — check-in: fee guard, deep backtest done
 
 - Checked: CI and market-check green on main (the clock fix worked). No server yet, so

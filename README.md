@@ -11,7 +11,13 @@ It runs by itself on a $6-a-month server.
 2. **Make a Kalshi API key.** kalshi.com > Account > API Keys > Create.
    Save the key file. Copy the Key ID.
 3. **Rent a server.** [DigitalOcean](https://www.digitalocean.com) > Create > Droplet >
-   Ubuntu 24.04 > Basic > **$6/month** > New York > Create. Copy its IP address.
+   Ubuntu 24.04 > Basic > **$6/month** > New York.
+   For **Authentication, pick SSH key** (not Password). Make one and add it:
+   ```bash
+   ssh-keygen -t ed25519       # on your computer; press Enter for every question
+   cat ~/.ssh/id_ed25519.pub   # paste this line into DigitalOcean's "New SSH Key" box
+   ```
+   Create the droplet. Copy its IP address. (Install then turns off password login.)
 4. **Log in** from your computer's terminal: `ssh root@SERVER_IP`
 5. **Install** (paste both lines):
    ```bash
@@ -29,12 +35,14 @@ It runs by itself on a $6-a-month server.
    It checks everything, then asks to turn the bot on. Say yes.
    Then delete the copy: `sudo rm /tmp/kalshi.pem`
 8. **Phone alerts.** Install the free **ntfy** app. Subscribe to the topic from step 5.
+   Then on the server: `sudo kal summary --send`. No buzz? The name is wrong.
 9. **Watch it.** On your computer: `ssh -L 8787:localhost:8787 root@SERVER_IP`,
    then open **http://localhost:8787** (password from step 5).
 
 **Stop it:** `sudo kal off`. **From your phone:** delete the API key in the Kalshi app.
 
-**Optional, recommended:** let it update itself daily (tests must pass first):
+**Optional: update itself daily.** This runs whatever is on GitHub `main`, on your server.
+Turn it on only if you trust every push to `main`:
 `sudo systemctl enable --now kal-update.timer`
 
 Before its first real trade, the bot sends one $0.01 test order that can't fill, to
@@ -85,6 +93,7 @@ The bot checks prices again first, and stops at the first order that doesn't fil
 - **Dashboard is never open to the internet.** You reach it with an SSH tunnel.
 - **Disk and clock checks.** Under 200 MB of disk, or a clock 30 s off Kalshi's, it stops itself.
 - **Phone alerts** (free ntfy app) when it stops itself, trades real money, or needs a look.
+- **Watchdog.** A second timer, outside the bot, alerts you if the bot dies or crash-loops.
 - **Daily backups** of its books, 14 days kept. `restore` puts one back.
 
 ## Quick start (on your computer)
