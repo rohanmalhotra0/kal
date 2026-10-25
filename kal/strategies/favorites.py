@@ -5,20 +5,59 @@ The ranges ("edges") come from kal.research (edges.json). A new edge is traded o
 paper only (Signal.meta "paper_only") until kal.research.promote marks it "live",
 after it made money in paper trading too. Bets are sized with a cautious win chance:
 the price paid times (1 + the backtest's worst-case ROI), never the hoped-for average.
+
+Bets in one series that close on one UTC day tend to win or lose together: an hourly
+BTC series is 24 events a day on one price path. So together they may cost at most
+GROUP_SHARE of capital, and kal.research counts them as one.
 """
 import logging
+import math
 import time
 from collections import defaultdict
+from datetime import datetime, timezone
 
 from .. import sizing
-from ..client import fee_per_contract, num, price, ts
+from ..client import fee, num, price, ts
 from .base import Leg, Signal, Strategy
 
 MAX_SPREAD = 0.02       # wider than this and the "price" isn't really known
 MIN_VOLUME_24H = 200    # thin markets: our order would be most of the trading
 ACTIVE = ("candidate", "live")
+FULL_BET = 10.0         # dollars in a full-size bet (max_per_trade's default): backtests price this
+GROUP_SHARE = 0.10      # bets in one series closing on one day: at most this share of capital together
 
 log = logging.getLogger(__name__)
+
+
+def full_size(p, dollars=FULL_BET):
+    """Contracts in a full-size bet of `dollars` at price p."""
+    return max(1, int(dollars // sizing.unit_cost(p)))
+
+
+def cost_each(p):
+    """What one contract costs in a full-size bet, with Kalshi's fee rounded up per order.
+    kal.research.backtest prices its trades the same way, so the cautious win chance below
+    matches what was tested. At 95c+ the rounding is a big share of the edge."""
+    n = full_size(p)
+    return (n * p + fee(n, p)) / n
+
+
+def group_of(series, close):
+    """'KXBTCD:2026-10-25': a series and the UTC day a bet in it closes."""
+    return f"{series}:{datetime.fromtimestamp(close, timezone.utc).date().isoformat()}"
+
+
+def market_group(m, series):
+    """The series-day of an open market, or None if its close time can't be read."""
+    try:
+        return group_of(series, ts(m["close_time"]))
+    except (KeyError, TypeError, ValueError, AttributeError, OverflowError, OSError):
+        return None
+
+
+def bet_cap(ctx):
+    """The most one bet may cost (all of it can be lost)."""
+    return min(ctx.cfg["max_per_trade"], ctx.cfg["max_per_event"])
 
 
 def edges_of(research):
@@ -106,21 +145,36 @@ class Favorites(Strategy):
         by_series = defaultdict(list)
         for e in active_edges(ctx.research):
             by_series[e["series"]].append(e)
-        best = {}  # event -> signal: markets in one event move together, so one bet each
+        best = {}  # event -> (signal, market, side, edge): markets in one event move together, so one bet each
+        held = defaultdict(int)  # series-day -> markets already held there (anyone's)
         for series, edges in sorted(by_series.items()):
             hours = max(e["hours_before_close"] for e in edges)
             try:
                 markets = ctx.client.markets(status="open", series_ticker=series, min_close_ts=now,
                                              max_close_ts=now + int(hours * 3600))
                 for m in markets:
-                    sig = self._consider(ctx, m, series, edges, now)
-                    if sig and (sig.event not in best or sig.exp_profit > best[sig.event].exp_profit):
-                        best[sig.event] = sig
+                    if m.get("ticker") in ctx.held and in_series(m, series):
+                        held[market_group(m, series)] += 1
+                    pick = self._consider(ctx, m, series, edges, now)
+                    if pick and (pick[0].event not in best or pick[0].exp_profit > best[pick[0].event][0].exp_profit):
+                        best[pick[0].event] = pick
             except Exception as e:
                 log.warning("favorites: %s failed: %s", series, e)
-        return sorted(best.values(), key=lambda s: -s.exp_profit)
+        # One series-day rides one price path, so its bets share one cap. Each market already
+        # held there counts as a full bet. Best first, so the cap leaves room for those.
+        found, spent = [], defaultdict(float)
+        for sig, m, side, e in sorted(best.values(), key=lambda x: -x[0].exp_profit):
+            g = sig.meta["group"]
+            room = GROUP_SHARE * ctx.bankroll - held[g] * bet_cap(ctx) - spent[g]
+            if sig.cost > room + 1e-9:
+                sig = self._signal(ctx, m, side, e, cap=room)  # smaller, to fit (or none)
+            if sig:
+                found.append(sig)
+                spent[g] += sig.cost
+        return sorted(found, key=lambda s: -s.exp_profit)
 
     def _consider(self, ctx, m, series, edges, now):
+        """(signal, market, side, edge) for the market, or None."""
         tk = m.get("ticker")
         if not tk or tk in ctx.held or not in_series(m, series) or not is_open(m):
             return None
@@ -141,10 +195,12 @@ class Favorites(Strategy):
         if len({side for side, _ in picks}) != 1:
             return None  # nothing matched, or two edges disagree about this market: stay out
         side, e = max(picks, key=lambda x: x[1]["roi_lo"])
-        return self._signal(ctx, m, side, e)
+        sig = self._signal(ctx, m, side, e)
+        return (sig, m, side, e) if sig else None
 
-    def _signal(self, ctx, m, side, e):
-        """Price from the order book (fresh, with depth), then size."""
+    def _signal(self, ctx, m, side, e, cap=math.inf, max_count=None):
+        """Price from the order book (fresh, with depth), then size. Never over `cap`
+        dollars or `max_count` contracts."""
         tk = m["ticker"]
         q = quote(ctx.client, tk, side)
         if not q:
@@ -152,24 +208,33 @@ class Favorites(Strategy):
         ask, depth, bid = q
         if not (e["lo"] <= ask < e["hi"]) or not tight(ask, bid):
             return None
-        cost_each = ask + fee_per_contract(ask)
-        p = min(cost_each * (1 + e["roi_lo"]), 0.999)
-        cap = min(ctx.cfg["max_per_trade"], ctx.cfg["max_per_event"], ctx.budget_left)
+        group = market_group(m, e["series"])
+        if group is None:
+            return None  # no readable close: can't tell which day's cap it falls under
+        # Cautious: the win chance that pays exactly the backtest's worst-case ROI, on the
+        # cost the backtest charged (a full-size order, fee rounded up).
+        p = min(cost_each(ask) * (1 + e["roi_lo"]), 0.999)
+        cap = min(bet_cap(ctx), ctx.budget_left, cap)
         count = min(sizing.contracts(p, ask, ctx.bankroll, ctx.cfg["kelly_fraction"], cap), int(depth))
+        if max_count is not None:
+            count = min(count, max_count)
         while count > 0 and Leg(tk, side, ask, count).cost > cap + 1e-9:
             count -= 1  # fees round up to the cent, so sizing's estimate can be a bit low
         if count < 1:
             return None
-        sig = Signal(self.name, m.get("event_ticker") or tk, m.get("title") or tk,
-                     [Leg(tk, side, ask, count)],
+        leg = Leg(tk, side, ask, count)
+        if count * p - leg.cost <= 0:
+            return None  # a small order pays more fee per contract: here it eats the whole edge
+        sig = Signal(self.name, m.get("event_ticker") or tk, m.get("title") or tk, [leg],
                      note=f"{side.upper()} at ${ask:.2f}: range {e['lo']:.2f}-{e['hi']:.2f} won before "
                           f"(worst case {e['roi_lo']:+.1%})",
-                     meta={"edge": e["id"], "paper_only": e["status"] != "live"})
+                     meta={"edge": e["id"], "group": group, "paper_only": e["status"] != "live"})
         sig.exp_profit = count * p - sig.cost
         return sig
 
     def recheck(self, ctx, sig):
-        """Right before a live order: is the edge still live and the price still in range?"""
+        """Right before a live order: is the edge still live and the price still in range?
+        Re-priced, never bigger than scanned, so the series-day cap still holds."""
         e = {x["id"]: x for x in active_edges(ctx.research)}.get(sig.meta.get("edge"))
         if not e or e["status"] != "live":
             return None
@@ -178,7 +243,7 @@ class Favorites(Strategy):
         if not is_open(m) or not near_tested_time(m, int(time.time()), e["hours_before_close"]):
             return None
         return self._signal(ctx, {**m, "ticker": leg.ticker, "event_ticker": sig.event, "title": sig.title},
-                            leg.side, e)
+                            leg.side, e, cap=sig.cost, max_count=leg.count)
 
     def proven(self, ctx):
         live = [e for e in active_edges(ctx.research) if e["status"] == "live"]

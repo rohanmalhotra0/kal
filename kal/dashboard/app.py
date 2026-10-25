@@ -259,9 +259,16 @@ def _last_research():
             "failed": len(last.get("failed") or {})}
 
 
+def _research_folder():
+    """The exchange in use's research files: research/, or research-demo/ on demo
+    (kal.research.backtest.folder)."""
+    env = config.load().get("env", "prod")
+    return os.path.join(config.home(), "research" if env == "prod" else f"research-{env}")
+
+
 def research_summary():
     out = {"files": [], "edges": None, "words": None, "last": None}
-    for path in sorted(glob.glob(os.path.join(config.home(), "research", "*.json"))):
+    for path in sorted(glob.glob(os.path.join(_research_folder(), "*.json"))):
         name = os.path.splitext(os.path.basename(path))[0]
         try:
             with open(path) as f:
@@ -475,8 +482,8 @@ def trade_totals():
 # ---------- the Research tab ----------
 
 def _research_file(name):
-    """(data, problem) for $KAL_HOME/research/<name>.json. A missing file is no problem."""
-    path = os.path.join(config.home(), "research", f"{name}.json")
+    """(data, problem) for <name>.json in the exchange's research folder. A missing file is no problem."""
+    path = os.path.join(_research_folder(), f"{name}.json")
     if not os.path.exists(path):
         return None, None
     try:

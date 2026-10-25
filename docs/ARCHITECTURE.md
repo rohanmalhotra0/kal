@@ -14,11 +14,13 @@ kal/
   strategies/     one module per strategy, each defines STRATEGY = SomeStrategy()
   research/       backtests + daily discovery + promotion; writes $KAL_HOME/research/*.json
   dashboard/      Flask app (the ON switch)
-  scheduler.py    background jobs: trade every few minutes, research daily, report hourly
+  scheduler.py    background jobs: trade every few minutes, research daily (in its own
+                  process), report hourly
   selftest.py     checks the real API shape; optional zero-risk order probe
   report.py       status report; pushes to the repo's `status` branch
   __main__.py     CLI: app, daemon, run, scan, research, selftest, status, report, on, off, set
 state/            $KAL_HOME (gitignored): config.json, kal.db, research/, cache/, kalshi.pem
+                  (demo: kal-demo.db, research-demo/, cache-demo/)
 tests/            unittest; tests/fakes.py has FakeKalshi, tests/helpers.py has TempHome
 ```
 
@@ -41,7 +43,9 @@ tests/            unittest; tests/fakes.py has FakeKalshi, tests/helpers.py has 
   max_exposure (directional bets), and the half-built basket loss (`partial_loss`).
 - Research writes JSON to `$KAL_HOME/research/` (`edges.json` is a list of edges;
   `words.json` holds mention-word history). The engine loads each file into
-  `ctx.research[<file stem>]` every run.
+  `ctx.research[<file stem>]` every run. Demo uses `research-demo/` and `cache-demo/`,
+  so practice never shapes real trades. Each idea's status, looks and rank are also in
+  the db (`research_memory`), which is backed up.
 
 ## Facts from the real Kalshi API (checked by tools/api_probe.py)
 

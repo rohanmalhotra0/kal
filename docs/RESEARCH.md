@@ -28,6 +28,24 @@ status: **testing** (add the PR link), **built**, or **rejected** (say why in on
   line to 1/4 size at a 20% drop (after Grossman & Zhou).
 - Both are wired in: the engine passes the equity peak (drawdown cut) and the money
   already in open bets (`ctx.open_exposure`) to every strategy.
+- `favorites`: bets in one series that close on one day ride one price path (an hourly
+  series is 24 events a day). Together they may cost at most 10% of capital.
+
+## How research keeps from fooling itself
+
+- One series on one day counts as one "event", in backtests and in paper results.
+  Promotion needs 20 of those days, not 20 hourly events.
+- Backtest trades pay the real fee: a full-size order, rounded up to the cent.
+- The decision time comes from markets that can't close early. If every market in an
+  event can close early (a "by date" event, mention words), the event is skipped: its
+  last close may be the news itself.
+- The 5% chance of promoting luck is spent over looks and over ideas, for good. The
+  20th idea ever judged needs far more proof than the first.
+- Demo keeps its own research (`research-demo/`, `cache-demo/`). Nothing is promoted
+  on demo.
+- Each idea's status, looks and rank are kept in the db too (it is backed up). A loser
+  retired for losing money stays retired after a rebuild.
+- Daily research runs in its own process. Out of memory, only research is stopped.
 
 ## Ideas, best first
 
@@ -75,6 +93,10 @@ status: **testing** (add the PR link), **built**, or **rejected** (say why in on
 - What: YES on words said more often than the price says. NO on less.
 - Evidence: weak-medium (our own backtest only). Risk: high. Capped at $5 a trade.
 - Test: needs 30 paper trades. Try `shrunk_p` with the series' base rate as the prior.
+- Note: the backtest now skips events whose markets can all close early. Mention events
+  likely are, so `words.json` may stop updating. Next: check with api-probe whether
+  `expected_expiration_time` keeps the scheduled close after an early close. If it does,
+  use it as the decision time.
 
 **9. One-sided order flow guard** - built (`kal/flow.py`, a filter, not a strategy)
 - What: skip a bet when 70%+ of the last hour's volume took the other side, or one trade 5x the median ($50+) just did. Paper and live alike. Never for locked-in trades.

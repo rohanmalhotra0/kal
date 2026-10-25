@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from unittest import mock
 
 from kal import config, db, engine, research
-from kal.client import fee, fee_per_contract
+from kal.client import fee, ts
 from kal.research import backtest, discover, promote
 from kal.strategies import favorites, mentions
 from kal.strategies.base import Context
@@ -151,8 +151,8 @@ class BacktestTests(TempHome):
         (yes_p, yes_paid), (no_p, no_paid) = backtest.buy_trades(cancelled)
         self.assertEqual((yes_p, yes_paid), (0.93, 0.33))
         self.assertAlmostEqual(no_paid, 0.67)
-        pnl = backtest.trade("E", yes_p, yes_paid)[2]
-        self.assertAlmostEqual(pnl, 0.33 - 0.93 - fee_per_contract(0.93))
+        pnl = backtest.trade("E", yes_p, yes_paid)[2]  # a full-size bet: 10 contracts
+        self.assertAlmostEqual(pnl, 10 * 0.33 - (10 * 0.93 + fee(10, 0.93)))
         # Mention history never learns a word from a cancelled market.
         _, hist, _ = backtest.mention_test([dict(cancelled, series="S", word="w")], 0.15)
         self.assertEqual(hist.get(("S", "w"), [0, 0]), [0, 0])
@@ -163,7 +163,7 @@ class BacktestTests(TempHome):
         obs = backtest.load_observations(c, "S", 6)
         self.assertEqual(len(obs), 20)
         self.assertEqual(c.candle_calls, 20)
-        self.assertTrue(os.path.exists(os.path.join(self.home, "cache", "S_close6_v2.json")))
+        self.assertTrue(os.path.exists(os.path.join(self.home, "cache", "S_close6_v3.json")))
         self.assertEqual(len(backtest.load_observations(c, "S", 6)), 20)
         self.assertEqual(c.candle_calls, 20)  # second time: all from cache
         res = backtest.run(["S"], client=c)
@@ -434,10 +434,13 @@ class FavoritesTests(TempHome):
         sig = sigs[0]
         leg = sig.legs[0]
         self.assertEqual((leg.ticker, leg.side, leg.price), ("FAV-X-1", "yes", 0.93))
-        p = (0.93 + fee_per_contract(0.93)) * 1.02
+        # Cautious win chance on the backtest's cost: a 10-contract order, fee rounded up.
+        p = (10 * 0.93 + fee(10, 0.93)) / 10 * 1.02
+        self.assertAlmostEqual(favorites.cost_each(0.93) * 1.02, p)
         self.assertEqual(leg.count, sizing.contracts(p, 0.93, 1000.0, 0.25, 10.0))
         self.assertLessEqual(sig.cost, 10.0)
-        self.assertEqual(sig.meta, {"edge": "FAV:yes:0.90-0.95", "paper_only": True})
+        group = favorites.group_of("FAV", ts(self.good["close_time"]))
+        self.assertEqual(sig.meta, {"edge": "FAV:yes:0.90-0.95", "group": group, "paper_only": True})
         self.assertAlmostEqual(sig.exp_profit, leg.count * p - sig.cost)
         live = dict(self.EDGE, status="live")
         self.assertFalse(favorites.STRATEGY.scan(ctx_for(self.c, {"edges": [live]}))[0].meta["paper_only"])
@@ -534,10 +537,11 @@ class MentionsTests(TempHome):
         sigs = mentions.STRATEGY.scan(ctx_for(self.c, {"words": self.WORDS}))
         got = {s.legs[0].ticker: (s.legs[0].side, s.legs[0].price) for s in sigs}
         self.assertEqual(got, {"KXSAY-1-TARI": ("yes", 0.5), "KXSAY-1-BIDE": ("no", 0.5)})
+        group = favorites.group_of("KXSAY", ts(self.c.market_list[0]["close_time"]))
         for s in sigs:
             self.assertLessEqual(s.cost, 5.0)
             self.assertEqual(s.legs[0].count, 9)
-            self.assertEqual(s.meta, {"paper_only": True})
+            self.assertEqual(s.meta, {"paper_only": True, "group": group})  # promote counts one day once
             self.assertGreater(s.exp_profit, 0)
         cfg = dict(config.DEFAULTS, max_per_trade=2.0)
         ctx = Context(self.c, cfg, "paper", 1000, 1000, set(), {"words": self.WORDS}, {})
@@ -550,7 +554,7 @@ class MentionsTests(TempHome):
         self.assertFalse(mentions.STRATEGY.proven(ctx_for(self.c, {"words": dict(promoted, roi_lo=None)}))[0])
         self.assertFalse(mentions.STRATEGY.proven(ctx_for(self.c, {}))[0])
         sig = mentions.STRATEGY.scan(ctx_for(self.c, {"words": promoted}))[0]
-        self.assertEqual(sig.meta, {"paper_only": False})
+        self.assertFalse(sig.meta["paper_only"])
 
     def test_recheck_uses_the_order_book(self):
         promoted = dict(self.WORDS, promoted=True)
