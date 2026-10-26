@@ -2,6 +2,14 @@
 
 Newest first. Each 2-hour check-in adds one entry: what it checked, what it found, links.
 
+## 2026-10-26 16:50 UTC — check-in: all green, nothing new
+
+- Checked: CI green on main 23d6296. No code change since the clean market-check on c32c0c4
+  (2026-10-25 21:28 UTC). It turns 24 h old at 21:28 UTC; the first check-in after that
+  runs it again. No status report yet: the server is still being set up.
+- No new idea: research waits for the weekly usage limit. Waiting on the owner's
+  `sudo kal doctor` output.
+
 ## 2026-10-26 14:50 UTC — check-in: all green, nothing new
 
 - Checked: CI green on main 3db0bb8. No code change since the clean market-check on c32c0c4
