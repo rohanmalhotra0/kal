@@ -2,6 +2,14 @@
 
 Newest first. Each 2-hour check-in adds one entry: what it checked, what it found, links.
 
+## 2026-10-26 00:50 UTC — check-in: all green, nothing new
+
+- Checked: CI green on main a3939d9. No code change since the clean market-check on c32c0c4
+  (21:28 UTC: self-test passes, 0 trades found, research 0 failures). No status report yet:
+  the server is still being set up.
+- No new idea: research waits for the weekly usage limit (resets Thursday). Waiting on the
+  owner's `sudo kal doctor` output.
+
 ## 2026-10-25 22:50 UTC — check-in: all green; new research paused for the usage limit
 
 - Checked: CI green on main 772a322. market-check green on c32c0c4 (PR #24's code): self-test
