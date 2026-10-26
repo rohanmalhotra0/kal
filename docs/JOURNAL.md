@@ -2,6 +2,16 @@
 
 Newest first. Each 2-hour check-in adds one entry: what it checked, what it found, links.
 
+## 2026-10-26 20:50 UTC — check-in: daily market-check now runs on its own, all green
+
+- Checked: CI green on main 52b9794. GitHub's daily market-check schedule fired for the first
+  time (19:22 UTC, [run 40386202483](https://github.com/rohanmalhotra0/kal/actions/runs/40386202483)):
+  self-test all ok, scan found 0 trades (dry run), quick research 0 errors, coverage ok
+  (337 busy markets). Check-ins no longer need to start it by hand. No status report yet:
+  the server is still being set up.
+- No new idea: research waits for the weekly usage limit. Waiting on the owner's
+  `sudo kal doctor` output.
+
 ## 2026-10-26 18:50 UTC — check-in: all green, nothing new
 
 - Checked: CI green on main 29fa59c. No code change since the clean market-check on c32c0c4
