@@ -2,6 +2,17 @@
 
 Newest first. Each 2-hour check-in adds one entry: what it checked, what it found, links.
 
+## 2026-10-28 16:50 UTC — check-in: all green; 28-hour gap in check-ins
+
+- Gap: no check-ins reached this session between 2026-10-27 12:50 and 2026-10-28 16:47 UTC.
+  The scheduled task is still on and fired on time at 16:47.
+- Checked: CI green on main 1fd70e5. Daily market-check of 2026-10-27 18:44 UTC
+  ([run 40562746036](https://github.com/rohanmalhotra0/kal/actions/runs/40562746036)):
+  self-test all ok, scan found 0 trades (dry run), quick research 0 errors, coverage ok
+  (327 busy markets). No status report yet: the server is still being set up.
+- No new idea: research waits for the weekly usage limit. Waiting on the owner's
+  `sudo kal doctor` output.
+
 ## 2026-10-27 12:50 UTC — check-in: all green, nothing new
 
 - Checked: CI green on main 0d9a8cd. Latest market-check is the clean scheduled run of
