@@ -2,6 +2,18 @@
 
 Newest first. Each 2-hour check-in adds one entry: what it checked, what it found, links.
 
+## 2026-10-28 19:05 UTC — check-in: all green
+
+- Checked: CI green on main 3a91085. The last market-check was just over 24 h old, so I
+  started one ([run 40748692502](https://github.com/rohanmalhotra0/kal/actions/runs/40748692502)).
+  The daily one fired 4 minutes later; both passed. Self-test all ok, scan found 0 trades
+  (dry run), quick research 0 errors, coverage ok (331 busy markets).
+- One warning, harmless: research skipped 3 KXALLSVENSKANGAME markets after Kalshi said
+  "too many requests" (429). The client retried with backoff first, as designed. Likely
+  cause: two runs at once. Next time, only start one by hand if none ran in 26 h.
+- No status report yet: the server is still being set up. Research waits for the weekly
+  usage limit. Waiting on the owner's `sudo kal doctor` output.
+
 ## 2026-10-28 16:50 UTC — check-in: all green; 28-hour gap in check-ins
 
 - Gap: no check-ins reached this session between 2026-10-27 12:50 and 2026-10-28 16:47 UTC.
