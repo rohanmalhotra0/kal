@@ -2,6 +2,15 @@
 
 Newest first. Each 2-hour check-in adds one entry: what it checked, what it found, links.
 
+## 2026-10-28 20:50 UTC — check-in: all green, nothing new
+
+- Checked: CI green on main 30ad7b8. Today's daily market-check
+  ([run 40749343146](https://github.com/rohanmalhotra0/kal/actions/runs/40749343146)) passed
+  with no warnings: scan found 0 trades, quick research 0 errors, coverage ok.
+  No status report yet: the server is still being set up.
+- No new idea: research waits for the weekly usage limit. Waiting on the owner's
+  `sudo kal doctor` output.
+
 ## 2026-10-28 19:05 UTC — check-in: all green
 
 - Checked: CI green on main 3a91085. The last market-check was just over 24 h old, so I
