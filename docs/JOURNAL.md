@@ -2,6 +2,13 @@
 
 Newest first. Each 2-hour check-in adds one entry: what it checked, what it found, links.
 
+## 2026-10-28 22:50 UTC — check-in: all green, nothing new
+
+- Checked: CI green on main ad3b11c. Latest market-check is today's clean daily run
+  (18:53 UTC), already read at 20:50. No status report yet: the server is still being set up.
+- No new idea: research waits for the weekly usage limit (resets Thursday 09:00 UTC).
+  Waiting on the owner's `sudo kal doctor` output.
+
 ## 2026-10-28 20:50 UTC — check-in: all green, nothing new
 
 - Checked: CI green on main 30ad7b8. Today's daily market-check
