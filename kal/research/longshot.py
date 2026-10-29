@@ -26,7 +26,7 @@ import traceback
 from collections import defaultdict
 from datetime import datetime, timezone
 
-from ..client import fee
+from ..client import brief_series, fee
 from ..strategies import longshot_fade as fade
 from . import backtest, discover, promote
 
@@ -193,7 +193,7 @@ def _run(client, cfg, quick, now, named, summary):
     if quick:
         max_series, max_markets = min(max_series, 3), min(max_markets, 200)
 
-    info = {s["ticker"]: s for s in client.series() if isinstance(s, dict) and s.get("ticker")}
+    info = {s["ticker"]: s for s in brief_series(client.series()) if s["ticker"]}
     # Busy series only: thin ones can't be traded, and their prices say little.
     liquid = [t for t in discover.active_series(client) if t in info and info[t].get("frequency") != "one_off"]
     summary["liquid"] = len(liquid)

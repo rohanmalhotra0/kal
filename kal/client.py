@@ -150,15 +150,25 @@ class Kalshi:
         an empty list. For account data (positions, orders, fills) a missing key means the
         reply changed shape (Kalshi renamed fields in 2026), and reading that as "nothing"
         would blind the checks that catch lost fills. A key that's there but null is empty."""
-        params, out = dict(params or {}), []
+        out = []
+        for page in self.pages(endpoint, key, params, strict):
+            out += page
+            if limit and len(out) >= limit:
+                return out[:limit]
+        return out
+
+    def pages(self, endpoint, key, params=None, strict=False):
+        """Like paginate(), one page at a time, so a caller can keep only what it needs:
+        all open events with their markets is 350 MB of JSON, over 700 MB in Python."""
+        params = dict(params or {})
         while True:
             d = self.get(endpoint, params)
             if strict and (not isinstance(d, dict) or key not in d):
                 keys = ", ".join(sorted(d)) if isinstance(d, dict) else type(d).__name__
                 raise KalshiError(f"{endpoint}: reply has no '{key}' (got: {keys[:200]})")
-            out += d.get(key) or []
-            if not d.get("cursor") or (limit and len(out) >= limit):
-                return out[:limit] if limit else out
+            yield d.get(key) or []
+            if not d.get("cursor"):
+                return
             params["cursor"] = d["cursor"]
 
     # ---------- market data (public) ----------
@@ -215,6 +225,10 @@ class Kalshi:
 
     def events(self, limit=None, **params):
         return self.paginate("/events", "events", {"limit": 200, **params}, limit)
+
+    def event_pages(self, **params):
+        """events(), one page at a time (see pages())."""
+        return self.pages("/events", "events", {"limit": 200, **params})
 
     def series(self, category=None):
         return self.paginate("/series", "series", {"category": category} if category else {})
@@ -426,6 +440,16 @@ def resting(order):
 def candle_close(candle, field):
     """Closing yes_bid / yes_ask / price of a candle, in dollars."""
     return price(candle.get(field) or {}, "close")
+
+
+BRIEF = ("ticker", "title", "category", "frequency")
+
+
+def brief_series(rows):
+    """What research and the dashboard read from Kalshi's list of every series (15,000+ rows,
+    12 MB of JSON, some 50 MB in full): kept for a whole research run or an hour."""
+    return [{k: s.get(k) for k in BRIEF} for s in rows or []
+            if isinstance(s, dict) and isinstance(s.get("ticker"), str)]
 
 
 def ts(iso):

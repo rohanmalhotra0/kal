@@ -1,7 +1,7 @@
 # Run kal on a server
 
 This puts kal on a small rented server, so it runs day and night, for months.
-It costs about $6 to $8 a month.
+It costs about $12 to $14 a month.
 
 You will need:
 
@@ -18,21 +18,22 @@ Each step is short. Do them in order.
 
 | What | Per month |
 |---|---|
-| Server: 1 GB, in the US (DigitalOcean, Vultr or Linode) | $5 to $6 |
+| Server: 2 GB, in the US (DigitalOcean, Vultr or Linode) | $10 to $12 |
 | Server snapshots from the host (optional, step 1) | $1 to $2 |
 | Phone alerts (ntfy) | free |
 | GitHub (code, reports, checks) | free |
-| **Total** | **about $6 to $8. Always under $20.** |
+| **Total** | **about $12 to $14. Always under $20.** |
 
 ## 1. Rent a server
 
-Any of these is fine. Pick the 1 GB size.
+Any of these is fine. Pick the 2 GB size: a trade run and research together need about 550 MB,
+too much for 1 GB.
 
 | Company | Plan | Price |
 |---|---|---|
-| DigitalOcean | Basic Droplet, 1 GB | $6 a month |
-| Vultr | Cloud Compute, 1 GB | $5 to $6 a month |
-| Akamai (Linode) | Nanode, 1 GB | $5 a month |
+| DigitalOcean | Basic Droplet, 2 GB | $12 a month |
+| Vultr | Cloud Compute, 2 GB | $10 to $12 a month |
+| Akamai (Linode) | Shared CPU, 2 GB | $12 a month |
 
 When you make it:
 

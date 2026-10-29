@@ -147,8 +147,8 @@ def fake_for(events, settled=None, size=40):
     return c
 
 
-def ctx(client, budget=100.0, max_per_arb=30.0, held=()):
-    cfg = dict(config.DEFAULTS, max_per_arb=max_per_arb)
+def ctx(client, budget=100.0, max_per_arb=30.0, held=(), max_arb_days=None):
+    cfg = dict(config.DEFAULTS, max_per_arb=max_per_arb, max_arb_days=max_arb_days or config.DEFAULTS["max_arb_days"])
     return Context(client, cfg, "paper", budget, budget, set(held), {}, {})
 
 
@@ -303,15 +303,16 @@ class ScanTests(unittest.TestCase):
         self.assertEqual(self.scan(evs, settled=history() + mine), [])
 
     def test_a_meeting_in_between_that_isnt_settled_means_no_trade(self):
-        target = gap_meeting(50)
-        self.assertEqual(len(self.scan(target)), 1)                    # on its own it trades (72 days)
+        # 50 days off: max_arb_days raised so only the meeting in between can stop it.
+        target, far = gap_meeting(50), {"max_arb_days": 90}
+        self.assertEqual(len(self.scan(target, **far)), 1)                    # on its own it trades (72 days)
         early = meeting(8)
-        self.assertEqual(self.scan(target + early[:1]), [])            # an open rate event first
-        self.assertEqual(self.scan(target + early[1:]), [])            # an open decision event first
-        self.assertEqual(self.scan(target + early), [])                # then that's the next meeting (no gap)
+        self.assertEqual(self.scan(target + early[:1], **far), [])            # an open rate event first
+        self.assertEqual(self.scan(target + early[1:], **far), [])            # an open decision event first
+        self.assertEqual(self.scan(target + early, **far), [])                # then that's the next meeting (no gap)
 
     def test_only_the_next_meeting_trades(self):
-        self.assertEqual(self.scan(meeting(20) + gap_meeting(62)), [])
+        self.assertEqual(self.scan(meeting(20) + gap_meeting(62), max_arb_days=90), [])
 
     def test_the_decision_event_needs_exactly_the_five_codes(self):
         def drop(evs):
@@ -670,11 +671,19 @@ class EngineTests(TempHome):
         self.assertEqual((s["live_trades"], c.orders), (0, []))
 
     def test_a_meeting_too_far_off_is_refused(self):
+        # 40 days off: past the run's events horizon (max_arb_days + 1), so never even seen.
+        # Seen but over max_arb_days (here 20, the horizon held open by a long research
+        # window): never offered, so it can't take budget a nearer trade could use.
         config.update({"strategies": {"fed_link_arb": {"mode": "paper"}}})
         s = engine.run_once(fake_for(gap_meeting(40)))
         self.assertTrue(s["ok"], s)
-        self.assertEqual(s["paper_trades"], 0)
-        self.assertIn("locks money up", db.query("SELECT status FROM signals")[0]["status"])
+        self.assertEqual((s["paper_trades"], s["signals"]), (0, 0))
+        config.update({"max_arb_days": 20, "research_hours_before_close": 1000})
+        s = engine.run_once(fake_for(gap_meeting(30)))
+        self.assertTrue(s["ok"], s)
+        self.assertEqual((s["paper_trades"], s["signals"]), (0, 0))
+        config.update({"max_arb_days": 40})
+        self.assertEqual(engine.run_once(fake_for(gap_meeting(30)))["paper_trades"], 1)   # within it: trades
 
     def test_promotion_never_turns_it_live(self):
         from kal.research import promote

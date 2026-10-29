@@ -1,7 +1,7 @@
 # kal
 
 A bot that trades on [Kalshi](https://kalshi.com), a US prediction market.
-It runs by itself on a $6-a-month server.
+It runs by itself on a $12-a-month server.
 
 **Profits are not guaranteed.** Only give it money you can afford to lose.
 
@@ -11,7 +11,7 @@ It runs by itself on a $6-a-month server.
 2. **Make a Kalshi API key.** kalshi.com > Account > API Keys > Create.
    Save the key file. Copy the Key ID.
 3. **Rent a server.** [DigitalOcean](https://www.digitalocean.com) > Create > Droplet >
-   Ubuntu 24.04 > Basic > **$6/month** > New York.
+   Ubuntu 24.04 > Basic > **$12/month (2 GB)** > New York.
    For **Authentication, pick SSH key** (not Password). Make one and add it:
    ```bash
    ssh-keygen -t ed25519       # on your computer; press Enter for every question
@@ -128,11 +128,11 @@ python -m kal app
 
 ## Run it on a server
 
-See **[docs/DEPLOY.md](docs/DEPLOY.md)**. About $6 to $8 a month, always under $20:
+See **[docs/DEPLOY.md](docs/DEPLOY.md)**. About $12 to $14 a month, always under $20:
 
 | What | Per month |
 |---|---|
-| 1 GB server in the US (DigitalOcean, Vultr or Linode) | $5 to $6 |
+| 2 GB server in the US (DigitalOcean, Vultr or Linode) | $10 to $12 |
 | Host snapshots (optional) | $1 to $2 |
 | Phone alerts (ntfy), GitHub | free |
 
