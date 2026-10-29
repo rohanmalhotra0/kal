@@ -313,7 +313,8 @@ def fed(c, cfg, now, cand):
 
     def rate_after(ms):
         """The upper bound after the meeting, from settled 'above K' results; None if unclear."""
-        res = sorted((float(m["floor_strike"]), m.get("result")) for m in ms if m.get("floor_strike") is not None)
+        res = sorted((float(m["floor_strike"]), m.get("result")) for m in ms
+                     if m.get("floor_strike") is not None and m.get("strike_type") == "greater")
         if not res or any(r not in ("yes", "no") for _, r in res):
             return None
         no = [k for k, r in res if r == "no"]
@@ -346,8 +347,14 @@ def fed(c, cfg, now, cand):
             tally.n["meetings skipped (decision outcomes differ)"] += 1
             skipped_codes[" ".join(sorted(codes))] += 1
             continue
-        strikes = {round(float(m["floor_strike"]), 4): m for m in ms if m.get("floor_strike") is not None}
+        strikes = {round(float(m["floor_strike"]), 4): m for m in ms
+                   if m.get("floor_strike") is not None and m.get("strike_type") == "greater"}
+        if not strikes:
+            tally.n["meetings skipped (no 'above' strikes: old range markets)"] += 1
+            continue
         tally.n["meetings checked"] += 1
+        print(f"  meeting {ev}: rate before {U}, after {rate_after(ms) if settled else 'open'}, "
+              f"decision {[k for k, m in codes.items() if m.get('result') == 'yes'] or 'open'}")
         if settled:
             checked += 1
             yes = [k for k, m in codes.items() if m.get("result") == "yes"]
@@ -404,7 +411,8 @@ def fed(c, cfg, now, cand):
                 if not all(0 < p < 1 for p in ps):
                     continue
                 raw = sum(ps)
-                tally.hour(cat, name, t, raw + sum(fee_pc(p) for p in ps), raw, pay, {"legs": ps})
+                vol = [float(x[t].get("volume_fp") or x[t].get("volume") or 0) for _, x in cs]
+                tally.hour(cat, name, t, raw + sum(fee_pc(p) for p in ps), raw, pay, {"legs": ps, "volume": vol})
     tally.show("FED rate level vs decision")
     print(f"  decision outcome sets skipped: {dict(skipped_codes)}")
     print(f"  settled meetings checked: {checked}; results that break the link: {len(broken)}")
@@ -421,7 +429,7 @@ def main():
     c = Kalshi()
     now, t0 = time.time(), time.time()
     cand = Candles(c)
-    for part in (fed, crypto):
+    for part in (fed,):
         try:
             part(c, cfg, now, cand)
         except Exception as e:
