@@ -256,6 +256,33 @@ status: **testing** (add the PR link), **built**, or **rejected** (say why in on
 **15. What the research says not to build**
 - In-game sports momentum, economic-release tails, generic mention fading, parlays and combos (YES side), cross-venue arbitrage: about zero or negative after costs for a slow taker.
 
+**16. Result already known, market still open** - untested
+- What: a game or data release is over and the result is public, but the market still
+  trades before Kalshi settles it. The winning side may still sell at 95-99c.
+- Evidence: unknown on Kalshi. It usually stops trading once the result is known; how often
+  it doesn't is the question.
+- Risk: medium. A stat correction, a dispute, or an "official" result that differs from the
+  first report. A NO at 98c loses 98c.
+- Test: for settled markets, compare the last trades with the event's real end (a game's
+  occurrence_datetime, a release's scheduled time). Count trades after the end on the
+  winning side, at what price, and how often the "known" side lost.
+
+**17. The same question in two series (not crypto)** - untested
+- What: two series asking one thing in different words. Their prices must add up. Example:
+  "Number of Fed cuts in 2026: exactly 0" vs cut or no cut at the Dec meeting. On
+  2026-10-29, YES "exactly 0" + YES both Dec cut markets cost 98.4c for a $1 set (before
+  fees, about 11% a year: under the bot's 20%).
+- Evidence: weak. Crypto's look-alikes broke (their rules differ). Sports chains never gapped.
+- Risk: medium-high. Small rule differences (dates, sources, emergency moves) break the link.
+- Test: pick pairs by hand from the series list, read both rules in full, then count hourly
+  gaps after fees as in idea #6.
+
+**18. Paper results vs backtests** - untested (needs 4+ weeks of paper trading on the server)
+- What: compare each paper strategy's real results with what its backtest promised. For
+  `date_ladder_arb` and `fed_link_arb`, read the rules of every event that gapped, and propose
+  `VERIFIED` pins by PR only where the rules are safe.
+- Until the server has run 4 weeks, skip it.
+
 ## Sources
 
 Numbers come from abstracts and summaries. Check the paper before relying on one.
