@@ -71,7 +71,7 @@ def event_code(t):
     return d.strftime("%y%b%d%H").upper()
 
 
-def main():
+def discover():
     c = Kalshi()
     t0 = time.time()
     allser = c.series()
@@ -267,6 +267,544 @@ def main():
     except Exception as e:
         print(f"  /markets/candlesticks batch: {str(e)[:200]}")
     print(f"\ndone in {time.time() - t0:.0f}s")
+
+
+
+
+# ======================= history and live =======================
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from price_links_sets import Linker, cover, disjoint, ivs_of, payout_min, subset  # noqa: E402
+
+from kal import config  # noqa: E402
+from kal.client import candle_close, fee, price  # noqa: E402
+from kal.fees import _bad as fee_problem  # noqa: E402
+from kal.risk import MAX_ARB_ROI, yearly_return  # noqa: E402
+
+N = 30   # contracts per order, for the fee's cent rounding (max_per_arb is $30)
+HOURLY_PER_DAY = 3
+DAILY_ONLY = {"SHIB"}
+CRYPTO = [("BTC", "KXBTC", "KXBTCD"), ("ETH", "KXETH", "KXETHD"), ("SOL", "KXSOLE", "KXSOLD"),
+          ("XRP", "KXXRP", "KXXRPD"), ("DOGE", "KXDOGE", "KXDOGED"), ("BNB", "KXBNB", "KXBNBD"),
+          ("HYPE", "KXHYPE", "KXHYPED"), ("SHIB", "KXSHIBA", "KXSHIBAD")]
+
+
+def fee_pc(p):
+    return fee(N, p) / N
+
+
+def suffix(et):
+    return str(et or "").split("-", 1)[-1]
+
+
+def tick_of(markets):
+    """The strike grid's step: 10^-d for the most decimals any strike or round_digits shows."""
+    d = 0
+    for m in markets:
+        cs = m.get("custom_strike") if isinstance(m.get("custom_strike"), dict) else {}
+        vals = [m.get("floor_strike"), m.get("cap_strike"), cs.get("floor_strike"), cs.get("cap_strike")]
+        for v in vals:
+            if v in (None, ""):
+                continue
+            s = str(v)
+            if "e" in s.lower():
+                s = f"{float(s):.12f}"
+            if "." in s:
+                d = max(d, len(s.split(".", 1)[1].rstrip("0")))
+        try:
+            d = max(d, int(cs.get("round_digits")))
+        except (TypeError, ValueError):
+            pass
+    return 10.0 ** -d
+
+
+def event_markets(c, et):
+    try:
+        ms = c.markets(event_ticker=et)
+    except KalshiError:
+        ms = []
+    if not ms:
+        try:
+            ms = c.paginate("/historical/markets", "markets", {"limit": 1000, "event_ticker": et})
+        except KalshiError:
+            ms = []
+    return ms
+
+
+def event_candles(c, series, et, t0, t1, period):
+    """{ticker: [(end_ts, bid, ask, volume)] sorted}, paging on adjusted_end_ts; None on failure."""
+    out = collections.defaultdict(dict)
+    start, calls = int(t0), 0
+    while calls < 30:
+        calls += 1
+        try:
+            d = c.get(f"/series/{series}/events/{et}/candlesticks",
+                      {"start_ts": start, "end_ts": int(t1), "period_interval": period})
+        except KalshiError:
+            return None
+        for t, rows in zip(d.get("market_tickers") or [], d.get("market_candlesticks") or []):
+            for r in rows or []:
+                v = r.get("volume_fp", r.get("volume"))
+                try:
+                    v = float(v or 0)
+                except (TypeError, ValueError):
+                    v = 0.0
+                out[t][r["end_period_ts"]] = (r["end_period_ts"], candle_close(r, "yes_bid"),
+                                              candle_close(r, "yes_ask"), v)
+        adj = d.get("adjusted_end_ts")
+        if not adj or adj >= int(t1) or adj <= start:
+            break
+        start = int(adj)
+    return {t: sorted(rows.values()) for t, rows in out.items()}
+
+
+def snapshots(cands, times, stale, step):
+    """For each time, {ticker: (bid, ask)} from the last candle that ended by then (no look-ahead),
+    and {ticker: contracts traded in the `step` seconds before}."""
+    idx = {t: 0 for t in cands}
+    for t in times:
+        q, vol = {}, {}
+        for tk, rows in cands.items():
+            i = idx[tk]
+            while i + 1 < len(rows) and rows[i + 1][0] <= t:
+                i += 1
+            idx[tk] = i
+            if rows and rows[i][0] <= t and t - rows[i][0] <= stale:
+                q[tk] = (rows[i][1], rows[i][2])
+                v, j = 0.0, i
+                while j >= 0 and rows[j][0] > t - step:
+                    v += rows[j][3]
+                    j -= 1
+                vol[tk] = v
+        yield t, q, vol
+
+
+class Tally:
+    def __init__(self, cfg):
+        self.cfg = cfg
+        self.n = collections.Counter()
+        self.hours = collections.defaultdict(set)
+        self.pass_hours = collections.defaultdict(set)
+        self.best = {}
+        self.near = {}
+
+    def add(self, key, fam, mode, pay, legs, t, settle, event, vols, ivs, tick):
+        k = (key, fam, mode)
+        raw = sum(p for _, _, p in legs)
+        cost = raw + sum(fee_pc(p) for _, _, p in legs)
+        edge = pay - cost
+        self.n[k + ("set-snapshots",)] += 1
+        if k not in self.near or edge > self.near[k][0]:
+            self.near[k] = (round(edge, 4), event, stamp(t), [(tk, s, p) for tk, s, p in legs])
+        if raw < pay:
+            self.n[k + ("under before fees",)] += 1
+        if cost >= pay:
+            return
+        lg = [(ivs[tk], s) for tk, s, _ in legs]
+        if payout_min(lg, tick, "grid") < pay or (mode == "robust" and payout_min(lg, tick, "robust") < pay):
+            self.n[k + ("BUG: set doesn't pay what it should",)] += 1
+            return
+        self.n[k + ("under after fees",)] += 1
+        self.hours[k].add((event, t))
+        days = max((settle - t) / DAY, 1 / 24)
+        roi = edge / cost
+        apr = yearly_return(pay / cost, days)
+        ok = days <= self.cfg["max_arb_days"] and apr >= self.cfg["min_arb_apr"] and 0.01 <= roi <= MAX_ARB_ROI
+        if roi > MAX_ARB_ROI:
+            self.n[k + ("too good to be true (>25%)",)] += 1
+        if ok:
+            self.n[k + ("passing the bot's rules",)] += 1
+            self.pass_hours[k].add((event, t))
+        row = dict(edge=round(edge, 4), roi=round(roi, 4), cost=round(cost, 4), pay=pay, t=stamp(t), event=event,
+                   legs=[(tk, s, p, vols.get(tk, 0)) for tk, s, p in legs], days=round(days, 3), ok=ok)
+        bk = (k, event)
+        if bk not in self.best or edge > self.best[bk]["edge"]:
+            self.best[bk] = row
+
+    def show(self, keys):
+        for key in keys:
+            fams = sorted({(f, m) for (k, f, m, *_) in self.n if k == key})
+            if not fams:
+                continue
+            print(f"   -- {key}")
+            for f, m in fams:
+                row = {name: self.n[(key, f, m, name)] for name in
+                       ("set-snapshots", "under before fees", "under after fees", "passing the bot's rules",
+                        "too good to be true (>25%)", "BUG: set doesn't pay what it should")
+                       if self.n[(key, f, m, name)]}
+                hrs, ph = self.hours[(key, f, m)], self.pass_hours[(key, f, m)]
+                print(f"      {f:9} {m:6} {json.dumps(row)} | event-times under $ after fees {len(hrs)} "
+                      f"(events {len({e for e, _ in hrs})}); passing {len(ph)} (events {len({e for e, _ in ph})})")
+                near = self.near.get((key, f, m))
+                if near:
+                    print(f"         closest: {json.dumps(near)}")
+            rows = [r for (k, e), r in self.best.items() if k[0] == key]
+            good = sorted((r for r in rows if r["ok"]), key=lambda r: -r["edge"])
+            bad = sorted((r for r in rows if not r["ok"]), key=lambda r: -r["edge"])
+            for r in good[:12]:
+                print(f"      PASS {json.dumps(r)}")
+            for r in bad[:4]:
+                print(f"      FAILS-RULES {json.dumps(r)}")
+
+
+def check_results(name, rms, ams, ivs, tick, n, broken):
+    """Settled results that can't all be right."""
+    def res(m):
+        return m.get("result") if m.get("result") in ("yes", "no") else None
+    if any(res(m) is None for m in rms + ams):
+        n[(name, "event pairs with a result not yes/no")] += 1
+        return
+    n[(name, "settled event pairs checked")] += 1
+    vals = {str(m.get("expiration_value")) for m in rms + ams if m.get("expiration_value") not in (None, "")}
+    if len(vals) > 1:
+        n[(name, "pairs whose expiration values differ")] += 1
+        broken.append((name, "values differ", sorted(vals)[:4], rms[0].get("event_ticker")))
+    for m in rms + ams:
+        try:
+            v = float(str(m.get("expiration_value")).replace(",", "").replace("$", ""))
+        except (TypeError, ValueError):
+            n[(name, "markets with no numeric expiration value")] += 1
+            continue
+        for iv in ivs.get(m["ticker"]) or []:
+            if iv.fuzzy:
+                ok = (iv.lo <= v <= iv.hi) == (res(m) == "yes") or v in (iv.lo, iv.hi)
+            else:
+                ok = iv.has(v) == (res(m) == "yes")
+            if not ok:
+                n[(name, "markets whose result disagrees with the value")] += 1
+                broken.append((name, "result vs value", m["ticker"], res(m), m.get("expiration_value"), repr(iv)))
+                break
+    yes_r = sum(1 for m in rms if res(m) == "yes")
+    n[(name, f"range events with {yes_r} YES")] += 1
+    for mx in rms:
+        x = ivs.get(mx["ticker"])
+        if not x:
+            continue
+        for my in ams:
+            y = ivs.get(my["ticker"])
+            if not y:
+                continue
+            rx, ry = res(mx) == "yes", res(my) == "yes"
+            for mode in ("robust", "grid"):
+                bad = None
+                if subset(x, y, mode, tick) and rx and not ry:
+                    bad = "x YES but its superset y NO"
+                elif subset(y, x, mode, tick) and ry and not rx:
+                    bad = "y YES but its superset x NO"
+                elif disjoint(x, y, mode, tick) and rx and ry:
+                    bad = "both YES though they can't be"
+                elif cover(x, y, mode, tick) and not rx and not ry:
+                    bad = "both NO though one must be YES"
+                if bad:
+                    n[(name, f"{mode}: links broken")] += 1
+                    broken.append((name, mode, bad, mx["ticker"], my["ticker"], mx.get("expiration_value")))
+
+
+def candidate_events(now, since_days, hourly_per_day):
+    """Event suffixes to try, newest first: every day's 5 PM ET event, and a few other hours a day
+    (rotating, so every hour of the day gets looked at)."""
+    out = []
+    day0 = datetime.fromtimestamp(now, ET).replace(minute=0, second=0, microsecond=0)
+    for d in range(int(since_days) + 1):
+        base = day0 - timedelta(days=d)
+        five = base.replace(hour=17)
+        if five.timestamp() < now - 600:
+            out.append(("5pm", int(five.timestamp()), event_code(five.timestamp())))
+        for j in range(hourly_per_day):
+            hr = (d * 7 + j * (24 // max(1, hourly_per_day))) % 24
+            if hr == 17:
+                hr = 18
+            t = base.replace(hour=hr)
+            if t.timestamp() < now - 600:
+                out.append(("hourly", int(t.timestamp()), event_code(t.timestamp())))
+    return out
+
+
+def history(pairs, budget_s, since_days):
+    cfg = config.load()
+    c = Kalshi()
+    t_start = time.time()
+    now = time.time()
+    tally, n, broken = Tally(cfg), collections.Counter(), []
+    for name, rs, as_ in pairs:
+        t_pair = time.time()
+        for s in (rs, as_):
+            try:
+                info = c.series_info(s)
+                print(f"{s}: fee {info.get('fee_type')} x{info.get('fee_multiplier')} "
+                      f"-> {fee_problem(info.get('fee_type'), info.get('fee_multiplier')) or 'the bot can price it'}")
+            except Exception as e:
+                print(f"{s}: series info failed: {e}")
+        cand = candidate_events(now, since_days, 0 if name in DAILY_ONLY else HOURLY_PER_DAY)
+        # Newest first, one 5pm event then two hourly ones, so the time budget covers both kinds.
+        fives, hours = [x for x in cand if x[0] == "5pm"], [x for x in cand if x[0] == "hourly"]
+        order = []
+        while fives or hours:
+            if fives:
+                order.append(fives.pop(0))
+            order += hours[:2]
+            hours = hours[2:]
+        print(f"\n== {name} ({rs} vs {as_}): trying {len(order)} event pairs over {since_days:g} days")
+        done = collections.Counter()
+        seen_t = []
+        for kind0, t_close, suf in order:
+            spent = time.time() - t_pair
+            if spent > budget_s * 1.4:
+                n[(name, "event pairs left out (time)")] += 1
+                continue
+            results_only = spent > budget_s
+            er, ea = {"event_ticker": f"{rs}-{suf}"}, {"event_ticker": f"{as_}-{suf}"}
+            rms, ams = event_markets(c, er["event_ticker"]), event_markets(c, ea["event_ticker"])
+            if not rms or not ams:
+                n[(name, f"{kind0} event pairs missing a side")] += 1
+                continue
+            closes = {iso(m.get("close_time")) for m in rms + ams}
+            if len(closes) != 1:
+                n[(name, "event pairs whose markets close at different times")] += 1
+                continue
+            t_close = closes.pop()
+            seen_t.append(t_close)
+            tick = tick_of(rms + ams)
+            ivs, flags = {}, collections.Counter()
+            for m in rms + ams:
+                v, fl = ivs_of(m)
+                ivs[m["ticker"]] = v
+                for f in fl:
+                    flags[f] += 1
+                    n[(name, f"markets: {f}")] += 1
+            if flags.get("strike fields and rules differ") and done["mismatch shown"] < 3:
+                done["mismatch shown"] += 1
+                ex = next(m for m in rms + ams if len(ivs[m["ticker"]]) > 1)
+                print(f"   MISMATCH {ex['ticker']} {ivs[ex['ticker']]} | {plain(ex.get('rules_primary'))[:160]}")
+            check_results(name, rms, ams, ivs, tick, n, broken)
+            if results_only:
+                n[(name, "event pairs checked for results only (time)")] += 1
+                continue
+            opened = min(filter(None, (iso(m.get("open_time")) for m in rms + ams)), default=None)
+            settle = max(filter(None, (iso(m.get("expected_expiration_time")) or iso(m.get("close_time"))
+                                       for m in rms + ams)), default=t_close)
+            if not opened:
+                continue
+            life = t_close - opened
+            period = 1 if life <= 2 * H else 60
+            cr = event_candles(c, rs, er["event_ticker"], opened, t_close, period)
+            ca = event_candles(c, as_, ea["event_ticker"], opened, t_close, period)
+            if not cr or not ca:
+                n[(name, "event pairs without candles")] += 1
+                continue
+            kind = "hourly events (5-min samples)" if period == 1 else "5pm events (hourly samples)"
+            n[(name, f"event pairs priced: {kind}")] += 1
+            L = Linker([(m["ticker"], ivs[m["ticker"]]) for m in rms], [(m["ticker"], ivs[m["ticker"]]) for m in ams], tick)
+            if done["relations shown"] < 1:
+                done["relations shown"] += 1
+                print(f"   relations in {suf} (tick {tick:g}): {json.dumps({f'{a}/{b}': v for (a, b), v in L.n_relations().items()})}"
+                      f"; A markets of other shapes {len(L.other)}")
+            step = 300 if period == 1 else H
+            first = (int(opened) // step + 1) * step
+            times = list(range(first, int(t_close), step))   # before the close only
+            cands = {**cr, **ca}
+            for t, q, vol in snapshots(cands, times, 600 if period == 1 else 2 * H, step):
+                key = f"{name} {kind}"
+                for fam, mode, pay, legs in L.sets(q):
+                    tally.add(key, fam, mode, pay, legs, t, settle, er["event_ticker"], vol, ivs, tick)
+        if seen_t:
+            print(f"   covered {stamp(min(seen_t))} .. {stamp(max(seen_t))}")
+        print(f"   {name}: {time.time() - t_pair:.0f}s; " + "; ".join(f"{k[1]}: {v}" for k, v in sorted(n.items()) if k[0] == name))
+        tally.show([f"{name} 5pm events (hourly samples)", f"{name} hourly events (5-min samples)"])
+        sys.stdout.flush()
+    print(f"\n===== BROKEN LINKS / BAD RESULTS: {len(broken)}")
+    for b in broken[:40]:
+        print("   BROKEN " + json.dumps(b))
+    print(f"\nhistory done in {time.time() - t_start:.0f}s")
+
+
+OTHER = [("SPX 4pm", "KXINX", "KXINXU"), ("NDX 4pm", "KXNASDAQ100", "KXNASDAQ100U"),
+         ("SPX year-end", "KXINXY", "KXINXDIRY"), ("NDX year-end", "KXNASDAQ100Y", "KXNDQDIRY"),
+         ("WTI", "KXWTIW", "KXWTI"), ("Gold", "KXGOLDW", "KXGOLDMON"), ("Silver", "KXSILVERW", "KXSILVERMON"),
+         ("Copper", "KXCOPPERW", "KXCOPPERMON"), ("NatGas", "KXNATGASW", "KXNATGASMON"),
+         ("Brent", "KXBRENTW", "KXBRENTMON"), ("UST10 W/M", "KXUST10A", "KXUST10AM"),
+         ("UST2 W/M", "KXUST2A", "KXUST2AM"), ("UST5 W/M", "KXUST5A", "KXUST5AM"),
+         ("UST7 W/M", "KXUST7A", "KXUST7AM"), ("UST30 W/M", "KXUST30A", "KXUST30AM")]
+
+
+def book_quote(book, side):
+    """(price, size) to buy `side` now from an order book of bids, or (None, 0)."""
+    levels = book.get("no" if side == "yes" else "yes") or []
+    if not levels:
+        return None, 0
+    bid, size = max(levels)
+    ask = round(1 - bid, 4)
+    return (ask, size) if 0 < ask < 1 else (None, 0)
+
+
+def live(pairs, rounds, gap_s):
+    cfg = config.load()
+    c = Kalshi()
+    t0 = time.time()
+    seen_gaps = {}
+    closest = {}
+    for rnd in range(rounds):
+        if rnd:
+            time.sleep(gap_s)
+        now = time.time()
+        stats = collections.Counter()
+        for name, rs, as_ in pairs:
+            try:
+                er = {suffix(e["event_ticker"]): e for e in c.events(series_ticker=rs, status="open", with_nested_markets="true")}
+                ea = {suffix(e["event_ticker"]): e for e in c.events(series_ticker=as_, status="open", with_nested_markets="true")}
+            except Exception as e:
+                print(f"  {name}: listing failed {e}")
+                continue
+            for suf in sorted(set(er) & set(ea)):
+                rms, ams = er[suf].get("markets") or [], ea[suf].get("markets") or []
+                closes = {iso(m.get("close_time")) for m in rms + ams}
+                if len(closes) != 1 or not rms or not ams:
+                    stats[(name, "open pairs skipped (close times differ)")] += 1
+                    continue
+                t_close = closes.pop()
+                settle = max(filter(None, (iso(m.get("expected_expiration_time")) or t_close for m in rms + ams)))
+                stats[(name, "open event pairs")] += 1
+                tick = tick_of(rms + ams)
+                ivs = {m["ticker"]: ivs_of(m)[0] for m in rms + ams}
+                L = Linker([(m["ticker"], ivs[m["ticker"]]) for m in rms], [(m["ticker"], ivs[m["ticker"]]) for m in ams], tick)
+                q = {m["ticker"]: (price(m, "yes_bid"), price(m, "yes_ask")) for m in rms + ams
+                     if m.get("status") in ("active", "open")}
+                for fam, mode, pay, legs in L.sets(q):
+                    cost = sum(p + fee_pc(p) for _, _, p in legs)
+                    edge = pay - cost
+                    stats[(name, "sets priced")] += 1
+                    k = (name, fam, mode)
+                    if k not in closest or edge > closest[k][0]:
+                        closest[k] = (round(edge, 4), suf, stamp(now), [(tk, sd, p) for tk, sd, p in legs])
+                    if edge <= 0:
+                        continue
+                    stats[(name, f"{fam}/{mode} under $ after fees (top of book)")] += 1
+                    # confirm on the books
+                    books, sizes, prices = {}, [], []
+                    for tk, sd, _ in legs:
+                        try:
+                            books[tk] = c.orderbook(tk)
+                        except Exception:
+                            books[tk] = {}
+                        p_, sz = book_quote(books[tk], sd)
+                        prices.append(p_)
+                        sizes.append(sz)
+                    if None in prices:
+                        continue
+                    pm = payout_min([(ivs[tk], sd) for tk, sd, _ in legs], tick, "robust" if mode == "robust" else "grid")
+                    if pm < pay:
+                        stats[(name, "BUG: set doesn't pay what it should")] += 1
+                        continue
+                    cost_b = sum(p + fee_pc(p) for p in prices)
+                    edge_b = pay - cost_b
+                    days = max((settle - now) / DAY, 1 / 24)
+                    roi = edge_b / cost_b
+                    ok = (days <= cfg["max_arb_days"] and yearly_return(pay / cost_b, days) >= cfg["min_arb_apr"]
+                          and 0.01 <= roi <= MAX_ARB_ROI)
+                    row = dict(t=stamp(now), name=name, fam=fam, mode=mode, pay=pay, edge_book=round(edge_b, 4),
+                               roi=round(roi, 4), size=min(sizes), days=round(days, 3), ok=ok,
+                               legs=[(tk, sd, p_, sz) for (tk, sd, _), p_, sz in zip(legs, prices, sizes)])
+                    key = (name, fam, mode, tuple(tk for tk, _, _ in legs))
+                    if edge_b > 0 and (key not in seen_gaps or edge_b > seen_gaps[key]["edge_book"]):
+                        seen_gaps[key] = row
+        print(f"round {rnd + 1} at {stamp(now)}: " + "; ".join(f"{a} {b}: {v}" for (a, b), v in sorted(stats.items())))
+        sys.stdout.flush()
+    print(f"\n===== LIVE: sets under $ after fees on the books: {len(seen_gaps)}")
+    for row in sorted(seen_gaps.values(), key=lambda r: -r["edge_book"])[:30]:
+        print("   GAP " + json.dumps(row))
+    print("closest per pair and family (edge after fees at top of book; above 0 = a gap):")
+    for k, v in sorted(closest.items(), key=lambda kv: -kv[1][0])[:60]:
+        print(f"   NEAR {k[0]} {k[1]}/{k[2]}: {json.dumps(v)}")
+    print(f"live done in {time.time() - t0:.0f}s")
+
+
+DOC_SERIES = ["KXBTC", "KXBTCD", "KXETH", "KXETHD", "KXSOLE", "KXSOLD", "KXXRP", "KXXRPD", "KXDOGE", "KXDOGED",
+              "KXBNB", "KXBNBD", "KXHYPE", "KXHYPED", "KXSHIBA", "KXSHIBAD", "KXINX", "KXINXU", "KXNASDAQ100",
+              "KXNASDAQ100U", "KXINXY", "KXINXDIRY", "KXNASDAQ100Y", "KXNDQDIRY", "KXWTI", "KXWTIW", "KXGOLDW",
+              "KXGOLDMON", "KXUST10A", "KXUST10AM", "KXUST10AD"]
+DOC_WORDS = re.compile(r"round|decimal|inclusive|exclusive|between|expiration value|average|no data|unavailable|"
+                       r"not available|fair|last good|underlying|source agency|closing|end-of-day|end of day|"
+                       r"settlement value|official|delay|revis|correct|outage|disrupt", re.I)
+
+
+def docs():
+    import io
+    import requests
+    c = Kalshi()
+    urls = collections.defaultdict(list)
+    for s in DOC_SERIES:
+        try:
+            info = c.series_info(s)
+        except Exception as e:
+            print(f"{s}: {e}")
+            continue
+        for k in ("contract_url", "contract_terms_url"):
+            if info.get(k):
+                urls[info[k]].append(f"{s}.{k}")
+        print(f"{s}: {info.get('contract_url')} | terms {info.get('contract_terms_url')} | "
+              f"sources {json.dumps(info.get('settlement_sources'))[:160]}")
+    try:
+        from pypdf import PdfReader
+    except ImportError:
+        PdfReader = None
+        print("pypdf missing")
+    for url, who in urls.items():
+        print(f"\n===== DOC {url} (for {', '.join(who)})")
+        try:
+            r = requests.get(url, timeout=30)
+            print(f"   status {r.status_code}, {len(r.content)} bytes, type {r.headers.get('content-type')}")
+            if r.status_code != 200 or PdfReader is None:
+                continue
+            text = " ".join(" ".join((pg.extract_text() or "") for pg in PdfReader(io.BytesIO(r.content)).pages).split())
+        except Exception as e:
+            print(f"   failed: {e}")
+            continue
+        print(f"   text {len(text)} chars")
+        shown, last = 0, -10 ** 9
+        for m in DOC_WORDS.finditer(text):
+            if m.start() - last < 500:
+                continue
+            last = m.start()
+            print(f"   ...{text[max(0, m.start() - 260):m.start() + 340]}...")
+            shown += 1
+            if shown >= 28:
+                print("   (more not shown)")
+                break
+    # Rules of the 4 PM index events and of XRP, in full.
+    print("\n===== RULES IN FULL")
+    for s in ("KXINXU", "KXNASDAQ100U", "KXINX", "KXXRP", "KXXRPD", "KXBTC", "KXDOGE", "KXWTI", "KXWTIW"):
+        try:
+            evs = c.events(series_ticker=s, status="open", with_nested_markets="true")
+        except Exception as e:
+            print(f"{s}: {e}")
+            continue
+        for ev in sorted(evs, key=lambda e: e.get("strike_date") or "")[-2:]:
+            ms = ev.get("markets") or []
+            if not ms:
+                continue
+            m = ms[len(ms) // 2]
+            print(f"\n## {ev['event_ticker']} ({len(ms)} markets) {m['ticker']} {m.get('strike_type')} "
+                  f"{m.get('floor_strike')} {m.get('cap_strike')} {m.get('yes_sub_title')!r}")
+            print(f"   R1 {plain(m.get('rules_primary'))}")
+            print(f"   R2 {plain(m.get('rules_secondary'))}")
+            print(f"   early_close {plain(m.get('early_close_condition'))[:300]} | can_close_early {m.get('can_close_early')}")
+
+
+def main():
+    mode = sys.argv[1] if len(sys.argv) > 1 else "discover"
+    if mode == "discover":
+        discover()
+    elif mode == "docs":
+        docs()
+    elif mode == "history":
+        names = sys.argv[2].split(",") if len(sys.argv) > 2 else [p[0] for p in CRYPTO]
+        budget = float(sys.argv[3]) if len(sys.argv) > 3 else 150
+        days = float(sys.argv[4]) if len(sys.argv) > 4 else 60
+        history([p for p in CRYPTO + OTHER if p[0] in names], budget, days)
+    elif mode == "live":
+        rounds = int(sys.argv[2]) if len(sys.argv) > 2 else 5
+        gap = float(sys.argv[3]) if len(sys.argv) > 3 else 60
+        live(CRYPTO + OTHER, rounds, gap)
 
 
 if __name__ == "__main__":

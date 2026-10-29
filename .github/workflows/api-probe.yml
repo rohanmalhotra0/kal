@@ -3,6 +3,10 @@ name: api-probe
 
 on:
   workflow_dispatch:
+    inputs:
+      args:
+        description: probe arguments
+        default: discover
   push:
     branches: [main]
     paths: ["tools/api_probe.py", ".github/workflows/api-probe.yml"]
@@ -13,11 +17,13 @@ permissions:
 jobs:
   probe:
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
-      - run: pip install -r requirements.txt
-      - run: python tools/price_links_probe.py
+      - run: pip install -r requirements.txt pypdf
+      - run: python tools/price_links_probe.py $PROBE_ARGS
+        env:
+          PROBE_ARGS: ${{ inputs.args }}
