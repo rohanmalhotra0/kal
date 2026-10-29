@@ -725,6 +725,43 @@ class SettlementValueTests(TempHome):
         self.assertEqual((row["settled"], row["result"], row["pnl"]), (1, "unknown", None))
 
 
+class PaperSettleTogetherTests(TempHome):
+    def test_a_sets_legs_are_booked_together(self):
+        # A month-end pair: the daily leg settles an hour after 5 PM, the monthly days later.
+        # Booking the daily's win first would show a paper peak that never was.
+        from kal.strategies.base import Leg, Signal
+        sig = Signal("metal_link_arb", "MON", "t", [Leg("D-T4093", "no", 0.41, 23), Leg("MON-T4092.99", "yes", 0.51, 23)])
+        paper.record(sig, 7)
+        solo = Signal("favorites", "E", "t", [Leg("P", "yes", 0.5, 4)])
+        paper.record(solo, 8)
+        c = FakeKalshi()
+        c.market_info["D-T4093"] = {"status": "finalized", "result": "no"}
+        c.market_info["P"] = {"status": "finalized", "result": "yes"}
+        c.market_info["MON-T4092.99"] = {"status": "closed", "result": ""}
+        self.assertEqual(paper.settle(c), 1)        # the lone bet settles; the pair waits
+        self.assertEqual({r["ticker"] for r in paper.open_rows()}, {"D-T4093", "MON-T4092.99"})
+        before = paper.realized()
+        c.market_info["MON-T4092.99"] = {"status": "finalized", "result": "no"}
+        self.assertEqual(paper.settle(c), 2)        # both legs at once
+        self.assertEqual(paper.open_rows(), [])
+        self.assertAlmostEqual(paper.realized() - before, 23 * 1.0 - sig.cost, places=6)
+
+    def test_an_unknown_leg_still_closes_once_the_set_is_done(self):
+        from kal.strategies.base import Leg, Signal
+        sig = Signal("x", "E", "t", [Leg("A", "yes", 0.5, 2), Leg("B", "no", 0.4, 2)])
+        paper.record(sig, 3)
+        c = FakeKalshi()
+        c.market_info["A"] = {"status": "finalized", "result": "void"}
+        c.market_info["B"] = {"status": "open", "result": ""}
+        self.assertEqual(paper.settle(c), 0)
+        self.assertEqual(len(paper.open_rows()), 2)
+        c.market_info["B"] = {"status": "finalized", "result": "no"}
+        paper.settle(c)
+        rows = {r["ticker"]: r for r in db.query("SELECT * FROM paper")}
+        self.assertEqual((rows["A"]["settled"], rows["A"]["result"], rows["A"]["pnl"]), (1, "unknown", None))
+        self.assertEqual((rows["B"]["settled"], rows["B"]["result"]), (1, "no"))
+
+
 class PaperDuplicateTests(TempHome):
     def test_same_market_is_paper_bought_once(self):
         config.update({"enabled": True, "budget": 0,

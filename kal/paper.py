@@ -24,29 +24,44 @@ def held():
     return {r["ticker"] for r in open_rows()}
 
 
+_UNKNOWN = object()
+
+
 def settle(client):
+    """Book what has settled. A signal's legs are booked together, once every one has a
+    result: legs that settle hours or days apart (a month-end pair, a date ladder) would
+    otherwise show one leg's gain before the other's loss, a paper peak that never was, and
+    paper bets are sized off the peak."""
     rows = open_rows()
     if not rows:
         return 0
     markets = client.markets_by_ticker({r["ticker"] for r in rows})
-    n = 0
+    sets = {}
     for r in rows:
-        try:
-            paid = yes_payout(markets.get(r["ticker"], {}))
-        except UnknownSettlement as e:
-            # Paper isn't money: close it out without a result, so it never counts toward
-            # promotion, rather than guess.
-            log.warning("paper: %s", e)
-            db.execute("UPDATE paper SET settled = 1, result = 'unknown', pnl = NULL, settled_ts = ? WHERE id = ?",
-                       time.time(), r["id"])
-            continue
-        if paid is None:
-            continue
-        per = paid if r["side"] == "yes" else 1 - paid
-        result = "yes" if paid == 1 else "no" if paid == 0 else f"{paid:.4f}"
-        db.execute("UPDATE paper SET settled = 1, result = ?, pnl = ?, settled_ts = ? WHERE id = ?",
-                   result, r["count"] * per - r["cost"], time.time(), r["id"])
-        n += 1
+        sets.setdefault(("signal", r["signal_id"]) if r["signal_id"] is not None else ("row", r["id"]), []).append(r)
+    n = 0
+    for legs in sets.values():
+        paid = []
+        for r in legs:
+            try:
+                paid.append(yes_payout(markets.get(r["ticker"], {})))
+            except UnknownSettlement as e:
+                log.warning("paper: %s", e)
+                paid.append(_UNKNOWN)
+        if any(p is None for p in paid):
+            continue   # a leg is still open: book the set when they all are done
+        for r, p in zip(legs, paid):
+            if p is _UNKNOWN:
+                # Paper isn't money: close it out without a result, so it never counts toward
+                # promotion, rather than guess.
+                db.execute("UPDATE paper SET settled = 1, result = 'unknown', pnl = NULL, settled_ts = ? "
+                           "WHERE id = ?", time.time(), r["id"])
+                continue
+            per = p if r["side"] == "yes" else 1 - p
+            result = "yes" if p == 1 else "no" if p == 0 else f"{p:.4f}"
+            db.execute("UPDATE paper SET settled = 1, result = ?, pnl = ?, settled_ts = ? WHERE id = ?",
+                       result, r["count"] * per - r["cost"], time.time(), r["id"])
+            n += 1
     return n
 
 
