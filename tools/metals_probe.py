@@ -821,6 +821,54 @@ def pyth(dates, series):
         sys.stdout.flush()
 
 
+FEEDS = {
+    "Metal.XAU/USD": "765d2ba906dbc32ca17cc11f5310a89e9ee1f6420508c63861f2f8ba4ee34bb2",
+    "Metal.Index.GOLD/USD": "fa0f57505be633c026896e15afef2c7ce2cf8ff9a45349d1da737f4f01266b01",
+    "Metal.Index.1OZGOLD/USD": "7fd2c87083dd8fd5af2486a43f40b8e444acd77fda4e96263a53421cd079c387",
+    "Metal.XAG/USD": "f2fb02c32b055c805e7238d628e5e9dadef274376114eb1f012337cabe93871e",
+    "Metal.Index.SILVER/USD": "6afca47e1c79ecd0d2844327efb463478417a9d498dfb0915ce5e88ae6d952d3",
+}
+
+
+def hermes(dates, offsets):
+    """Each Pyth feed's price at given seconds after 5 PM ET (negative = before) on each date, from
+    Pyth's public Hermes API. Paced to stay under its rate limit."""
+    import requests
+    s = requests.Session()
+    for d in dates:
+        y, mo, dd = map(int, d.split("-"))
+        t5 = int(datetime(y, mo, dd, 17, 0, tzinfo=ET).timestamp())
+        print(f"\n== {d}")
+        for name, fid in FEEDS.items():
+            row = []
+            for off in offsets:
+                t = t5 + off
+                for attempt in range(4):
+                    try:
+                        r = s.get(f"https://hermes.pyth.network/v2/updates/price/{t}",
+                                  params={"ids[]": fid, "parsed": "true"}, timeout=30)
+                    except Exception as e:
+                        row.append(f"{off}: {e}")
+                        break
+                    if r.status_code == 429:
+                        time.sleep(3 + 3 * attempt)
+                        continue
+                    if r.status_code != 200:
+                        row.append(f"{off}: status {r.status_code} {plain(r.text)[:80]}")
+                        break
+                    p = ((r.json().get("parsed") or [{}])[0]).get("price") or {}
+                    try:
+                        v = int(p["price"]) * 10 ** int(p["expo"])
+                        pt = datetime.fromtimestamp(int(p["publish_time"]), ET).strftime("%H:%M:%S")
+                        row.append(f"{off:+d}s -> {v:.4f} (published {pt})")
+                    except (KeyError, TypeError, ValueError):
+                        row.append(f"{off}: {plain(r.text)[:120]}")
+                    break
+                time.sleep(0.5)
+            print(f"   {name}: " + "; ".join(row))
+            sys.stdout.flush()
+
+
 # ======================= gaps =======================
 
 def candles_for(c, e, t0, t1):
@@ -1234,6 +1282,8 @@ def main():
             hourly([tuple(p.split("~")) for p in rest[0].split(",")])
         elif mode == "pyth":
             pyth(rest[0].split(","), rest[1].split(","))
+        elif mode == "hermes":
+            hermes(rest[0].split(","), [int(x) for x in (rest[1] if len(rest) > 1 else "-61,-1,0").split(",")])
         else:
             print(f"unknown mode {mode}")
         sys.stdout.flush()
