@@ -2,6 +2,15 @@
 
 Newest first. Each 2-hour check-in adds one entry: what it checked, what it found, links.
 
+## 2026-10-29 16:50 UTC — check-in: all green; three checks running
+
+- Checked: CI green on main eabc082; market-check green at 16:32 (0 trades found, nothing
+  suspicious). No status report yet: `kal-status` doesn't exist or isn't shared with Claude.
+- Running: idea #19 research (one price at one moment asked two ways, branch
+  `probe/price-links`); an independent review of `exact_link_arb`; and every arbitrage scan
+  once a minute for 4 hours (branch `probe/arb-watch-1min`), to see if a faster pace than
+  5 minutes would catch gaps.
+
 ## 2026-10-29 16:37 UTC — memory fix, real install test, exact-value links on paper
 
 - Merged [PR #30](https://github.com/rohanmalhotra0/kal/pull/30): idea #16, known results,
