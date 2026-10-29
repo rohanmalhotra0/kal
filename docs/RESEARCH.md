@@ -256,7 +256,7 @@ status: **testing** (add the PR link), **built**, or **rejected** (say why in on
 **15. What the research says not to build**
 - In-game sports momentum, economic-release tails, generic mention fading, parlays and combos (YES side), cross-venue arbitrage: about zero or negative after costs for a slow taker.
 
-**16. Result already known, market still open** - untested
+**16. Result already known, market still open** - tested 2026-10-29 on daily highs: rejected
 - What: a game or data release is over and the result is public, but the market still
   trades before Kalshi settles it. The winning side may still sell at 95-99c.
 - Evidence: unknown on Kalshi. It usually stops trading once the result is known; how often
@@ -266,6 +266,14 @@ status: **testing** (add the PR link), **built**, or **rejected** (say why in on
 - Test: for settled markets, compare the last trades with the event's real end (a game's
   occurrence_datetime, a release's scheduled time). Count trades after the end on the
   winning side, at what price, and how often the "known" side lost.
+- Tested on daily highs (7 cities, 75 days; highs so far from the IEM ASOS archive). Once
+  the high so far passes a bracket's top, the bracket can't win.
+  - 3,503 market-hours where the result was already known (with a 0.5F margin). In every
+    one, the sure side cost the full $1: nobody sold it cheaper. No edge.
+  - Without the margin it's not even safe: one NYC day read 80.0F on the hourly data, but
+    the official report said 79F, so "below 80" won.
+  - These markets stop trading by 4-7 PM local time, and game markets close when the game
+    ends (their close_time). Rejected. Probe: branch `probe/known-result` (never merged).
 
 **17. The same question in two series (not crypto)** - untested
 - What: two series asking one thing in different words. Their prices must add up. Example:
