@@ -81,7 +81,7 @@ def main():
         url = info.get("contract_terms_url")
         if url and url not in pdfs:
             pdfs[url] = pdf_text(url)
-            print(f"--- TERMS {url}\n{pdfs[url][:9000]}\n--- END TERMS")
+            print(f"--- TERMS {url}\n{' '.join(pdfs[url].split())[:7000]}\n--- END TERMS")
         elif url:
             print(f"--- TERMS {url}: same as above")
 
@@ -101,7 +101,7 @@ def main():
         for field in ("rules_primary", "rules_secondary", "yes_sub_title", "strike_type"):
             seen = collections.Counter(template(m.get(field)) for m in settled + opened)
             print(f"-- {field}: {len(seen)} template(s)")
-            for t, n in seen.most_common(8):
+            for t, n in seen.most_common(4):
                 print(f"   {n:>5}  {t[:700]}")
         results = collections.Counter(str(m.get("result")) for m in settled)
         print(f"-- results: {dict(results)}")
@@ -124,10 +124,15 @@ def main():
 
         hit = [m for m in settled if SHUTDOWN.search(str(m.get("rules_primary") or ""))]
         print(f"-- Sep-Nov 2025 markets: {len(hit)}")
-        for m in sorted(hit, key=lambda m: str(m.get("ticker")))[:40]:
-            print("   SHUT " + json.dumps(pick(m, ("ticker", "result", "settlement_value_dollars", "expiration_value",
-                                                    "close_time", "expiration_time"))))
-            print("        " + plain(m.get("rules_primary"))[:400])
+        by_event = collections.defaultdict(list)
+        for m in hit:
+            by_event[str(m.get("event_ticker") or str(m.get("ticker")).rsplit("-", 1)[0])].append(m)
+        for ev, ms in sorted(by_event.items()):
+            m = ms[0]
+            res = collections.Counter(str(x.get("result")) for x in ms)
+            print(f"   SHUT {ev}: {len(ms)} markets {dict(res)} value={m.get('expiration_value')} "
+                  f"close={m.get('close_time')} expired={m.get('expiration_time')}")
+            print("        2: " + plain(m.get("rules_secondary"))[:600])
         print(f"({time.time() - t0:.0f}s)")
 
 
