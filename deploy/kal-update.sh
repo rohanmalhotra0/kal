@@ -13,6 +13,7 @@
 #    really alive. If not, it puts the old code and packages back.
 #  - Docs-only changes (the check-in's journal) fast-forward with no tests and no restart.
 set -uo pipefail
+umask 022   # like install.sh: only root may change the code and packages
 
 APP="${APP:-/opt/kal}"
 VENV="${VENV:-/opt/kal-venv}"
@@ -188,6 +189,7 @@ if ! git merge --quiet --ff-only "$after"; then
 fi
 "$VENV/bin/pip" install --quiet -r requirements.txt
 chmod -R a+rX "$APP"
+chmod -R go-w "$APP" "$VENV"
 
 health_ok() {  # the same check the /usr/local/bin/kal wrapper uses, run as the kal user
   runuser -u "$KAL_USER" -- env KAL_HOME="$DATA" "$VENV/bin/python" -m kal health --alive >/dev/null 2>&1
@@ -204,6 +206,7 @@ roll_back() {
   "$VENV/bin/pip" install --quiet -r requirements.txt
   [ -s "$freeze" ] && "$VENV/bin/pip" install --quiet -r "$freeze"   # exact old versions
   chmod -R a+rX "$APP"
+  chmod -R go-w "$APP" "$VENV"
   [ "$was_active" = 1 ] && restart
   echo "$after" > "$failed"   # don't try the same version again tomorrow
   alert high "kal update rolled back" "The new version wasn't healthy. Back on ${before:0:7}."

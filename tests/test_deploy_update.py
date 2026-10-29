@@ -398,6 +398,21 @@ exit 0
         # write; a root-owned one would break research for good).
         self.assertTrue(os.path.exists(os.path.join(self.data, ".research.lock")))
 
+    def test_an_update_leaves_no_code_or_package_others_can_change(self):
+        # The bot runs this code with the key. A venv made world-writable once (a umask of
+        # 000 when it was installed) is put right by the next update.
+        import stat
+        self._active()
+        for p in (self.app, os.path.join(self.app, "kal"), self.venv, os.path.join(self.venv, "bin", "pip")):
+            os.chmod(p, 0o777)
+        self._push_code()
+        r = self._run()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        loose = [p for top in (self.app, self.venv) for p, _, fs in os.walk(top)
+                 for p in [p] + [os.path.join(p, f) for f in fs]
+                 if not os.path.islink(p) and os.stat(p).st_mode & (stat.S_IWGRP | stat.S_IWOTH)]
+        self.assertEqual(loose, [])
+
     def test_failed_tests_never_touch_the_live_tree_or_venv(self):
         self._active()
         before = self._head()
