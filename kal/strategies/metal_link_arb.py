@@ -18,7 +18,7 @@ rules came at every gold month end (184 hours; 39 with trades on both legs), e.g
 daily "above 4452" at 41c + YES monthly "above 4451.99" at 50c, +5.5c. Prices came from
 candles, which show no depth.
 
-Real money is not planned (VERIFIED is empty), because:
+Paper only, by design: proven() is always False, so it never uses real money, because:
   - The two series settle apart: the daily or weekly about an hour after 5 PM, the monthly 3
     to 68 hours later, in one batch with every commodity monthly. Each is read on its own
     (AAA gas's weekly once settled on the day before's figure, #20).
@@ -30,9 +30,10 @@ Real money is not planned (VERIFIED is empty), because:
   - Even the metadata differs: the daily's custom_strike says round_digits "2", the monthly's
     says nothing (both rules say 2 decimals, so that's allowed here).
 Two different numbers can make both legs lose (copper, Aug 31 2026: the monthly read a futures contract,
-the daily an index, 6.58 vs 6.69). A pin in VERIFIED would let a pair trade for real; even
-then never while a pair looks too good to be true (too_good, at scan and again just before
-buying).
+the daily an index, 6.58 vs 6.69). Real money would take a code change and a person's review.
+Even on paper a set needs its YES strike at least a cent under its NO strike, so a gap of
+under half a cent between the two reads, or a tie read the other way, can't make both lose
+(check()). A set too good to be true, listed or in its book, is never booked.
 
 No data: both rules say "the most recently available published data will be used to resolve
 the market", so each series still settles on a number, never "every strike No" (some crypto
@@ -60,7 +61,6 @@ is played out over every price that matters before it's offered (check()).
 """
 import bisect
 import datetime
-import json
 import re
 import time
 from decimal import Decimal
@@ -106,11 +106,8 @@ _SUBTITLE = re.compile(r"above \$(?P<k>\d+(?:\.\d+)?)")
 # What custom_strike may hold on these markets: the contract (none: "N/A"), the tick, the day.
 _CUSTOM = ("front_month_contract", "round_digits", "strike_date")
 
-# Real money only for these: monthly event ticker -> {"pair": the daily or weekly event's
-# ticker, "rules": rules_key(...)}. Add one only by pull request, after reading every market's
-# rules in full and both events' sources. Empty: every pair trades on paper.
-VERIFIED = {}
-UNVERIFIED = "no event pair checked by hand yet (metal_link_arb.VERIFIED is empty)"
+PAPER_ONLY = ("paper only by design: the two series settle apart and Kalshi can change the price source "
+              "outside the words (docs/RESEARCH.md #21)")
 _QUOTES = str.maketrans({"‘": "'", "’": "'", "“": '"', "”": '"'})
 
 
@@ -208,8 +205,8 @@ def _source(ev, info):
 
 def _event(ev, series, info):
     """One event of a pair, read and checked market by market: {"event", "series", "title",
-    "markets": [{"m", "k", "event"}], "close", "expires", "local", "say", "source",
-    "sources"}. Raises _Skip."""
+    "markets": [{"m", "k", "event"}], "close", "expires", "local", "say", "source"}. Raises
+    _Skip."""
     et = ev.get("event_ticker")
     markets = ev.get("markets")
     if ev.get("series_ticker") not in (None, series) or ev.get("mutually_exclusive") is not False:
@@ -245,8 +242,7 @@ def _event(ev, series, info):
     if len({r["k"] for r in out}) != len(out):
         raise _Skip(f"{et}: a strike twice")
     return {"event": et, "series": series, "title": ev.get("title") or et, "markets": out, "close": close,
-            "expires": expected, "local": local, "say": say, "source": source,
-            "sources": json.dumps(ev.get("settlement_sources"), sort_keys=True)}
+            "expires": expected, "local": local, "say": say, "source": source}
 
 
 def _pair(mon_ev, other_ev, series, other, info):
@@ -300,9 +296,9 @@ def _listed(m, side):
 
 
 def links(pair):
-    """For each market, the cheapest pair it can be the NO leg of: YES on a strike at or under
-    it in the other event, by the listed prices. [{"set", "pays", "legs": [(market, side)],
-    "listed"}]. check() plays each one out."""
+    """For each market, the cheapest pair it can be the NO leg of: YES on a strike under it (at
+    least a cent) in the other event, by the listed prices. [{"set", "pays", "legs": [(market,
+    side)], "listed"}]. check() plays each one out."""
     out = []
     for yes_ev, no_ev in ((pair["monthly"], pair["other"]), (pair["other"], pair["monthly"])):
         rungs = sorted(yes_ev["markets"], key=lambda r: r["k"])
@@ -314,11 +310,11 @@ def links(pair):
                 best = (p, r)
             under.append(best)
         for n in no_ev["markets"]:
-            yes = under[bisect.bisect_right(strikes, n["k"])]   # strikes at or under the NO's
+            yes = under[bisect.bisect_left(strikes, n["k"])]   # strikes under the NO's, never the same
             if yes:
                 legs = [(yes[1]["m"], "yes"), (n["m"], "no")]
                 prices = [_listed(m, side) for m, side in legs]
-                out.append({"set": "same strike" if yes[1]["k"] == n["k"] else "nested", "pays": 1, "legs": legs,
+                out.append({"set": "nested", "pays": 1, "legs": legs,
                             "listed": None if None in prices else sum(prices)})
     return out
 
@@ -334,8 +330,10 @@ def _prices(pair):
 
 def check(pair, legs, pays):
     """True only if the legs are YES in one event and NO in the other and one contract of each
-    pays at least `pays` dollars at every price that matters, both events on that one price, and
-    also if every strike of both resolves No. YES above a strike over the NO's fails."""
+    pays at least `pays` dollars at every price that matters, even if the two events read prices
+    up to half a cent apart or count a tie as above (the monthly doesn't declare its rounding the
+    way the daily does), and also if every strike of both resolves No. So the YES strike must sit
+    at least a cent under the NO's: a same-strike set, or YES over the NO, fails."""
     recs = [(pair["records"].get(m.get("ticker")), side) for m, side in legs]
     if pays != 1 or len(recs) != 2 or any(r is None for r, _ in recs):
         return False
@@ -343,30 +341,13 @@ def check(pair, legs, pays):
         return False   # one leg in each series, one YES and one NO
     if sum(side == "no" for _, side in recs) < pays:
         return False   # every strike No
-    return all(sum((v > r["k"]) == (side == "yes") for r, side in recs) >= pays for v in _prices(pair))
+    half = TICK / 2
 
-
-def too_good(every, quoted):
-    """True if any pair costs less than 1 / (1 + risk.MAX_ARB_ROI), listed or in its order book:
-    too good to be true (a misread, or a quote nobody stands behind). Then even a pinned pair
-    of events trades on paper only."""
-    floor = 1 / (1 + risk.MAX_ARB_ROI)
-    if any(s["listed"] is not None and s["listed"] < s["pays"] * floor for s in every):
-        return True
-    return any(all(q[2] is not None for q in quotes) and sum(q[2] for q in quotes) < s["pays"] * floor
-               for s, quotes in quoted)
-
-
-def rules_key(pair):
-    """What VERIFIED pins: both events' sources as Kalshi lists them, and every market of both,
-    word for word (spacing aside), with its dates. A moved source or time goes back to paper."""
-    evs = (pair["monthly"], pair["other"])
-    markets = [r["m"] for e in evs for r in e["markets"]]
-    return "\n".join([f"{e['event']} sources: {e['sources']}" for e in evs] + [
-        f"{m['ticker']} {m.get('close_time')} {m.get('expected_expiration_time')}: "
-        f"{' '.join(str(m.get('rules_primary') or '').split())} | "
-        f"{' '.join(str(m.get('rules_secondary') or '').split())}"
-        for m in sorted(markets, key=lambda m: m["ticker"])])
+    def yes(r, v, tie):
+        return v > r["k"] or (tie and v == r["k"])
+    (y, _), (n, _) = sorted(recs, key=lambda rs: rs[1] != "yes")   # the YES leg, then the NO leg
+    return all(yes(y, v, ty) + (not yes(n, v + d, tn)) >= pays
+               for v in _prices(pair) for d in (-half, 0, half) for ty in (False, True) for tn in (False, True))
 
 
 def to_signal(event, title, basket, meta, closes_at):
@@ -389,9 +370,7 @@ class MetalLinkArb(Strategy):
                    "costs less, buy the pair. Paper only: the two settle apart, and the source can change.")
 
     def proven(self, ctx):
-        if VERIFIED:
-            return True, "only event pairs a person checked by hand (VERIFIED)"
-        return False, UNVERIFIED
+        return False, PAPER_ONLY
 
     def _budget(self, ctx):
         return min(ctx.budget_left, float(ctx.cfg["max_per_arb"]))
@@ -404,16 +383,13 @@ class MetalLinkArb(Strategy):
             if pair["close"] - time.time() <= MIN_TIME_LEFT:
                 continue   # too close to the bell to buy both legs
             every = links(pair)
-            pin = VERIFIED.get(pair["monthly"]["event"])
-            pinned = (isinstance(pin, dict) and pin.get("pair") == pair["other"]["event"]
-                      and pin.get("rules") == rules_key(pair))
-            # Listed under the too-good bar: refused anyway, so it mustn't take a book slot. An
-            # unpinned pair is all paper: leave out what's already open on paper.
+            # Listed under the too-good bar: never booked, so it mustn't take a book slot. All of
+            # it is paper: leave out what's already open on paper.
             hot += [(s["pays"] - s["listed"], len(found), i) for i, s in enumerate(every)
                     if s["listed"] is not None and s["pays"] * floor <= s["listed"] < s["pays"]
                     and all(tradeable(m, ctx) for m, _ in s["legs"])
-                    and (pinned or not any(m["ticker"] in ctx.held_paper for m, _ in s["legs"]))]
-            found.append((pair, every, pinned))
+                    and not any(m["ticker"] in ctx.held_paper for m, _ in s["legs"])]
+            found.append((pair, every))
         # Order books only for the best few by listed price, so a scan reads few of them.
         books, quoted, per = {}, {}, {}
         for _, f, i in sorted(hot, key=lambda h: (-h[0], h[1], h[2])):
@@ -430,17 +406,16 @@ class MetalLinkArb(Strategy):
                 (s, [(m["ticker"], side, *quote(books[m["ticker"]], side)) for m, side in s["legs"]]))
         candidates = []
         for f, sets in quoted.items():
-            pair, every, pinned = found[f]
+            pair, _ = found[f]
             mon, oth = pair["monthly"], pair["other"]
-            live = pinned and not too_good(every, sets)
             for s, quotes in sets:
                 if not check(pair, s["legs"], s["pays"]):
                     continue   # never offer a pair that could pay less than it says
-                if not live and any(m["ticker"] in ctx.held_paper for m, _ in s["legs"]):
-                    continue   # paper only, and already open on paper: the engine would skip it
+                if all(q[2] is not None for q in quotes) and sum(q[2] for q in quotes) < s["pays"] * floor:
+                    continue   # too good to be true in its book: not even on paper
                 meta = {"monthly_event": mon["event"], "other_event": oth["event"], "set": s["set"], "pays": 1,
                         "link": " + ".join(f"{side.upper()} {m['ticker']}" for m, side in s["legs"]),
-                        "at": mon["say"], "source": mon["source"][1], "paper_only": not live,
+                        "at": mon["say"], "source": mon["source"][1], "paper_only": True,
                         "first_close": pair["close"]}
                 candidates.append((quotes, lambda bk, meta=meta, mon=mon, settle=pair["close"] + SETTLE_DAYS * DAY:
                                    to_signal(mon["event"], mon["title"], bk, meta, settle), 1))

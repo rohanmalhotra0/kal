@@ -428,11 +428,13 @@ status: **testing** (add the PR link), **built**, or **rejected** (say why in on
 - Built as `metal_link_arb`, paper only. It pairs a monthly event with its daily or weekly twin
   only when both have the same words (date and strike taken out), the same settlement_sources
   feed (the one Kalshi names now), the same 5 PM close and strike_date, "greater" strikes on
-  the cent, and no futures contract. Sets: YES "above x" + NO "above y >= x", one leg in each
-  series, played out at every price first. It counts the money as tied up until 8 days after
-  the close (the latest the terms allow). Real money only for a pair a person pins in
-  VERIFIED, sources included. None is planned: the series settle apart, and the source changes
-  outside the words.
+  the cent, and no futures contract. Sets: YES "above x" + NO "above y", one leg in each
+  series, with y at least a cent over x, played out at every price first, even with the two
+  reads half a cent apart or a tie read either way (an independent review found same-strike
+  sets lose both legs on a sub-cent gap, and the monthly doesn't declare its rounding). A set
+  too good to be true isn't booked, even on paper. It counts the money as tied up until 8
+  days after the close (the latest the terms allow). Paper only by design: there is no pin
+  list, because the series settle apart and the source changes outside the words.
 - Probes: branches `probe/metals` and `probe/metal-link-dry` (never merged).
 
 ## Sources

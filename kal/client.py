@@ -358,12 +358,14 @@ def to_dollars(v):
     try:
         if isinstance(v, str):
             f = float(v)
-            return f if "." in v else f / 100
-        if isinstance(v, int):
-            return v / 100
-        return float(v)
-    except (TypeError, ValueError):
+            f = f if "." in v else f / 100
+        elif isinstance(v, int):
+            f = v / 100
+        else:
+            f = float(v)
+    except (TypeError, ValueError, OverflowError):
         return 0.0
+    return f if math.isfinite(f) else 0.0
 
 
 def price(d, field):
@@ -371,9 +373,10 @@ def price(d, field):
     v = d.get(f"{field}_dollars")
     if v not in (None, ""):
         try:
-            return float(v)
-        except (TypeError, ValueError):
+            f = float(v)
+        except (TypeError, ValueError, OverflowError):
             return 0.0
+        return f if math.isfinite(f) else 0.0
     return to_dollars(d.get(field))
 
 

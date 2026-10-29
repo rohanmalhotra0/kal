@@ -521,6 +521,8 @@ class RangeLinkArb(Strategy):
                 live = checked and sure(pair, s["legs"], s["pays"])
                 if not live and any(m["ticker"] in ctx.held_paper for m, _ in s["legs"]):
                     continue   # paper only, and already open on paper: the engine would skip it
+                if all(q[2] is not None for q in quotes) and sum(q[2] for q in quotes) < s["pays"] * floor:
+                    continue   # too good to be true in its book: not even on paper
                 meta = {"range_event": rng["event"], "above_event": lad["event"], "set": s["set"], "pays": s["pays"],
                         "link": " + ".join(f"{side.upper()} {m['ticker']}" for m, side in s["legs"]),
                         "at": rng["say"], "paper_only": not live, "first_close": pair["close"]}

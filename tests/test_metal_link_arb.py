@@ -193,8 +193,35 @@ def worst(p, legs):
     return out
 
 
+def worst_apart(p, legs):
+    """Like worst(), but the two events may read the price up to half a cent apart, and each may
+    count a tie as above: what a rounding or timing gap between two separate settlements does."""
+    out = sum(side == "no" for _, side in legs)
+    half = TICK / 2
+    for v in prices_to_try(p):
+        for d in (-half, 0, half):
+            for tie in (False, True):
+                got = 0
+                for t, side in legs:
+                    x = v + d if t.startswith(p.tt) else v
+                    yes = x > p.spec[t] or (tie and x == p.spec[t])
+                    got += yes == (side == "yes")
+                out = min(out, got)
+    return out
+
+
 def tickers(legs):
     return [(m["ticker"], side) for m, side in legs]
+
+
+def weekly_gap(metal="gold"):
+    """A Friday gap a strike apart: someone bids up YES on the weekly's next strike over the
+    money, so NO there plus YES on the monthly's strike at the money costs under $1 after fees.
+    (At the money's own strike the two share one number: that same-strike set is never offered.)"""
+    p = Pair(metal, "weekly")
+    f = p.fair(p.spec[p.monthly()])           # bid the weekly's next strike 9c over the monthly's
+    p.prices[p.other(1)] = ((f + 9) / 100, (f + 11) / 100)   # fair price: about 92c a set
+    return p
 
 
 def gap_pair(metal="gold", twin="daily", at=0, **kw):
@@ -657,12 +684,13 @@ class ScanTests(TempHome):
     def test_a_gap_is_bought_on_paper(self):
         for metal in METALS:
             for twin in ("daily", "weekly"):
-                p = gap_pair(metal, twin)
+                p = gap_pair(metal, twin) if twin == "daily" else weekly_gap(metal)
                 sigs = STRATEGY.scan(ctx(fake_for(p.events())))
                 self.assertEqual(len(sigs), 1, (metal, twin))
                 sig = sigs[0]
+                no = p.other() if twin == "daily" else p.other(1)
                 self.assertEqual(sorted((leg.ticker, leg.side) for leg in sig.legs),
-                                 sorted([(p.monthly(), "yes"), (p.other(), "no")]))
+                                 sorted([(p.monthly(), "yes"), (no, "no")]))
                 self.assertTrue(sig.guaranteed and sig.meta["paper_only"])
                 c = sig.legs[0].count
                 self.assertTrue(all(leg.count == c for leg in sig.legs))
@@ -671,10 +699,11 @@ class ScanTests(TempHome):
                 self.assertLessEqual(sig.payout_min / sig.cost - 1, 0.25)
                 self.assertEqual((sig.event, sig.meta["first_close"]), (p.mt, p.close))
                 self.assertEqual((sig.meta["monthly_event"], sig.meta["other_event"]), (p.mt, p.tt))
-                self.assertEqual(sig.meta["set"], "nested" if twin == "daily" else "same strike")
+                self.assertEqual(sig.meta["set"], "nested")
                 self.assertEqual(sig.meta["source"], METALS[metal]["url"].split("?")[0])
                 self.assertIn(f"5:00 PM {p.tz}", sig.note)
                 self.assertGreaterEqual(worst(p, [(leg.ticker, leg.side) for leg in sig.legs]), 1)
+                self.assertGreaterEqual(worst_apart(p, [(leg.ticker, leg.side) for leg in sig.legs]), 1)
                 self.assertLessEqual(sig.partial_loss, config.DEFAULTS["max_per_trade"] + 1e-9)
 
     def test_the_real_aug_31_gap(self):
@@ -731,70 +760,47 @@ class ScanTests(TempHome):
         sigs = STRATEGY.scan(ctx(fake_for(p.events()), mode="live", held_paper=held))
         self.assertEqual([leg.ticker for s in sigs for leg in s.legs if leg.side == "no"], [p.other(4)])
 
-    def pin(self, evs, other=None, rules=None):
-        pair = metal_link_arb.pairs(evs)[0]
-        patcher = mock.patch.dict(metal_link_arb.VERIFIED, {evs[0]["event_ticker"]: {
-            "pair": other or evs[1]["event_ticker"], "rules": rules or metal_link_arb.rules_key(pair)}})
-        patcher.start()
-        self.addCleanup(patcher.stop)
+    def test_never_real_money(self):
+        # Paper only by design: no pin list, and proven() says no whatever the market shows.
+        self.assertFalse(hasattr(metal_link_arb, "VERIFIED"))
+        self.assertEqual(STRATEGY.proven(None), (False, metal_link_arb.PAPER_ONLY))
+        sigs = STRATEGY.scan(ctx(fake_for(gap_pair().events()), mode="live"))
+        self.assertTrue(sigs and all(s.meta["paper_only"] for s in sigs))
 
-    def test_a_pinned_pair_may_trade_live(self):
-        evs = gap_pair().events()
-        self.pin(evs)
-        sigs = STRATEGY.scan(ctx(fake_for(evs)))
-        self.assertTrue(sigs and not sigs[0].meta["paper_only"])
-        self.assertEqual(STRATEGY.proven(None), (True, "only event pairs a person checked by hand (VERIFIED)"))
+    def test_no_same_strike_set_is_offered(self):
+        # Weekly and monthly share the .99 grid. YES and NO on one strike lose both legs if the
+        # two reads differ by under a cent (the monthly doesn't declare its rounding), so every
+        # set needs its YES at least a cent under its NO, and check() refuses the rest.
+        for metal in METALS:
+            p = Pair(metal, "weekly")
+            pair = metal_link_arb.pairs(p.events())[0]
+            sets = metal_link_arb.links(pair)
+            self.assertTrue(sets)
+            for st in sets:
+                legs = tickers(st["legs"])
+                (yes, _), (no, _) = sorted(legs, key=lambda ts: ts[1] != "yes")
+                self.assertLess(p.spec[yes], p.spec[no], legs)
+                self.assertGreaterEqual(worst_apart(p, legs), 1, legs)
+            mk = {t: r["m"] for t, r in pair["records"].items()}
+            same = [(mk[p.monthly()], "yes"), (mk[p.other()], "no")]
+            self.assertEqual(p.spec[p.monthly()], p.spec[p.other()])
+            self.assertEqual(worst(p, tickers(same)), 1)        # fine on one shared number...
+            self.assertEqual(worst_apart(p, tickers(same)), 0)  # ...lost on two reads a hair apart
+            self.assertFalse(metal_link_arb.check(pair, same, 1))
+            apart = [(mk[p.monthly()], "yes"), (mk[p.other(1)], "no")]
+            self.assertTrue(metal_link_arb.check(pair, apart, 1))
 
-    def test_the_pin_holds_both_sources_and_every_market_with_its_dates(self):
-        p = Pair()
-        evs = p.events()
-        key = metal_link_arb.rules_key(metal_link_arb.pairs(evs)[0])
-        for e in evs:
-            self.assertIn(f"{e['event_ticker']} sources: {json.dumps(e['settlement_sources'], sort_keys=True)}", key)
-            for m in e["markets"]:
-                self.assertIn(f"{m['ticker']} {m['close_time']} {m['expected_expiration_time']}: "
-                              f"{m['rules_primary']} | {m['rules_secondary']}", key)
-
-    def test_a_pin_for_other_rules_or_another_twin_stays_on_paper(self):
-        evs = gap_pair().events()
-        self.pin(evs, rules="what the rules said yesterday")
-        self.assertTrue(STRATEGY.scan(ctx(fake_for(evs)))[0].meta["paper_only"])
-        mock.patch.stopall()
-        self.pin(evs, other="KXGOLDW-26JAN0117")
-        self.assertTrue(STRATEGY.scan(ctx(fake_for(evs)))[0].meta["paper_only"])
-
-    def test_moved_dates_or_sources_go_back_to_paper(self):
+    def test_too_good_to_be_true_is_never_booked(self):
+        # Under 80c a dollar, listed or in its book: Limits.refuse would turn it down as a real
+        # trade (a misread, or a quote nobody stands behind), so it isn't booked on paper either.
         p = gap_pair()
-        evs = p.events()
-        self.pin(evs)
-        moved = copy.deepcopy(evs)
-        for m in moved[0]["markets"] + moved[1]["markets"]:
-            m["expected_expiration_time"] = iso(p.close + 3600)   # still within the week: it pairs
-        sigs = STRATEGY.scan(ctx(fake_for(moved)))
-        self.assertTrue(sigs and all(s.meta["paper_only"] for s in sigs))
-        moved = copy.deepcopy(evs)
-        moved[1]["settlement_sources"][0]["url"] = GOLD_URL + "%26x%3D1"   # the same feed, listed anew
-        sigs = STRATEGY.scan(ctx(fake_for(moved)))
-        self.assertTrue(sigs and all(s.meta["paper_only"] for s in sigs))
-
-    def test_too_good_to_be_true_keeps_a_pinned_pair_on_paper(self):
-        # Any pair of the two events under 80c (listed or in its book) keeps all of them on paper:
-        # here NO on the daily's 4113 at 10c + YES on the monthly's 4092.99 at 51c, 61c.
-        p = gap_pair()
-        p.prices[p.other(2)] = (.90, .92)
-        evs = p.events()
-        self.pin(evs)
-        sigs = STRATEGY.scan(ctx(fake_for(evs)))
-        self.assertTrue(sigs and all(s.meta["paper_only"] for s in sigs))
-
-    def test_too_good_in_the_order_book_alone_keeps_the_pair_on_paper(self):
-        p = gap_pair()                     # listed at 92c
-        evs = p.events()
-        self.pin(evs)
-        c = fake_for(evs)
-        c.books[p.other()] = {"yes": [(.80, 40)], "no": [(.18, 40)]}   # NO at 20c in the book: 71c
-        sigs = STRATEGY.scan(ctx(c))
-        self.assertTrue(sigs and all(s.meta["paper_only"] for s in sigs))
+        p.prices[p.other(2)] = (.90, .92)   # NO 4113 at 10c + YES 4092.99 at 51c: 61c listed
+        sigs = STRATEGY.scan(ctx(fake_for(p.events())))
+        self.assertFalse([s for s in sigs if p.other(2) in {leg.ticker for leg in s.legs}])
+        p = gap_pair()                      # listed at 92c, but its book offers NO at 20c: 71c
+        c = fake_for(p.events())
+        c.books[p.other()] = {"yes": [(.80, 40)], "no": [(.18, 40)]}
+        self.assertFalse([s for s in STRATEGY.scan(ctx(c)) if p.other() in {leg.ticker for leg in s.legs}])
 
     def test_the_scan_plays_out_every_set_even_one_links_got_wrong(self):
         p = Pair()
@@ -813,13 +819,12 @@ class ScanTests(TempHome):
         self.assertIn(sorted([(p.monthly(1), "yes"), (p.other(4), "no")]),
                       [sorted((leg.ticker, leg.side) for leg in s.legs) for s in sigs])
 
-    def test_recheck_keeps_a_too_good_price_off_real_money(self):
+    def test_recheck_rebuilds_or_drops_a_too_good_price(self):
+        # Never called while proven() says no (the engine only rechecks real-money signals), but
+        # kept honest in case that ever changes.
         p = gap_pair()
-        evs = p.events()
-        self.pin(evs)
-        c = fake_for(evs)
+        c = fake_for(p.events())
         sig = STRATEGY.scan(ctx(c))[0]
-        self.assertFalse(sig.meta["paper_only"])
         again = STRATEGY.recheck(ctx(c), sig)
         self.assertEqual(sorted((leg.ticker, leg.side) for leg in again.legs),
                          sorted((leg.ticker, leg.side) for leg in sig.legs))
@@ -840,7 +845,7 @@ class ScanTests(TempHome):
         self.assertIsNone(STRATEGY.recheck(ctx(c, held={sig.legs[0].ticker}), sig))
 
     def test_a_scan_reads_few_order_books(self):
-        # Every market of both twins bid 12c over its odds, for both metals and twins: dozens of
+        # Every market of both twins bid 16c over its odds, for both metals and twins: dozens of
         # pairs under $1 by listed price. The scan reads the books of the best MAX_HOT only.
         cheap = []
         for metal in METALS:
@@ -850,7 +855,7 @@ class ScanTests(TempHome):
                     k = p.spec[p.other(i)]
                     f = p.fair(k)
                     if 2 < f < 80:
-                        p.prices[p.other(i)] = ((f + 12) / 100, (f + 14) / 100)
+                        p.prices[p.other(i)] = ((f + 16) / 100, (f + 18) / 100)
                 cheap.append(p)
         hot = sum(1 for p in cheap for s in metal_link_arb.links(metal_link_arb.pairs(p.events())[0])
                   if s["listed"] is not None and s["listed"] < 1)
@@ -888,8 +893,7 @@ class EngineTests(TempHome):
         self.assertIn("metal_link_arb", MODULES)
         self.assertEqual((STRATEGY.name, STRATEGY.kind), ("metal_link_arb", "arbitrage"))
         self.assertEqual(config.DEFAULTS["strategies"]["metal_link_arb"], {"mode": "paper"})
-        self.assertEqual(metal_link_arb.VERIFIED, {})   # no event pair's rules read by a person yet
-        self.assertFalse(STRATEGY.proven(None)[0])
+        self.assertEqual(STRATEGY.proven(None), (False, metal_link_arb.PAPER_ONLY))
 
     def test_paper_run_records_both_legs_and_buys_nothing(self):
         config.update({"strategies": {"metal_link_arb": {"mode": "paper"}}})
@@ -910,7 +914,7 @@ class EngineTests(TempHome):
         s = engine.run_once(c)
         self.assertTrue(s["ok"], s)
         self.assertEqual((s["live_trades"], s["paper_trades"], c.orders), (0, 1, []))
-        self.assertTrue(any("metal_link_arb: paper instead of live" in n and "checked by hand" in n
+        self.assertTrue(any("metal_link_arb: paper instead of live" in n and "paper only by design" in n
                             for n in s["notes"]))
 
     def test_promotion_never_turns_it_live(self):
