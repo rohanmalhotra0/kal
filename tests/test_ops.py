@@ -1218,6 +1218,22 @@ class DeployFileTests(unittest.TestCase):
         self.assertNotIn("secrets.", mc)
         self.assertNotIn("--order-probe", mc)
 
+    def test_install_check_runs_the_real_install_like_the_owner(self):
+        wf = read(".github", "workflows", "install-check.yml")
+        for bit in ("runs-on: ubuntu-24.04", "contents: read", "persist-credentials: false",
+                    "bash tools/install_check.sh", "schedule", "workflow_dispatch", "pull_request"):
+            self.assertIn(bit, wf)
+        self.assertNotIn("secrets.", wf)
+        # The same system as the server, and the README's own install line.
+        self.assertIn("Ubuntu 24.04", read("docs", "DEPLOY.md"))
+        self.assertIn("sudo bash /opt/kal/deploy/install.sh", read("README.md"))
+        sh = read("tools", "install_check.sh")
+        # No alert may leave the test machine: ntfy.sh goes nowhere, a stand-in takes them.
+        for bit in ("APP=/opt/kal", 'sudo bash "$APP/deploy/install.sh"', "kal_run 1 doctor",
+                    "127.0.0.1 ntfy.sh", "KAL_NTFY_SERVER=http://127.0.0.1:$CATCH"):
+            self.assertIn(bit, sh)
+        self.assertNotIn("--order-probe", sh)
+
     def test_docker(self):
         df = read("deploy", "Dockerfile")
         self.assertIn("FROM python:3.12-slim", df)

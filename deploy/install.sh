@@ -235,8 +235,9 @@ install -m 644 "$APP/deploy/kal-watch.service" /etc/systemd/system/kal-watch.ser
 install -m 644 "$APP/deploy/kal-watch.timer" /etc/systemd/system/kal-watch.timer
 systemctl daemon-reload
 systemctl enable kal >/dev/null 2>&1
-systemctl enable --now kal-watch.timer >/dev/null 2>&1
 systemctl restart kal
+# The watchdog's first look can come at once, so the bot starts first.
+systemctl enable --now kal-watch.timer >/dev/null 2>&1
 
 say "Quick check of Kalshi's API (no key needed)"
 kal selftest || echo "(Some checks failed. Read the lines above.)"

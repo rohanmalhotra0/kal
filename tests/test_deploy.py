@@ -13,7 +13,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 @unittest.skipUnless(shutil.which("bash"), "needs bash")
 class DeployScriptTests(unittest.TestCase):
     def test_shell_scripts_parse(self):
-        scripts = glob.glob(os.path.join(ROOT, "deploy", "*.sh"))
+        scripts = glob.glob(os.path.join(ROOT, "deploy", "*.sh")) + glob.glob(os.path.join(ROOT, "tools", "*.sh"))
         self.assertTrue(scripts)
         for path in scripts:
             r = subprocess.run(["bash", "-n", path], capture_output=True, text=True)
@@ -59,6 +59,31 @@ class DeployScriptTests(unittest.TestCase):
             text = f.read()
         self.assertIn('"$APP/deploy/kal-watch.timer" /etc/systemd/system/kal-watch.timer', text)
         self.assertIsNotNone(re.search(r"systemctl enable[^\n]*kal-watch\.timer", text))
+
+    def test_install_starts_the_bot_before_the_watchdog(self):
+        # On a new server the watchdog's first look comes at once (its boot delay is long
+        # past). If the bot weren't started yet, that look would be a false alarm.
+        with open(os.path.join(ROOT, "deploy", "install.sh")) as f:
+            text = f.read()
+        self.assertLess(text.index("systemctl restart kal"), text.index("systemctl enable --now kal-watch.timer"))
+
+    def test_install_check_refuses_to_run_outside_ci(self):
+        # It stops and kills the bot on purpose: on the server it must do nothing at all.
+        d = tempfile.mkdtemp(prefix="kal-ic-")
+        self.addCleanup(shutil.rmtree, d, True)
+        log = os.path.join(d, "calls")
+        for name in ("sudo", "systemctl", "curl"):
+            path = os.path.join(d, name)
+            with open(path, "w") as f:
+                f.write(f"#!/bin/sh\necho {name} \"$@\" >> {log}\n")
+            os.chmod(path, 0o755)
+        env = {k: v for k, v in os.environ.items() if k != "GITHUB_ACTIONS"}
+        env["PATH"] = d + ":" + env.get("PATH", "/usr/bin:/bin")
+        r = subprocess.run(["bash", os.path.join(ROOT, "tools", "install_check.sh")], env=env,
+                           capture_output=True, text=True, cwd=d)
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("CI only", r.stderr)
+        self.assertFalse(os.path.exists(log))
 
 
 if __name__ == "__main__":
