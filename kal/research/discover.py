@@ -186,19 +186,24 @@ def active_series(client, pool=ACTIVE_POOL):
 
     Kalshi has 15,000+ series and most are tiny or finished. An edge only helps where
     the bot can still trade, and busy series have the most settled history to test,
-    so research spends its daily budget there. Returns [] if the events call fails."""
+    so research spends its daily budget there. Returns [] if the events call fails.
+
+    A page at a time, keeping only each series' volume: all open events with their markets
+    is over 700 MB in Python, twice the server's memory cap."""
+    volume = {}
     try:
-        events = client.events(status="open", with_nested_markets="true")
+        pages = getattr(client, "event_pages", None)
+        for page in (pages(status="open", with_nested_markets="true") if pages
+                     else [client.events(status="open", with_nested_markets="true")]):
+            for ev in page:
+                s = ev.get("series_ticker")
+                if not s or s.startswith("KXMVE"):  # combo bets: not a series we'd trade
+                    continue
+                v = sum(num(m, "volume_24h") for m in ev.get("markets") or [])
+                volume[s] = volume.get(s, 0.0) + v
     except Exception as e:
         log.warning("research: couldn't list open events: %s", e)
         return []
-    volume = {}
-    for ev in events:
-        s = ev.get("series_ticker")
-        if not s or s.startswith("KXMVE"):  # combo bets: not a series we'd trade
-            continue
-        v = sum(num(m, "volume_24h") for m in ev.get("markets") or [])
-        volume[s] = volume.get(s, 0.0) + v
     busy = sorted((s for s, v in volume.items() if v > 0), key=lambda s: (-volume[s], s))
     return busy[:pool]
 
