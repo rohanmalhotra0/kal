@@ -670,8 +670,15 @@ class EngineTests(TempHome):
         self.assertEqual((s["live_trades"], c.orders), (0, []))
 
     def test_a_meeting_too_far_off_is_refused(self):
+        # 40 days off: past the run's events horizon (max_arb_days + 1), so never even seen.
+        # Seen but over max_arb_days (here 20, the horizon held open by a long research
+        # window): the risk check refuses it.
         config.update({"strategies": {"fed_link_arb": {"mode": "paper"}}})
         s = engine.run_once(fake_for(gap_meeting(40)))
+        self.assertTrue(s["ok"], s)
+        self.assertEqual((s["paper_trades"], s["signals"]), (0, 0))
+        config.update({"max_arb_days": 20, "research_hours_before_close": 1000})
+        s = engine.run_once(fake_for(gap_meeting(30)))
         self.assertTrue(s["ok"], s)
         self.assertEqual(s["paper_trades"], 0)
         self.assertIn("locks money up", db.query("SELECT status FROM signals")[0]["status"])

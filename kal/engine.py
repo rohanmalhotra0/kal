@@ -13,7 +13,7 @@ import traceback
 import uuid
 
 from . import books, config, db, fees, flow, gate, ledger, paper, risk, sizing
-from .client import Kalshi, KalshiError, UnknownSettlement, fee, fill_known, filled, is_transient, resting
+from .client import Kalshi, KalshiError, UnknownSettlement, fee, fill_known, filled, is_transient, resting, ts
 from .strategies import load_all
 from .strategies.base import Context
 
@@ -22,18 +22,103 @@ LIVE_MODES = ("paper", "live")
 RECONCILE_GRACE = 600   # seconds: an order missing from Kalshi this long after sending never landed
 
 
+DAY = 86400
+OPEN_EVENTS = (("status", "open"), ("with_nested_markets", "true"))   # every strategy's big list
+# Market fields no code reads (tests/test_engine_memory.py checks the code never names one).
+# The run's copy of all open events drops them: it must fit in the server's memory cap.
+UNREAD = ("price_ranges", "early_close_condition", "updated_time", "latest_expiration_time", "no_sub_title",
+          "settlement_timer_seconds", "price_level_structure", "response_price_units", "notional_value",
+          "notional_value_dollars", "functional_strike", "previous_price", "previous_price_dollars",
+          "last_price", "last_price_dollars", "open_interest", "open_interest_fp")
+
+
+def horizon_days(cfg):
+    """How far ahead any strategy can act. A locked-in trade must settle within max_arb_days:
+    Limits.refuse turns down later ones, on paper too. Bets look a few hours ahead (their
+    research's hours before close). Anything unreadable: no limit."""
+    try:
+        days = max(float(cfg["max_arb_days"]), float(cfg.get("research_hours_before_close") or 0) / 24)
+    except (KeyError, TypeError, ValueError):
+        return float("inf")
+    return days + 1
+
+
+def _due(v, until):
+    """True if v is a time no later than `until`. Missing or unreadable: False."""
+    try:
+        return bool(v) and ts(v) <= until
+    except Exception:
+        return False
+
+
+def _wanted(ev, until, keep):
+    """Keep an open event if one of its markets is due by `until`: it closes by then, or the
+    scheduled end a bet times itself by (the event's strike_date, the market's
+    occurrence_datetime: base.scheduled_end) comes by then. Or if the bot holds one of its
+    markets (`keep`), or anything can't be read: then the strategies judge it, as before."""
+    markets = ev.get("markets") if isinstance(ev, dict) else None
+    if not isinstance(markets, list) or _due(ev.get("strike_date"), until):
+        return True
+    for m in markets:
+        if not isinstance(m, dict) or m.get("ticker") in keep:
+            return True
+        try:
+            if ts(m["close_time"]) <= until:
+                return True
+        except Exception:
+            return True
+        if _due(m.get("occurrence_datetime"), until):
+            return True
+    return False
+
+
+def _lean(ev, pool):
+    """One open event, slimmed in place: the unread fields go, and each text is shared with
+    its copies (an event's markets repeat the same rules and times)."""
+    for m in ev.get("markets") or []:
+        if isinstance(m, dict):
+            for k in UNREAD:
+                m.pop(k, None)
+            for k, v in m.items():
+                if type(v) is str:
+                    m[k] = pool.setdefault(v, v)
+    return ev
+
+
 class RunCache:
     """Wraps the client for one run, so identical list calls (all open events, markets,
     series) hit the API once instead of once per strategy. Order books, balances and
-    orders always go straight through: those must be fresh."""
+    orders always go straight through: those must be fresh.
+
+    All open events with their markets is 350 MB of JSON (2026-10-29), over 700 MB in
+    Python: twice the server's cap (deploy/kal.service). So the run keeps only the events
+    a strategy can act on (scope()), read a page at a time, and slimmed (_lean)."""
 
     CACHED = ("events", "markets", "series")
 
     def __init__(self, client):
         self._client = client
         self._memo = {}
+        self._keep, self._horizon = frozenset(), None
         self.calls = 0  # API list calls actually made (for tests and the run summary)
         self.books_seen = {}  # ticker -> the first order book read this run (kal/books.py)
+
+    def scope(self, keep=(), horizon=None):
+        """Before the strategies scan: the events with these tickers (the bot's positions,
+        which some strategies count) stay whatever their date; the rest only if one of
+        their markets closes within `horizon` days (default: horizon_days of the config)."""
+        self._keep, self._horizon = frozenset(keep), horizon
+        self._memo.pop(("events", (), OPEN_EVENTS), None)
+
+    def _open_events(self):
+        days = self._horizon if self._horizon is not None else horizon_days(config.load())
+        until = time.time() + days * DAY
+        pages = getattr(self._client, "event_pages", None)
+        pages = pages(**dict(OPEN_EVENTS)) if pages else [self._client.events(**dict(OPEN_EVENTS))]
+        pool, out = {}, []
+        for page in pages:
+            out += [_lean(ev, pool) for ev in page if _wanted(ev, until, self._keep)]
+        return out
 
     def orderbook(self, ticker):
         book = self._client.orderbook(ticker)
@@ -54,7 +139,7 @@ class RunCache:
             key = (name, args, tuple(sorted(kwargs.items())))
             if key not in self._memo:
                 self.calls += 1
-                self._memo[key] = attr(*args, **kwargs)
+                self._memo[key] = self._open_events() if key == ("events", (), OPEN_EVENTS) else attr(*args, **kwargs)
             return list(self._memo[key])
         return cached
 
@@ -469,6 +554,8 @@ def _trade(client, cfg, summary):
                                paper_capital)
     held_live, held_paper = {p["ticker"] for p in positions}, paper.held()
     paper_kinds = paper.open_cost_by_kind()   # kinds that may hold only a share of paper money
+    if hasattr(client, "scope"):
+        client.scope(held_live | held_paper, horizon_days(cfg))   # what the run's events list keeps
 
     # Bet smaller after losses (Grossman-Zhou style); arbitrage sizing doesn't use this.
     live_peak = max(ledger.peak_equity() or 0, cfg["budget"])
