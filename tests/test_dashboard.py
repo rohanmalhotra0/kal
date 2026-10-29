@@ -874,6 +874,16 @@ class ConfigApiTests(Base):
         config.update({"enabled": False})
         self.assertEqual(self.post("/api/config", {"env": "demo"}).status_code, 200)
 
+    def test_switching_to_prod_puts_the_real_budget_back(self):
+        config.update({"budget": 300})
+        self.assertEqual(self.post("/api/config", {"env": "demo"}).status_code, 200)
+        self.assertEqual(self.post("/api/config", {"budget": 5000}).status_code, 200)   # practice
+        r = self.post("/api/config", {"env": "prod"})
+        self.assertEqual(r.status_code, 200, r.get_json())
+        self.assertEqual(config.load()["budget"], 300)
+        self.assertEqual(r.get_json()["notes"],
+                         ["Back to the real-money settings: budget $300. Settings on demo were practice."])
+
     def test_switching_exchange_waits_for_a_trade_run(self):
         """Turned off mid-run, the run still finishes its basket: switching then would book
         the rest of it in the other exchange's books."""

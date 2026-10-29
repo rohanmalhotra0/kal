@@ -569,8 +569,10 @@ class SoldThenSettledTests(TempHome):
 
 
 class DemoPracticeTests(TempHome):
-    """Strategy modes are one setting for both exchanges. One turned live for practice on
-    demo (fake money) goes back to paper on the switch to prod, and the owner is told."""
+    """Strategy modes, the budget and the money limits are one setting for both exchanges.
+    Back on prod each gets what prod had: one turned live for practice on demo (fake money)
+    goes back to paper, a practice budget or cap goes back to the real one, and the owner
+    is told."""
 
     def cli(self, *argv):
         out = io.StringIO()
@@ -584,7 +586,7 @@ class DemoPracticeTests(TempHome):
         config.update({"strategies": {"ladder_arb": {"mode": "live"}}})   # fake-money practice
         config.switch({"env": "prod"})                                    # then real money
         self.assertEqual(config.load()["strategies"]["ladder_arb"]["mode"], "paper")
-        config.update({"enabled": True})
+        config.update({"enabled": True, "budget": 60})   # no real budget was saved: set on prod
         orders_proven("prod")
         c = fake_for(ladder_event())
         set_book(c, "LAD-60", .62, .64, bid_size=15)
@@ -608,6 +610,93 @@ class DemoPracticeTests(TempHome):
         self.assertEqual(code, 0)
         self.assertIn("Back to the real-money modes: ladder_arb paper.", text)
         self.assertIn("Live (real money): basket_arb.", text)
+
+    def practice(self, **loose):
+        """$300 of real money on prod, then demo with looser settings for practice."""
+        config.update({"budget": 300.0})
+        config.switch({"env": "demo"})
+        config.update(loose)
+
+    def test_a_practice_budget_never_becomes_the_real_one(self):
+        self.practice(budget=5000.0)   # practice with more fake money
+        self.assertEqual(config.switch({"env": "prod"})["budget"], 300.0)
+
+    def test_practice_limits_never_reach_real_money(self):
+        self.practice(budget=1000.0, max_per_arb=500.0, max_per_trade=50.0, kelly_fraction=1.0,
+                      daily_loss_limit=1.0, strategies={"bracket_arb": {"mode": "live", "verified": True}})
+        cfg = config.switch({"env": "prod"})
+        self.assertEqual((cfg["budget"], cfg["max_per_arb"], cfg["max_per_trade"], cfg["kelly_fraction"],
+                          cfg["daily_loss_limit"]), (300.0, 30.0, 10.0, 0.25, 0.10))
+        self.assertEqual(cfg["strategies"]["bracket_arb"], {"mode": "paper", "verified": False})
+        config.update({"enabled": True, "strategies": {**_all_off(), "basket_arb": {"mode": "live"}}})
+        orders_proven("prod")
+        c = fake_with_arb(balance=1000.0)   # the account holds more than the bot's $300
+        s = engine.run_once(c)
+        self.assertTrue(s["ok"], s)
+        self.assertTrue(c.orders)
+        self.assertLessEqual(sum(n * p for _, _, n, p in c.orders), 30.0)   # max_per_arb, not 500
+
+    def test_every_money_limit_goes_back(self):
+        mine = {"budget": 300.0, "cash_floor": 20.0, "max_per_trade": 8.0, "max_per_arb": 25.0,
+                "max_per_event": 15.0, "max_exposure": 0.4, "max_arb_days": 20, "min_arb_apr": 0.3,
+                "daily_loss_limit": 0.05, "kelly_fraction": 0.2, "max_consecutive_errors": 2,
+                "reinvest_profits": False, "auto_promote": False}
+        config.update(mine)
+        config.switch({"env": "demo"})
+        config.update({"budget": 5000.0, "cash_floor": 0.0, "max_per_trade": 50.0, "max_per_arb": 500.0,
+                       "max_per_event": 200.0, "max_exposure": 1.0, "max_arb_days": 365, "min_arb_apr": 0.0,
+                       "daily_loss_limit": 1.0, "kelly_fraction": 1.0, "max_consecutive_errors": 50,
+                       "reinvest_profits": True, "auto_promote": True})
+        cfg = config.switch({"env": "prod"})
+        self.assertEqual({k: cfg[k] for k in mine}, mine)
+
+    def test_a_bracket_check_made_on_demo_buys_nothing_real(self):
+        """`set env prod` prints how to turn a strategy live. Doing that for bracket_arb must
+        not bring back the hand check made on demo."""
+        from tests.test_arb_strategies import bracket_event, fake_for
+        config.update({"budget": 60.0, "strategies": _all_off()})
+        config.switch({"env": "demo"})
+        config.update({"strategies": {"bracket_arb": {"mode": "live", "verified": True}}})
+        text = self.cli("set", "env", "prod")[1]
+        self.assertIn("set strategies.bracket_arb.mode live", text)
+        self.assertEqual(self.cli("set", "strategies.bracket_arb.mode", "live")[0], 0)
+        config.update({"enabled": True})
+        orders_proven("prod")
+        c = fake_for(bracket_event())
+        s = engine.run_once(c)
+        self.assertTrue(s["ok"], s)
+        self.assertEqual(c.orders, [])
+        self.assertEqual(s["paper_trades"], 1)
+
+    def test_kal_set_env_prod_names_what_went_back(self):
+        self.practice(budget=5000.0, kelly_fraction=1.0, strategies={"bracket_arb": {"verified": True}})
+        code, text = self.cli("set", "env", "prod")
+        self.assertEqual(code, 0)
+        self.assertIn("Back to the real-money settings: budget $300, kelly_fraction 0.25, "
+                      "bracket_arb.verified false. Settings on demo were practice.", text)
+
+    def test_a_budget_typed_with_the_switch_is_checked_against_prod(self):
+        self.practice(budget=3000.0)
+        with mock.patch("kal.setup.kalshi_balance", return_value=(True, 5000.0)) as balance, \
+                mock.patch.object(cli, "_tty", return_value=False):
+            code, text = self.cli("on", "--env", "prod", "--budget", "3000")
+        self.assertEqual(code, 2)
+        self.assertIn("Not changed. That's more than double the budget now ($300).", text)
+        balance.assert_called_once_with("prod")
+        cfg = config.load()
+        self.assertEqual((cfg["env"], cfg["enabled"]), ("demo", False))
+        code, text = self.cli("on", "--env", "prod")   # no budget typed: the real one comes back
+        self.assertEqual(code, 0)
+        self.assertIn("Budget: $300.00.", text)
+
+    def test_a_config_from_before_this_goes_back_safe(self):
+        """It left prod before the settings were saved. Each goes to the safer of where it is
+        and its default, so the budget must be set again on prod."""
+        config.update({"env": "demo", "budget": 3000.0, "max_per_arb": 500.0, "max_per_trade": 5.0,
+                       "strategies": {"bracket_arb": {"verified": True}}})
+        cfg = config.switch({"env": "prod"})
+        self.assertEqual((cfg["budget"], cfg["max_per_arb"], cfg["max_per_trade"]), (0.0, 30.0, 5.0))
+        self.assertIs(cfg["strategies"]["bracket_arb"]["verified"], False)
 
 
 class UnreadableReplyTests(TempHome):

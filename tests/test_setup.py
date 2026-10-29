@@ -211,6 +211,19 @@ class SetupTests(TempHome):
         self.assertEqual(config.load()["budget"], 100.0)
         self.assertFalse([p for p in self.prompts if "again to confirm" in p])
 
+    def test_real_money_offers_the_real_budget_not_the_practice_one(self):
+        self.running_bot()                                                     # $300 of real money
+        code, text = self._run(["", "", "practice", "1000", "1000", "", "no"])   # practice with $1000
+        self.assertEqual((code, config.load()["budget"]), (0, 1000.0), text)
+        self.prompts.clear()
+        code, text = self._run(["", "", "real", "", "", "no"])                 # Enter keeps the budget
+        self.assertEqual(code, 0, text)
+        cfg = config.load()
+        self.assertEqual((cfg["env"], cfg["budget"]), ("prod", 300.0))
+        self.assertIn("4. How many dollars can the bot use? It can never lose more than this [300]: ",
+                      self.prompts)
+        self.assertIn("Back to the real-money settings: budget $300.", text)
+
     def test_with_no_terminal_a_big_budget_is_refused(self):
         self.running_bot()
         code, text = self._run(["", "", "", "3000"], balance=300.0, interactive=False)

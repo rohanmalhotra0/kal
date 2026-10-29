@@ -819,8 +819,7 @@ def apply_config(changes, sched):
         raise BadRequest(str(e))
     if new["enabled"] and not now["enabled"]:
         sched.run_now("trade")  # don't make someone who just pressed ON wait 5 minutes
-    note = config.back_on_prod_note(config.back_on_prod(now, new))
-    return new, [note] if note else []
+    return new, config.back_on_prod_notes(now, new)
 
 
 # ---------- the app ----------

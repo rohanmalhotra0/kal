@@ -480,14 +480,11 @@ SWITCH_BUSY = "A trade run is still going. Try again in a minute."
 
 
 def _back_on_paper(before, cfg):
-    """Lines naming the strategies a switch to prod changed back to their real-money modes."""
-    moved = config.back_on_prod(before, cfg)
-    if not moved:
-        return []
-    lines = [config.back_on_prod_note(moved)]
-    off = [n for n, m in moved.items() if m != "live"]
-    if off:
-        lines.append(f"To trade one with real money: {_cmd(f'set strategies.{off[0]}.mode live')}")
+    """Lines naming what a switch to prod changed back to its real-money value."""
+    lines = config.back_on_prod_notes(before, cfg)
+    off = [n for n, m in config.back_on_prod(before, cfg).items() if m != "live"]
+    if off:   # right after the modes line, which comes first
+        lines.insert(1, f"To trade one with real money: {_cmd(f'set strategies.{off[0]}.mode live')}")
     return lines
 
 
@@ -508,7 +505,8 @@ def cmd_on(args):
     if env and env != stored["env"] and stored["enabled"]:
         say(f"Turn the bot off first: {_cmd('off')}")   # a run may be mid-basket on this exchange
         return 2
-    if args.budget is not None and not _budget_ok(args.budget, stored["budget"], env or stored["env"]):
+    to = env or stored["env"]   # back on prod the budget is prod's own, so a new one is checked against it
+    if args.budget is not None and not _budget_ok(args.budget, config.budget_on(stored, to), to):
         return 2
     changes = {"enabled": True}
     if args.budget is not None:

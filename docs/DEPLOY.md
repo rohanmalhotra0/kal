@@ -212,6 +212,8 @@ best YES buyer pays $0.90 or less. Nobody trades that far off, so they cost noth
 
 The budget is the most the bot can ever lose in total. It may reinvest its own profits.
 Demo and real money keep separate books, so demo results never count as real profit.
+What you change on demo (budget, caps, modes) is practice too. Back on prod, each goes
+back to what it was on prod. On a new server that's a $0 budget, so set it as above.
 
 Tip: Kalshi pays interest on balances of **$250 or more**.
 
