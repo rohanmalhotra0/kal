@@ -1208,12 +1208,12 @@ class DeployFileTests(unittest.TestCase):
         ci = read(".github", "workflows", "ci.yml")
         self.assertIn("python-version: \"3.12\"", ci)
         self.assertIn("python -m unittest discover -s tests -t . -v", ci)
-        self.assertIn("actions/checkout@v4", ci)
+        self.assertIn("actions/checkout@v5", ci)
 
     def test_market_check_is_read_only(self):
         mc = read(".github", "workflows", "market-check.yml")
         for bit in ("workflow_dispatch", "schedule", "python -m kal selftest", "python -m kal scan",
-                    "python -m kal research --quick", "actions/upload-artifact@v4", "contents: read"):
+                    "python -m kal research --quick", "actions/upload-artifact@v6", "contents: read"):
             self.assertIn(bit, mc)
         self.assertNotIn("secrets.", mc)
         self.assertNotIn("--order-probe", mc)
