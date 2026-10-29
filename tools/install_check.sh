@@ -118,10 +118,9 @@ same "the kal command" "$(owner /usr/local/bin/kal)" "root:root 755"
 check "a dashboard password was made" sudo grep -qE '^KAL_DASHBOARD_PASSWORD=.{20,}$' "$ETC/kal.env"
 check "an alerts topic was made" sudo grep -qxE 'kal-[a-km-np-z2-9]{20}' "$DATA/ntfy_topic"
 check "the bot can read its code" sudo runuser -u kal -- test -r "$APP/kal/__main__.py"
-refuse "the bot can't change its code" sudo runuser -u kal -- test -w "$APP/kal/__main__.py"
-refuse "the bot can't add code" sudo runuser -u kal -- test -w "$APP/kal"
-refuse "the bot can't change its Python packages" \
-  sudo runuser -u kal -- sh -c 'test -w /opt/kal-venv/lib/python3*/site-packages'
+writable=$(sudo runuser -u kal -- find "$APP" /opt/kal-venv -writable -not -type l 2>/dev/null | head -n 5)
+same "the bot can't change its code or Python packages" "$writable" ""
+[ -z "$writable" ] || for p in $writable; do sudo stat -c '      %U:%G %a %n' "$p"; done
 refuse "the bot can't read the settings file" sudo runuser -u kal -- cat "$ETC/kal.env"
 refuse "the update's test user can't read the bot's data" sudo runuser -u kal-stage -- ls "$DATA"
 same "the kal user can't log in" "$(getent passwd kal | cut -d: -f7)" /usr/sbin/nologin
