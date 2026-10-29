@@ -62,6 +62,9 @@ status: **testing** (add the PR link), **built**, or **rejected** (say why in on
 - Two series with the same words can still settle on different numbers: Kalshi settles
   each series on its own, at its own time (AAA gas, Jul 13 2026, #20). A link across
   series needs settled pairs that always agree, and even then keeps that risk.
+- The rules may not name the source at all. Gold's feed changed 3 times in 6 months, on
+  different dates per series, with the words unchanged (#21). Check each event's
+  settlement_sources too.
 
 ## Ideas, best first
 
@@ -362,6 +365,7 @@ status: **testing** (add the PR link), **built**, or **rejected** (say why in on
   - Gold, silver, copper and Brent, daily vs monthly: they close together only at month end.
     0 of 2 broke for each. Gold had 35 gap hours, e.g. Aug 31, +5.5c with 788 and 2,317
     traded. In some months only the monthly rules name a futures contract (copper, Brent).
+    Idea #21 has the full test.
   - WTI weekly vs daily (Fridays): 0 of 14 broke, 5 gap hours. But only the daily rules say
     when it rolls to the next futures month. Unsafe until that is known.
   - AAA gas: idea #20.
@@ -390,16 +394,48 @@ status: **testing** (add the PR link), **built**, or **rejected** (say why in on
 - Not built: no set is locked in, and little is left. Probe: branch `probe/aaa-gas` (never
   merged).
 
-**21. Gold and silver, daily vs monthly at month end** - untested
-- What: like #19, KXGOLDD and KXGOLDMON (and silver) ask about one price at month end. YES
-  above a lower strike in one + NO above a higher one in the other pays $1, if both settle
-  on the same number.
-- From #19's probe: 0 of 2 settled pairs broke for each; gold had 35 gap hours (best Aug 31,
-  +5.5c, with 788 and 2,317 traded).
-- Test: read both rules in full; collect every settled month-end pair the API has; check
-  they always settled on the same number, and at what times (#20 shows identical words are
-  not enough). In some months only the monthly rules named a futures contract (copper,
-  Brent): any such difference means reject.
+**21. Gold and silver, daily vs monthly at month end** - tested 2026-10-29: gold and silver built as `metal_link_arb` (paper only); copper, Brent and natural gas rejected
+- What: KXGOLDMON asks "is gold above $X at 5 PM ET on the month's last trading day?". KXGOLDD
+  (Mon-Thu) or KXGOLDW (Fridays; there is no Friday daily) asks it about the same minute. YES
+  "above x" in one + NO "above y" (y >= x) in the other pays $1 if both settle on one number.
+  Silver the same (KXSILVERD/W/MON).
+- The words match since May: "the close price of the 1-minute candlestick for gold on <date> at
+  5:00 PM EDT is above <X> USD/t.oz", "rounded to the nearest 2 decimal places", the same no-data
+  line. One terms PDF (COMMODITIES): "Above X" means strictly greater than X.
+- But the words never name the source. Only each event's settlement_sources does, and Kalshi
+  moved each series on its own date. Gold: Pyth XAU/USD from April, Metal.Index.GOLD (daily Aug 3,
+  monthly Sep 30), Metal.Index.1OZGOLD (daily Sep 21, weekly Sep 25, monthly Oct 30). Silver:
+  XAG/USD, then Metal.Index.SILVER (daily Jul 30, monthly Sep 30).
+- Each series settles on its own. Daily and weekly about 1 hour after 5 PM. Monthly 3 to 68
+  hours later, in one batch with every commodity monthly. The terms use a correction issued
+  "within twenty-four (24) hours": one can land between the two settlements, and then the two
+  settle on different numbers.
+- Settled: 14 month-end pairs (Mar-Sep 2026). 12 settled on the same number. Both misses were
+  Mar 31, when the monthly had other words and source ("open gold price", TradingView): gold
+  4667.88 vs 4668.88, silver 75.13 vs 75.1094. With the same words: 10 of 10 matched. In 3 the
+  two events named different feeds and still matched. 0 sets lost.
+- Gaps (hourly, after fees, passing the bot's rules): gold at all 8 month ends, 184 hours (39
+  with trades on both legs). Silver at 7, 147 hours (25). Best with trades: gold Aug 31, NO daily
+  "above 4452" at 41c + YES monthly "above 4451.99" at 50c, +5.5c (2,317 and 788 traded).
+  Silver Jun 30, NO daily "above 58" at 26c + YES monthly "above 57.99" at 63c, +8c.
+- The biggest gaps were in pairs whose rules differed. The market prices real differences.
+- Live (Oct 29, Oct 30 weekly vs monthly): nothing under $1, even before fees.
+- Copper and Brent: rejected. Until August their rules named a futures contract (copper
+  "CCU6"). Aug 31 copper: daily on the Pyth index settled 6.69, monthly on CCU6 6.58; 3 sets
+  lost both legs. Both use Pyth indexes with the same words since Sep 30 (1 settled pair): look
+  again after more month ends. Natural gas: 2 pairs settled on different numbers (2.759 vs
+  2.757, 2.93 vs 2.934).
+- Built as `metal_link_arb`, paper only. It pairs a monthly event with its daily or weekly twin
+  only when both have the same words (date and strike taken out), the same settlement_sources
+  feed (the one Kalshi names now), the same 5 PM close and strike_date, "greater" strikes on
+  the cent, and no futures contract. Sets: YES "above x" + NO "above y", one leg in each
+  series, with y at least a cent over x, played out at every price first, even with the two
+  reads half a cent apart or a tie read either way (an independent review found same-strike
+  sets lose both legs on a sub-cent gap, and the monthly doesn't declare its rounding). A set
+  too good to be true isn't booked, even on paper. It counts the money as tied up until 8
+  days after the close (the latest the terms allow). Paper only by design: there is no pin
+  list, because the series settle apart and the source changes outside the words.
+- Probes: branches `probe/metals` and `probe/metal-link-dry` (never merged).
 
 ## Sources
 

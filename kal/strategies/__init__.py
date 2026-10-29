@@ -3,7 +3,7 @@ import importlib
 import logging
 
 MODULES = ["basket_arb", "ladder_arb", "date_ladder_arb", "fed_link_arb", "exact_link_arb", "range_link_arb",
-           "bracket_arb", "favorites", "mentions", "longshot_fade"]
+           "metal_link_arb", "bracket_arb", "favorites", "mentions", "longshot_fade"]
 log = logging.getLogger(__name__)
 
 
