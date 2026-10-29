@@ -25,7 +25,7 @@ import re
 import time
 
 from ..client import fee, price, ts
-from ..risk import too_late, yearly_return
+from ..risk import too_good, too_late, yearly_return
 from .base import Leg, Signal, Strategy, plain_payouts
 
 MIN_PROFIT = 0.05      # dollars per signal, after fees
@@ -184,15 +184,21 @@ def allocate(ctx, candidates):
             sig = make(basket)
             if too_late(sig.closes_at, ctx.cfg):
                 continue   # Limits.refuse turns it down: it mustn't take budget from the rest first
-            ranked.append((yearly(sig), quotes, make, pay))
-    for _, quotes, make, pay in sorted(ranked, key=lambda r: -r[0]):
-        tickers = {q[0] for q in quotes}
-        basket = locked_basket(quotes, min(cap, left), partial, pay)  # resized to what's left
-        if tickers & used or not basket:
-            continue
-        used |= tickers
-        left -= basket["cost"]
-        out.append(make(basket))
+            ranked.append((yearly(sig), quotes, make, pay, too_good(sig)))
+    ranked.sort(key=lambda r: -r[0])
+    # Real sets first. One Limits.refuse turns down as too good to be true (a misread?) is still
+    # shown, but only with budget and tickers no real set wanted.
+    for misreads in (False, True):
+        for _, quotes, make, pay, misread in ranked:
+            if misread != misreads:
+                continue
+            tickers = {q[0] for q in quotes}
+            basket = locked_basket(quotes, min(cap, left), partial, pay)  # resized to what's left
+            if tickers & used or not basket:
+                continue
+            used |= tickers
+            left -= basket["cost"]
+            out.append(make(basket))
     return sorted(out, key=lambda s: -yearly(s))
 
 

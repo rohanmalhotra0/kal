@@ -784,11 +784,24 @@ class ScanTests(TempHome):
         patcher.start()
         self.addCleanup(patcher.stop)
 
-    def test_only_a_pinned_pair_with_the_same_rules_may_trade_live(self):
-        evs = gap_pair().events()
-        self.pin(evs)
-        self.assertFalse(STRATEGY.scan(ctx(fake_for(evs)))[0].meta["paper_only"])
+    def test_only_a_disjoint_set_of_a_pinned_pair_may_trade_live(self):
+        # If one event got no data (every strike No) while the other settled on the price, only
+        # NO + NO still pays. So the other sets stay on paper even for a pinned pair.
+        for gap, live in ((disjoint_gap, True), (sell3_gap, False), (superset_gap, False), (tail_gap, False)):
+            mock.patch.stopall()
+            evs = gap_pair(gap=gap).events()
+            self.pin(evs)
+            sigs = STRATEGY.scan(ctx(fake_for(evs)))
+            self.assertTrue(sigs, gap.__name__)
+            self.assertEqual(not sigs[0].meta["paper_only"], live, (gap.__name__, sigs[0].meta["set"]))
         self.assertEqual(STRATEGY.proven(None), (True, "only event pairs a person checked by hand (VERIFIED)"))
+
+    def test_sure_needs_every_set_to_survive_one_event_without_data(self):
+        p = Pair()
+        pair = range_link_arb.pairs(p.events())[0]
+        for s in range_link_arb.links(pair):
+            self.assertTrue(range_link_arb.check(pair, s["legs"], s["pays"]), s["set"])
+            self.assertEqual(range_link_arb.sure(pair, s["legs"], s["pays"]), s["set"] == "disjoint", s["set"])
 
     def test_a_pin_for_other_rules_or_another_ladder_stays_on_paper(self):
         evs = gap_pair().events()
@@ -808,11 +821,12 @@ class ScanTests(TempHome):
         sigs = STRATEGY.scan(ctx(fake_for(moved)))
         self.assertTrue(sigs and all(s.meta["paper_only"] for s in sigs))
 
-    def test_too_good_to_be_true_stays_on_paper_even_if_pinned(self):
-        # Any set of the pair under 80c a dollar (listed or in its book) keeps it on paper: a
-        # $1 set at 79c, or a $2 set at $1.59.
+    def test_too_good_to_be_true_keeps_a_pinned_pair_on_paper(self):
+        # Any set of the pair under 80c a dollar (listed or in its book) keeps all of it on paper:
+        # a $1 set at 79c, or a $2 set at $1.59. A real disjoint gap there then trades on paper too.
         for which, bid in ((9, .26), (5, .68)):   # superset at 79c; sell3 at $1.59
             p = Pair()
+            p.prices.update(disjoint_gap(p))
             p.prices[p.bracket(which)] = (bid, bid + .02)
             evs = p.events()
             mock.patch.stopall()
@@ -821,9 +835,32 @@ class ScanTests(TempHome):
             self.assertTrue(sigs and all(s.meta["paper_only"] for s in sigs), which)
 
     def test_a_2_dollar_set_is_not_too_good_at_a_1_dollar_bar(self):
-        evs = gap_pair().events()          # sell3 at $1.87 listed: over 2 x 80c
+        # sell3 at $1.87 listed is over 2 x 80c: it doesn't mark the pair too good, so the
+        # pair's disjoint gap may still trade live.
+        p = gap_pair()
+        p.prices.update(disjoint_gap(p))
+        evs = p.events()
         self.pin(evs)
-        self.assertFalse(STRATEGY.scan(ctx(fake_for(evs)))[0].meta["paper_only"])
+        sigs = STRATEGY.scan(ctx(fake_for(evs)))
+        self.assertEqual({s.meta["set"]: s.meta["paper_only"] for s in sigs}.get("disjoint"), False)
+        self.assertIn("sell3", [s.meta["set"] for s in sigs])
+
+    def test_stale_quotes_on_one_pair_cant_take_every_book_slot(self):
+        # Two hours of DOGE with "too good" stale quotes (refused anyway) and one real BTC gap:
+        # the BTC set still gets its order books read and trades on paper.
+        btc = gap_pair()
+        stale = []
+        for hour in (14, 15):
+            d = Pair("KXDOGE", hour=hour)
+            d.prices.update({d.bracket(i): (.60, .62) for i in range(N)})
+            stale += d.events()
+        c = fake_for(btc.events() + stale)
+        read, real = [], c.orderbook
+        c.orderbook = lambda t: read.append(t) or real(t)
+        sigs = STRATEGY.scan(ctx(c))
+        self.assertIn(btc.et, [s.event for s in sigs])
+        self.assertTrue(any(t.startswith("KXBTC") for t in read))
+        self.assertLessEqual(len({t for t in read if t.startswith("KXDOGE")}), 3 * range_link_arb.PER_PAIR * 2)
 
     def test_too_good_by_listed_price_alone_keeps_the_pair_on_paper(self):
         # A $2 set at $1.59 listed, never quoted (its bracket is held), still keeps the pair on paper.
@@ -859,17 +896,17 @@ class ScanTests(TempHome):
         self.assertFalse([s for s in sigs if any(leg.ticker == p.bracket(4) and leg.side == "yes" for leg in s.legs)])
 
     def test_recheck_keeps_a_too_good_price_off_real_money(self):
-        p = gap_pair()
+        p = gap_pair(gap=disjoint_gap)
         evs = p.events()
         self.pin(evs)
         c = fake_for(evs)
         sig = STRATEGY.scan(ctx(c))[0]
-        self.assertFalse(sig.meta["paper_only"])
+        self.assertEqual((sig.meta["set"], sig.meta["paper_only"]), ("disjoint", False))
         again = STRATEGY.recheck(ctx(c), sig)
         self.assertEqual(sorted((leg.ticker, leg.side) for leg in again.legs),
                          sorted((leg.ticker, leg.side) for leg in sig.legs))
-        self.assertEqual(again.payout_min, again.legs[0].count * 2)
-        c.books[p.bracket(5)] = {"yes": [(.75, 40)], "no": [(.23, 40)]}   # NO bracket now 25c: $1.52 < $1.60
+        self.assertEqual(again.payout_min, again.legs[0].count * 1)
+        c.books[p.bracket(2)] = {"yes": [(.40, 40)], "no": [(.58, 40)]}   # NO bracket now 60c: 70c < 80c
         self.assertIsNone(STRATEGY.recheck(ctx(c), sig))
 
     def test_recheck_refuses_near_the_close_or_a_set_it_didnt_make(self):

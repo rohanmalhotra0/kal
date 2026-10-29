@@ -7,7 +7,8 @@ KXBTC/KXBTCD, KXETH/KXETHD, KXSOLE/KXSOLD, KXXRP/KXXRPD, KXDOGE/KXDOGED, KXBNB/K
 KXHYPE/KXHYPED (hourly and 5 PM), KXSHIBA/KXSHIBAD (5 PM). Both settle on one number. Each
 bracket starts one tick above a ladder strike and ends on one, and "above" means strictly
 greater. So these sets pay whatever the price, with a bracket's ends counted in or out (the
-terms say in; nothing here needs it), and even if no data comes and every strike resolves No:
+terms say in; nothing here needs it), and if no data comes and every strike of both events
+resolves No:
   superset:  YES "above K" + NO a bracket (or the top tail) above K           pays at least $1
   disjoint:  NO "above K" + NO a bracket (or the bottom tail) at or under K   pays at least $1
   sell3:     NO a bracket + YES "above" under it + NO "above" at its top      pays at least $2
@@ -17,16 +18,20 @@ Never the two that look alike but aren't safe:
     rules never say it's rounded (BTC 71799.995 is in no bracket);
   YES "below" + YES "above" loses both if no data comes (SOL, XRP, BNB and HYPE: "affected
     strikes resolve to No").
+If only ONE event's strikes went No while the other settled on the price, only disjoint
+still pays. So only a set that survives that too (sure()) may ever use real money; the rest
+stay on paper even for a pinned pair.
 
 Real Kalshi data (docs/RESEARCH.md, idea #19, 2026-10-29): 0 broken links in about 4,000
 settled event pairs, every pair on the same number. Gaps are rare and small: 69 hours in 60
 days passed the bot's rules (most in thin coins in mid-September), 5 in the last 30 days,
 1-2c each. Prices came from candles, which show no depth.
 
-Paper only: nothing yet shows these fill at size. Real money only goes to an event pair a
-person pinned in VERIFIED, with every market's rules word for word and its dates, and even
-then never while a set looks too good to be true (too_good, at scan and again just before
-buying). It is empty.
+Paper only: nothing yet shows these fill at size. Real money only goes to a disjoint set of an
+event pair a person pinned in VERIFIED, with every market's rules word for word and its dates,
+and even then never while a set looks too good to be true (too_good, at scan and again just
+before buying). It is empty. One risk no check here can see: if one series ever rounded the
+settled price and the other didn't, any set could lose (0 of about 4,000 settled pairs did).
 
 It fails closed. A pair of events trades only if:
   - every market reads exactly as Kalshi words them now for that coin, with only the numbers
@@ -52,6 +57,7 @@ from .ladder_arb import MIN_TIME_LEFT, OPEN, allocate, close_ts, locked_basket, 
 
 MONTHS = "jan feb mar apr may jun jul aug sep oct nov dec".split()
 MAX_HOT = 20   # sets whose order books one scan reads (the best by listed price): 60 books at most
+PER_PAIR = 4   # of those, at most this many from one event pair, so one coin's stale quotes can't take them all
 
 # The second paragraph of the rules, word for word (lowercase) as each coin has it (2026-10-29).
 _NOT_ALL = ("not all cryptocurrency price data is the same. while checking a source like google or coinbase may "
@@ -407,6 +413,23 @@ def check(pair, legs, pays):
     return True
 
 
+def sure(pair, legs, pays):
+    """check(), and also if only one of the two events gets no data (every strike of it No)
+    while the other settles on the price. Only disjoint (NO + NO) passes. Real money needs it."""
+    if not check(pair, legs, pays):
+        return False
+    recs = [(pair["records"][m["ticker"]], side) for m, side in legs]
+    for event in (pair["range"], pair["above"]):
+        dead = {r["m"]["ticker"] for r in event["markets"]}   # this event's strikes all resolve No
+        for v in _prices(pair):
+            for lo_in in (True, False):
+                for hi_in in (True, False):
+                    if sum((r["m"]["ticker"] not in dead and _yes(r, v, lo_in, hi_in)) == (side == "yes")
+                           for r, side in recs) < pays:
+                        return False
+    return True
+
+
 def too_good(every, quoted):
     """True if any set costs less than pays / (1 + risk.MAX_ARB_ROI), listed or in its order
     book: too good to be true (a misread, or a quote nobody stands behind). Then even a pinned
@@ -457,18 +480,30 @@ class RangeLinkArb(Strategy):
 
     def scan(self, ctx):
         # The same download as the other arbitrage strategies: the run fetches it once.
+        floor = 1 / (1 + risk.MAX_ARB_ROI)
         found, hot = [], []
         for pair in pairs(ctx.client.events(status="open", with_nested_markets="true")):
             if pair["close"] - time.time() <= MIN_TIME_LEFT:
                 continue   # too close to the bell to buy every leg
             every = links(pair)
+            pin = VERIFIED.get(pair["range"]["event"])
+            pinned = (isinstance(pin, dict) and pin.get("above") == pair["above"]["event"]
+                      and pin.get("rules") == rules_key(pair))
+            # Listed under the too-good bar: refused anyway, so it mustn't take a book slot. An
+            # unpinned pair is all paper: leave out what's already open on paper.
             hot += [(s["pays"] - s["listed"], len(found), i) for i, s in enumerate(every)
-                    if s["listed"] is not None and s["listed"] < s["pays"]
-                    and all(tradeable(m, ctx) for m, _ in s["legs"])]
-            found.append((pair, every))
+                    if s["listed"] is not None and s["pays"] * floor <= s["listed"] < s["pays"]
+                    and all(tradeable(m, ctx) for m, _ in s["legs"])
+                    and (pinned or not any(m["ticker"] in ctx.held_paper for m, _ in s["legs"]))]
+            found.append((pair, every, pinned))
         # Order books only for the best few sets by listed price, so a scan reads few of them.
-        books, quoted = {}, {}
-        for _, f, i in sorted(hot, key=lambda h: (-h[0], h[1], h[2]))[:MAX_HOT]:
+        books, quoted, per = {}, {}, {}
+        for _, f, i in sorted(hot, key=lambda h: (-h[0], h[1], h[2])):
+            if sum(per.values()) >= MAX_HOT:
+                break
+            if per.get(f, 0) >= PER_PAIR:
+                continue
+            per[f] = per.get(f, 0) + 1
             s = found[f][1][i]
             for m, _ in s["legs"]:
                 if m["ticker"] not in books:
@@ -477,19 +512,18 @@ class RangeLinkArb(Strategy):
                 (s, [(m["ticker"], side, *quote(books[m["ticker"]], side)) for m, side in s["legs"]]))
         candidates = []
         for f, sets in quoted.items():
-            pair, every = found[f]
+            pair, every, pinned = found[f]
             rng, lad = pair["range"], pair["above"]
-            pin = VERIFIED.get(rng["event"])
-            checked = (isinstance(pin, dict) and pin.get("above") == lad["event"]
-                       and pin.get("rules") == rules_key(pair) and not too_good(every, sets))
+            checked = pinned and not too_good(every, sets)
             for s, quotes in sets:
                 if not check(pair, s["legs"], s["pays"]):
                     continue   # never offer a set that could pay less than it says
-                if not checked and any(m["ticker"] in ctx.held_paper for m, _ in s["legs"]):
+                live = checked and sure(pair, s["legs"], s["pays"])
+                if not live and any(m["ticker"] in ctx.held_paper for m, _ in s["legs"]):
                     continue   # paper only, and already open on paper: the engine would skip it
                 meta = {"range_event": rng["event"], "above_event": lad["event"], "set": s["set"], "pays": s["pays"],
                         "link": " + ".join(f"{side.upper()} {m['ticker']}" for m, side in s["legs"]),
-                        "at": rng["say"], "paper_only": not checked, "first_close": pair["close"]}
+                        "at": rng["say"], "paper_only": not live, "first_close": pair["close"]}
                 candidates.append((quotes, lambda bk, meta=meta, rng=rng, close=pair["close"]: to_signal(
                     rng["event"], rng["title"], bk, meta, close), s["pays"]))
         return allocate(ctx, candidates)

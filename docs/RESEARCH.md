@@ -314,7 +314,8 @@ status: **testing** (add the PR link), **built**, or **rejected** (say why in on
 - The edges line up. Each bracket starts 1 tick above an "above" strike and ends on one. The
   terms say "between" counts both ends (BTC, ETH, DOGE, SHIB). "Above" means strictly greater
   (CRYPTO terms; every strike is type "greater").
-- 4 sets pay at any price, with either bracket end in or out, and even if no data comes:
+- 4 sets pay at any price, with either bracket end in or out, and if no data comes for both
+  series alike (every strike No):
   - YES "above" under the bracket + NO bracket.
   - NO "above" at the bracket top + NO bracket.
   - NO bracket + YES "above" under it + NO "above" at its top. Pays $2.
@@ -324,6 +325,10 @@ status: **testing** (add the PR link), **built**, or **rejected** (say why in on
     never say the price is rounded (settled values do show cents).
   - YES "below" + YES "above" for SOL, XRP, BNB and HYPE. Their terms say "if no data is
     available or incomplete ... affected strikes resolve to No". Both legs lose.
+- If only one series got no data (its strikes No) while the other settled, only NO "above" +
+  NO bracket still pays. So only that set may ever use real money; the rest stay on paper.
+- One risk no check can see: if one series rounded the settled price and the other didn't,
+  any set could lose. 0 of about 4,000 settled pairs did (S&P and Nasdaq pairs did).
 - Settled: 0 broken links. Both series settled on the same number every time. 60 days: 238
   event pairs each for BTC, ETH, SOL, XRP, DOGE and BNB (HYPE 152, SHIB 60). Last 30 days:
   317-357 hourly pairs each.
@@ -340,7 +345,9 @@ status: **testing** (add the PR link), **built**, or **rejected** (say why in on
 - Order books (2 watches of 15 min): nothing in crypto. BTC came closest, 0.2c short.
 - Built as `range_link_arb`, paper only. It reads only these 8 pairs and fails closed on any
   wording, time, tick or ticker that differs. Before it offers a set, it plays it out at every
-  price that matters. Real money only for an event pair a person pins in `VERIFIED`.
+  price that matters. Real money only for the NO + NO set of an event pair a person pins in
+  `VERIFIED`. A scan reads books for at most 20 sets, 4 per pair, never ones already too good
+  to be true, so one coin's stale quotes can't crowd out the rest.
 - Live check (2026-10-29, real API, 4 rounds): it reads all 22 open pairs (3 per coin, 1 for
   SHIB). All 2,452 sets pass the play-out. A scan reads 0-3 order books (60 at most).
 - Other assets:
