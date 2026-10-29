@@ -2,6 +2,21 @@
 
 Newest first. Each 2-hour check-in adds one entry: what it checked, what it found, links.
 
+## 2026-10-29 12:55 UTC — money audit round 3 merged; Fed links look real; crypto links rejected
+
+- Merged [PR #27](https://github.com/rohanmalhotra0/kal/pull/27): 18 money holes closed.
+  12 from the audit, 6 more from critics checking the fixes together. Each has a test that
+  fails on the old code; 827 tests pass. CI green on main 0cfe8ba.
+- Merged [PR #26](https://github.com/rohanmalhotra0/kal/pull/26): GitHub actions moved off
+  Node 20 (the warning on every run is gone).
+- Idea #6, Fed and crypto links, on real data (branch `probe/fed-crypto`):
+  - Fed rate level vs Fed decision: 14 settled meetings, 0 broken links. In 2026, 17 hours
+    had a gap after fees that passes the bot's rules, with real trading in those hours.
+    Building it as a paper-only strategy next.
+  - Crypto "how high/low this month/year": rejected. Rules differ between series (some
+    count only weekday 8 AM-7 PM prices), and 2 settled BTC pairs in 2024 broke the link.
+- Waiting on the owner's `sudo kal doctor` output.
+
 ## 2026-10-29 10:50 UTC — check-in: all green; money audit round 3 in progress
 
 - Checked: CI green on main 1029811. Latest market-check is the clean daily run of
