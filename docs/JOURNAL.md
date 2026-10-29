@@ -2,6 +2,17 @@
 
 Newest first. Each 2-hour check-in adds one entry: what it checked, what it found, links.
 
+## 2026-10-29 10:50 UTC — check-in: all green; money audit round 3 in progress
+
+- Checked: CI green on main 1029811. Latest market-check is the clean daily run of
+  2026-10-28 18:53 UTC. No status report yet: the server is still being set up.
+- Third independent money audit (4 reviewers, 1 critic): 15 findings, 12 confirmed.
+  Worst: after practice on demo, going back to real money restores the modes but keeps the
+  demo budget and caps. Also: the daily stop misses a loss booked in the first run of a day;
+  auto-update misses code brought in by merge commits; a restore can lose track of trades if
+  interrupted. Fixes with tests are being built; they go in one PR.
+- Waiting on the owner's `sudo kal doctor` output.
+
 ## 2026-10-29 08:50 UTC — check-in: all green; idea #6 sports links tested, rejected
 
 - Checked: CI green on main fa4853a. Latest market-check is the clean daily run of
