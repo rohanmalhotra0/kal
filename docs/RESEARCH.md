@@ -110,7 +110,7 @@ status: **testing** (add the PR link), **built**, or **rejected** (say why in on
   row has even a lower bound above 0. Best: NO 95c+ with tight spreads at 24 h, +0.1% (worst
   -1.6%). The verdict stands: no taker edge.
 
-**6. Related markets that must agree** - date ladders built, paper until checked (`date_ladder_arb`); other links untested
+**6. Related markets that must agree** - date ladders built, paper until checked (`date_ladder_arb`); sports title chains rejected 2026-10-29; Fed and crypto links untested
 - What: linked prices must fit. E.g. "Fed cuts in Dec" vs "rate below X in Jan".
 - Evidence: medium. Saguillo et al. found this on Polymarket. Finding the links is the hard part.
 - Risk: medium-high. If the rules differ (source, time, rounding), both legs can lose.
@@ -139,6 +139,21 @@ status: **testing** (add the PR link), **built**, or **rejected** (say why in on
     `date_ladder_arb.VERIFIED`, after a person reads its rules in full, pinned word for word
     (any change and it's back on paper). It starts empty. Next: count paper signals for 4
     weeks; then a check-in can read the rules of the ladders that gap and propose a few by PR.
+- Sports title chains, tested 2026-10-29 on real data: rejected. The market keeps them in line.
+  - What: YES on one series means YES on another. A champion won its conference. A
+    conference champion played in its title game. A 1 seed made the playoffs. So YES on the
+    narrower market plus NO on the broader one pays $1 at least.
+  - 45 pairs picked by hand, with each series' rules read (NBA, NFL, NHL, MLB, MLS, college
+    football and basketball). 65 seasons matched by team name: 1,397 team pairs.
+  - History: 105,974 hours with both prices, in the 45 days before each season paid out.
+    0 hours under $1 after fees. 0 hours crossed even before fees (closest: a tie at 3c).
+  - Today: 434 open team pairs, 0 under $1 after fees. The closest is a 1c cross at 1-2c
+    prices, which fees turn into a loss.
+  - 0 settled results broke a link.
+  - Not built. The probe is on branch `probe/links` (never merged).
+- Still untested: Fed decision vs rate level for the same meeting, and a crypto price at a
+  set time vs that month's high. They are among Kalshi's most traded markets, so gaps are
+  even less likely.
 
 **7. Scheduled data releases (weather, CPI, jobs)** - weather tested 2026-10-25: rejected
 - What: compare the price with a public forecast before the report comes out.
