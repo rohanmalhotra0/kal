@@ -4,6 +4,10 @@ Probe branch only, never merged. Public data only (no key, no orders).
 Modes:
   rules    every series' terms, every distinct rules wording (open and settled), contract PDFs,
            strike fields vs rules text, and AAA's own page.
+  history  every settled market: date named, strike (fields vs rules), result vs value; then every
+           date two series share: same value? any set that lost?
+  gaps     hourly candles of every shared date: sets under $1 after fees that pass the bot's rules.
+  live     open events and order books now.
 """
 import collections
 import io
@@ -233,10 +237,536 @@ def rules():
     print(f"\nrules done in {time.time() - t0:.0f}s")
 
 
+# ======================= history, gaps, live =======================
+
+from decimal import Decimal, InvalidOperation  # noqa: E402
+
+from kal import config  # noqa: E402
+from kal.client import candle_close, fee, price  # noqa: E402
+from kal.fees import _bad as fee_problem  # noqa: E402
+from kal.risk import MAX_ARB_ROI, yearly_return  # noqa: E402
+
+N = 30   # contracts per order, for the fee's cent rounding (max_per_arb is $30)
+FAMILY = {"KXAAAGASD": "D", "AAAGASD": "D", "KXAAAGASW": "W", "AAAGASW": "W", "KXAAAGASM": "M", "AAAGASM": "M",
+          "KXAAAGASY": "Y", "AAAGASY": "Y", "KXAAAGASED": "ED"}
+LISTED = ["KXAAAGASD", "KXAAAGASW", "KXAAAGASM", "KXAAAGASY", "KXAAAGASED", "AAAGASD", "AAAGASW", "AAAGASM", "AAAGASY"]
+MON = {m: i + 1 for i, m in enumerate("jan feb mar apr may jun jul aug sep oct nov dec".split())}
+CMP_RX = re.compile(r"\bare (strictly greater than|greater than or equal to|greater than|at least|above|"
+                    r"less than or equal to|less than|below|between)\s+\$\s?(\d+(?:\.\d+)?)", re.I)
+
+
+def dec(v):
+    if v is None or v == "" or isinstance(v, bool):
+        return None
+    try:
+        return Decimal(str(v).replace(",", "").replace("$", "").strip())
+    except (InvalidOperation, ValueError):
+        return None
+
+
+def fee_pc(p):
+    return fee(N, p) / N
+
+
+def series_of(tk):
+    return str(tk or "").split("-")[0]
+
+
+def rules_date(text):
+    g = DATE_RX.search(plain(text))
+    if not g:
+        return None
+    mon = MON.get(g.group(1).lower()[:3])
+    return f"{int(g.group(3)):04d}-{mon:02d}-{int(g.group(2)):02d}" if mon else None
+
+
+def ticker_date(tk):
+    g = re.search(r"-(\d{2})([A-Z]{3})(\d{2})(?:-|$)", str(tk or ""))
+    if not g or g.group(2).lower() not in MON:
+        return None
+    return f"20{g.group(1)}-{MON[g.group(2).lower()]:02d}-{g.group(3)}"
+
+
+def rec(m):
+    """One market, read: strike from the fields and from the rules, the date it names, its result."""
+    r1 = plain(m.get("rules_primary"))
+    g = CMP_RX.search(r1)
+    st = m.get("strike_type")
+    k_field = dec(m.get("floor_strike")) if st == "greater" else None
+    k_rules = dec(g.group(2)) if g else None
+    flags = []
+    if not g:
+        flags.append("rules unreadable")
+    elif g.group(1).lower() != "strictly greater than":
+        flags.append(f"rules say {g.group(1)!r}")
+    if st != "greater":
+        flags.append(f"strike_type {st!r}")
+    if k_field is not None and k_rules is not None and k_field != k_rules:
+        flags.append("strike fields and rules differ")
+    d_r, d_t = rules_date(r1), ticker_date(m.get("ticker"))
+    if d_r and d_t and d_r != d_t:
+        flags.append("ticker date differs from rules date")
+    return dict(tk=m["ticker"], et=m.get("event_ticker"), s=series_of(m["ticker"]),
+                fam=FAMILY.get(series_of(m["ticker"]), "?"), date=d_r or d_t, k=k_rules if k_rules is not None else k_field,
+                kf=k_field, flags=flags, res=m.get("result"), v=dec(m.get("expiration_value")),
+                vs=str(m.get("expiration_value") or ""), close=iso(m.get("close_time")),
+                exp=iso(m.get("expected_expiration_time")), late=iso(m.get("latest_expiration_time")),
+                settled=iso(m.get("settlement_ts")), opened=iso(m.get("open_time")), status=m.get("status"),
+                vol=float(m.get("volume_fp") or m.get("volume") or 0), src=m.get("_src"),
+                bid=price(m, "yes_bid"), ask=price(m, "yes_ask"), r1=r1)
+
+
+def load(c, statuses=("settled",)):
+    """{(family, date): {event_ticker: [rec]}} over every listed series."""
+    seen = {}
+    for s in LISTED:
+        rows = []
+        if "settled" in statuses:
+            rows += settled_markets(c, s)
+        for st in statuses:
+            if st == "settled":
+                continue
+            try:
+                rows += [dict(m, _src=st) for m in c.markets(series_ticker=s, status=st)]
+            except KalshiError as e:
+                print(f"   {s} {st}: {e}")
+        for m in rows:
+            seen.setdefault(m["ticker"], m)
+        print(f"   {s}: {len(rows)} markets read")
+    ev = collections.defaultdict(lambda: collections.defaultdict(list))
+    for m in seen.values():
+        r = rec(m)
+        ev[(r["fam"], r["date"])][r["et"]].append(r)
+    return ev
+
+
+def feasible(rs):
+    """(lo, hi): the results say lo < value <= hi."""
+    lo = max((r["k"] for r in rs if r["res"] == "yes" and r["k"] is not None), default=None)
+    hi = min((r["k"] for r in rs if r["res"] == "no" and r["k"] is not None), default=None)
+    return lo, hi
+
+
+def breaks(ra, rb):
+    """Pairs (YES x in one series + NO y in the other, k_x <= k_y) that both lost."""
+    out = []
+    for xs, ys in ((ra, rb), (rb, ra)):
+        for x in xs:
+            for y in ys:
+                if x["k"] is None or y["k"] is None or x["k"] > y["k"]:
+                    continue
+                if x["res"] == "no" and y["res"] == "yes":
+                    out.append((x["tk"], y["tk"]))
+    return out
+
+
+def history():
+    c = Kalshi()
+    t0 = time.time()
+    ev = load(c)
+    n = collections.Counter()
+    flags = collections.Counter()
+    flag_ex = {}
+    per_month = collections.defaultdict(collections.Counter)
+    for (fam, date), ets in ev.items():
+        if len(ets) > 1:
+            n[f"{fam}: dates with 2+ events"] += 1
+            print(f"   MANY EVENTS {fam} {date}: {sorted(ets)}")
+        for et, rs in ets.items():
+            n[f"{fam}: events"] += 1
+            for r in rs:
+                for f in r["flags"]:
+                    flags[(fam, f)] += 1
+                    flag_ex.setdefault((fam, f), (r["tk"], r["r1"][:200], str(r["kf"]), str(r["k"])))
+                if r["vs"]:
+                    per_month[(fam, (date or "?")[:7])][len(r["vs"].split(".", 1)[1]) if "." in r["vs"] else 0] += 1
+            vals = {r["v"] for r in rs if r["v"] is not None}
+            if len(vals) > 1:
+                n[f"{fam}: events with 2+ values"] += 1
+                print(f"   VALUES DIFFER INSIDE {et}: {sorted(map(str, vals))}")
+            if not vals:
+                n[f"{fam}: events with no value"] += 1
+            res = collections.Counter(r["res"] for r in rs)
+            if set(res) - {"yes", "no"}:
+                n[f"{fam}: events with results other than yes/no"] += 1
+                print(f"   ODD RESULTS {et}: {dict(res)}")
+            lo, hi = feasible(rs)
+            if lo is not None and hi is not None and lo >= hi:
+                n[f"{fam}: events whose own ladder broke"] += 1
+                print(f"   LADDER BROKE {et}: yes up to {lo}, no from {hi}")
+            for r in rs:
+                if r["v"] is None or r["k"] is None or r["res"] not in ("yes", "no"):
+                    continue
+                if (r["v"] > r["k"]) != (r["res"] == "yes"):
+                    n[f"{fam}: markets whose result disagrees with value > strike"] += 1
+                    print(f"   RESULT VS VALUE {r['tk']}: value {r['vs']} strike {r['k']} result {r['res']}")
+                if r["v"] == r["k"]:
+                    n[f"{fam}: markets settled exactly on the strike"] += 1
+                    print(f"   TIE {r['tk']}: value {r['vs']} = strike, result {r['res']}")
+    print("\n===== EVENTS AND MARKET CHECKS")
+    for k, v in sorted(n.items()):
+        print(f"   {k}: {v}")
+    for (fam, f), v in sorted(flags.items()):
+        print(f"   FLAG {fam} {f}: {v} e.g. {flag_ex[(fam, f)]}")
+    print("\n===== expiration_value decimals by month (family month: {decimals: markets})")
+    for (fam, mo), cnt in sorted(per_month.items()):
+        print(f"   {fam} {mo}: {dict(sorted(cnt.items()))}")
+
+    # Same date in two or more families.
+    by_date = collections.defaultdict(dict)
+    for (fam, date), ets in ev.items():
+        if date:
+            rs = [r for et in sorted(ets) for r in ets[et]]
+            by_date[date][fam] = rs
+    shared = sorted(d for d, f in by_date.items() if len(f) > 1)
+    print(f"\n===== SAME-DATE PAIRS: {len(shared)} dates named by 2+ families")
+    pn, pbreak, pdiff = collections.Counter(), collections.Counter(), collections.Counter()
+    for d in shared:
+        fams = sorted(by_date[d])
+        for i in range(len(fams)):
+            for j in range(i + 1, len(fams)):
+                a, b = fams[i], fams[j]
+                ra, rb = by_date[d][a], by_date[d][b]
+                key = f"{a}-{b}"
+                pn[key] += 1
+                va = sorted({str(r["v"]) for r in ra if r["v"] is not None})
+                vb = sorted({str(r["v"]) for r in rb if r["v"] is not None})
+                same = va == vb and len(va) == 1
+                br = breaks(ra, rb)
+                if not same:
+                    pdiff[key] += 1
+                if br:
+                    pbreak[key] += 1
+                ca = sorted({stamp(r["close"]) for r in ra})
+                cb = sorted({stamp(r["close"]) for r in rb})
+                ea = sorted({stamp(r["exp"]) for r in ra})
+                eb = sorted({stamp(r["exp"]) for r in rb})
+                sa = [stamp(min(filter(None, (r["settled"] for r in ra)), default=None)),
+                      stamp(max(filter(None, (r["settled"] for r in ra)), default=None))]
+                sb = [stamp(min(filter(None, (r["settled"] for r in rb)), default=None)),
+                      stamp(max(filter(None, (r["settled"] for r in rb)), default=None))]
+                la = sorted({stamp(r["late"]) for r in ra})
+                lb = sorted({stamp(r["late"]) for r in rb})
+                print(f"   {d} {key}: values {va} vs {vb} {'SAME' if same else 'DIFFERENT'}; "
+                      f"broken sets {len(br)}{' e.g. ' + str(br[:2]) if br else ''}; markets {len(ra)}/{len(rb)}; "
+                      f"close {ca}/{cb}; expected {ea}/{eb}; latest {la}/{lb}; settled {sa}/{sb}; "
+                      f"events {sorted({r['et'] for r in ra})}/{sorted({r['et'] for r in rb})}")
+    print("\n===== SAME-DATE SUMMARY (pairs, with different values, with a broken set)")
+    for k in sorted(pn):
+        print(f"   {k}: {pn[k]} pairs, {pdiff[k]} with different values, {pbreak[k]} with a broken set")
+    print(f"history done in {time.time() - t0:.0f}s")
+
+
+def candles_for(c, et, tickers, t0, t1):
+    """{ticker: [(end_ts, bid, ask, volume)] sorted}. The event endpoint first, then each market
+    (live store, then historical)."""
+    out = collections.defaultdict(dict)
+    series = series_of(et)
+    start, calls = int(t0), 0
+    while calls < 20:
+        calls += 1
+        try:
+            d = c.get(f"/series/{series}/events/{et}/candlesticks",
+                      {"start_ts": start, "end_ts": int(t1), "period_interval": 60})
+        except KalshiError:
+            break
+        for tk, rows in zip(d.get("market_tickers") or [], d.get("market_candlesticks") or []):
+            for r in rows or []:
+                out[tk][r["end_period_ts"]] = r
+        adj = d.get("adjusted_end_ts")
+        if not adj or adj >= int(t1) or adj <= start:
+            break
+        start = int(adj)
+    for tk in tickers:
+        if out.get(tk):
+            continue
+        try:
+            rows = c.candles(series_of(tk), tk, t0, t1, 60)
+        except KalshiError:
+            rows = []
+        for r in rows or []:
+            out[tk][r["end_period_ts"]] = r
+    res = {}
+    for tk, rows in out.items():
+        lst = []
+        for t, r in sorted(rows.items()):
+            v = r.get("volume_fp", r.get("volume"))
+            try:
+                v = float(v or 0)
+            except (TypeError, ValueError):
+                v = 0.0
+            lst.append((t, candle_close(r, "yes_bid"), candle_close(r, "yes_ask"), v))
+        res[tk] = lst
+    return res
+
+
+def quote_at(rows, t, stale=2 * H):
+    """(bid, ask, volume in the hour ending at t) from the last candle that ended by t."""
+    best = None
+    for row in rows:
+        if row[0] <= t:
+            best = row
+        else:
+            break
+    if not best or t - best[0] > stale:
+        return None
+    vol = sum(r[3] for r in rows if t - H < r[0] <= t)
+    return best[1], best[2], vol
+
+
+def sets_at(ra, rb, q):
+    """Every 2-leg set across the two series: YES on strike x + NO on strike y >= x. Pays $1 at least."""
+    out = []
+    for xs, ys in ((ra, rb), (rb, ra)):
+        for x in xs:
+            qx = q.get(x["tk"])
+            if not qx or not 0 < qx[1] < 1 or x["k"] is None:
+                continue
+            for y in ys:
+                qy = q.get(y["tk"])
+                if not qy or y["k"] is None or x["k"] > y["k"] or not 0 < qy[0] < 1:
+                    continue
+                legs = [(x["tk"], "yes", qx[1], qx[2]), (y["tk"], "no", round(1 - qy[0], 4), qy[2])]
+                out.append(("same strike" if x["k"] == y["k"] else "lower YES + higher NO", legs))
+    return out
+
+
+def judge(legs, t, settle, cfg):
+    raw = sum(p for _, _, p, _ in legs)
+    cost = raw + sum(fee_pc(p) for _, _, p, _ in legs)
+    edge = 1 - cost
+    days = max((settle - t) / DAY, 1 / 24)
+    roi = edge / cost if cost > 0 else 0
+    apr = yearly_return(1 / cost, days) if cost > 0 else -1
+    ok = edge > 0 and days <= cfg["max_arb_days"] and apr >= cfg["min_arb_apr"] and 0.01 <= roi <= MAX_ARB_ROI
+    return dict(raw=round(raw, 4), cost=round(cost, 4), edge=round(edge, 4), roi=round(roi, 4), days=round(days, 3),
+                ok=ok, too_good=roi > MAX_ARB_ROI)
+
+
+def trades_in(c, tk, t0, t1):
+    """Public trades in one market between t0 and t1: live store, then historical."""
+    out = []
+    for path in ("/markets/trades", "/historical/trades"):
+        try:
+            rows = c.paginate(path, "trades", {"ticker": tk, "min_ts": int(t0), "max_ts": int(t1), "limit": 1000})
+        except KalshiError:
+            rows = []
+        out += rows
+        if out:
+            break
+    return out
+
+
+def gaps(since_days, families):
+    cfg = dict(config.DEFAULTS)
+    c = Kalshi()
+    t_start = time.time()
+    for s in ("KXAAAGASD", "KXAAAGASW", "KXAAAGASM", "KXAAAGASY", "KXAAAGASED"):
+        try:
+            info = c.series_info(s)
+            print(f"{s}: fee {info.get('fee_type')} x{info.get('fee_multiplier')} -> "
+                  f"{fee_problem(info.get('fee_type'), info.get('fee_multiplier')) or 'the bot can price it'}")
+        except Exception as e:
+            print(f"{s}: series info failed: {e}")
+    ev = load(c, ("settled", "closed", "open"))
+    since = time.time() - since_days * DAY
+    by_date = collections.defaultdict(dict)
+    for (fam, date), ets in ev.items():
+        if date and fam in families:
+            by_date[date][fam] = [r for et in sorted(ets) for r in ets[et]]
+    shared = sorted((d for d, f in by_date.items() if len(f) > 1), reverse=True)
+    print(f"\n===== GAPS over {len(shared)} shared dates (families {families})")
+    tally = collections.Counter()
+    hours = collections.defaultdict(set)
+    passing = collections.defaultdict(list)
+    best_rows = []
+    for d in shared:
+        if time.time() - t_start > 16 * 60:
+            tally[("all", "dates left out (time)")] += 1
+            continue
+        fams = sorted(by_date[d])
+        for i in range(len(fams)):
+            for j in range(i + 1, len(fams)):
+                a, b = fams[i], fams[j]
+                key = f"{a}-{b}"
+                ra, rb = by_date[d][a], by_date[d][b]
+                close = min(filter(None, (r["close"] for r in ra + rb)), default=None)
+                if not close or close < since:
+                    tally[(key, "pairs older than the window")] += 1
+                    continue
+                opened = max(min(filter(None, (r["opened"] for r in ra)), default=0),
+                             min(filter(None, (r["opened"] for r in rb)), default=0))
+                last_close = min(max(filter(None, (r["close"] for r in ra))), max(filter(None, (r["close"] for r in rb))))
+                settle = max(filter(None, (r["exp"] or r["close"] for r in ra + rb)))
+                end = min(last_close, int(time.time()))
+                if not opened or end <= opened:
+                    tally[(key, "pairs never open together")] += 1
+                    continue
+                ca = candles_for(c, ra[0]["et"], [r["tk"] for r in ra], opened, end)
+                cb = candles_for(c, rb[0]["et"], [r["tk"] for r in rb], opened, end)
+                if not ca or not cb:
+                    tally[(key, "pairs without candles")] += 1
+                    continue
+                tally[(key, "pairs priced")] += 1
+                cand = {**ca, **cb}
+                closes = {r["tk"]: r["close"] for r in ra + rb}
+                run, runs = 0, []
+                for t in range((int(opened) // H + 1) * H, int(end) + 1, H):
+                    q = {}
+                    for tk, rows in cand.items():
+                        if closes.get(tk) and t > closes[tk]:
+                            continue
+                        x = quote_at(rows, t)
+                        if x:
+                            q[tk] = x
+                    ss = sets_at(ra, rb, q)
+                    if not ss:
+                        continue
+                    tally[(key, "pair-hours with prices")] += 1
+                    best, best_ok, any_good = None, None, False
+                    for kind, legs in ss:
+                        j_ = judge(legs, t, settle, cfg)
+                        if j_["raw"] < 1:
+                            tally[(key, "sets under $1 before fees")] += 1
+                        if j_["edge"] > 0:
+                            tally[(key, "sets under $1 after fees")] += 1
+                            if j_["too_good"]:
+                                any_good = True
+                        row = dict(j_, date=d, pair=key, kind=kind, t=stamp(t), legs=legs)
+                        if best is None or j_["edge"] > best["edge"]:
+                            best = row
+                        if j_["ok"] and (best_ok is None or j_["edge"] > best_ok["edge"]):
+                            best_ok = row
+                    if best and best["edge"] > 0:
+                        hours[(key, "under $1 after fees")].add((d, t))
+                    if any_good:
+                        hours[(key, "too good (>25%)")].add((d, t))
+                    if best_ok:
+                        hours[(key, "passing")].add((d, t))
+                        passing[key].append(best_ok)
+                        if all(l[3] > 0 for l in best_ok["legs"]):
+                            hours[(key, "passing, both legs traded that hour")].add((d, t))
+                        run += 1
+                    elif run:
+                        runs.append(run)
+                        run = 0
+                    if best:
+                        best_rows.append(best)
+                if run:
+                    runs.append(run)
+                for r_ in runs:
+                    tally[(key, f"gap runs lasting {r_}h")] += 1
+    print("\n===== GAP SUMMARY")
+    for k, v in sorted(tally.items()):
+        print(f"   {k[0]} | {k[1]}: {v}")
+    for (key, what), hs in sorted(hours.items()):
+        print(f"   {key} | hours {what}: {len(hs)} (dates {len({d for d, _ in hs})}: {sorted({d for d, _ in hs})[:30]})")
+    for key, rows in sorted(passing.items()):
+        rows.sort(key=lambda r: -r["edge"])
+        print(f"\n   -- {key}: best passing sets (one per hour, best first)")
+        for r in rows[:15]:
+            print("      PASS " + json.dumps(r))
+        vol = [r for r in rows if all(l[3] > 0 for l in r["legs"])]
+        print(f"   -- {key}: best passing with trades on both legs that hour ({len(vol)})")
+        for r in vol[:10]:
+            print("      PASSVOL " + json.dumps(r))
+    near = sorted(best_rows, key=lambda r: -r["edge"])[:10]
+    print("\n   closest sets overall:")
+    for r in near:
+        print("      NEAR " + json.dumps(r))
+    # Did trades really go through at gap prices? Check the top passing hours with volume.
+    print("\n===== TRADES in the hour before the best passing snapshots")
+    tops = sorted((r for rows in passing.values() for r in rows), key=lambda r: -r["edge"])
+    checked = 0
+    for r in tops:
+        if checked >= 12:
+            break
+        checked += 1
+        t1 = ts(r["t"].replace(" ", "T") + ":00Z")
+        legs_out = []
+        for tk, side, p, vol in r["legs"]:
+            tr = trades_in(c, tk, t1 - H, t1)
+            paid = []
+            for x in tr:
+                if x.get("taker_side") != side:
+                    continue
+                pp = price(x, f"{side}_price")
+                paid.append((pp, float(x.get("count_fp") or x.get("count") or 0), x.get("created_time")))
+            legs_out.append((tk, side, p, len(tr), min(paid)[:2] if paid else None, sum(q for _, q, _ in paid)))
+        print(f"   {r['pair']} {r['date']} at {r['t']} edge {r['edge']}: " + json.dumps(legs_out))
+    print(f"\ngaps done in {time.time() - t_start:.0f}s")
+
+
+def book_quote(book, side):
+    """(price, size) to buy `side` now from an order book of bids, or (None, 0)."""
+    levels = book.get("no" if side == "yes" else "yes") or []
+    if not levels:
+        return None, 0
+    bid, size = max(levels)
+    ask = round(1 - bid, 4)
+    return (ask, size) if 0 < ask < 1 else (None, 0)
+
+
+def live(rounds, gap_s):
+    cfg = dict(config.DEFAULTS)
+    c = Kalshi()
+    for rnd in range(rounds):
+        if rnd:
+            time.sleep(gap_s)
+        now = time.time()
+        ev = load(c, ("open", "unopened", "closed"))
+        by_date = collections.defaultdict(dict)
+        print(f"\n== round {rnd + 1} at {stamp(now)}")
+        for (fam, date), ets in sorted(ev.items(), key=lambda kv: (kv[0][1] or "", kv[0][0])):
+            rs = [r for et in sorted(ets) for r in ets[et]]
+            st = collections.Counter(r["status"] for r in rs)
+            print(f"   {fam} {date}: {sorted(ets)} markets {len(rs)} {dict(st)} open {stamp(min(filter(None, (r['opened'] for r in rs)), default=None))} "
+                  f"close {sorted({stamp(r['close']) for r in rs})} expected {sorted({stamp(r['exp']) for r in rs})}")
+            if date:
+                by_date[date][fam] = [r for r in rs if r["status"] in ("active", "open")]
+        shared = [d for d, f in by_date.items() if sum(1 for x in f.values() if x) > 1]
+        print(f"   shared open dates: {shared}")
+        for d in shared:
+            fams = sorted(f for f, rs in by_date[d].items() if rs)
+            for i in range(len(fams)):
+                for j in range(i + 1, len(fams)):
+                    ra, rb = by_date[d][fams[i]], by_date[d][fams[j]]
+                    q, sizes = {}, {}
+                    for r in ra + rb:
+                        try:
+                            bk = c.orderbook(r["tk"])
+                        except KalshiError:
+                            continue
+                        ya, ys = book_quote(bk, "yes")
+                        na, ns = book_quote(bk, "no")
+                        q[r["tk"]] = (round(1 - na, 4) if na else 0.0, ya or 0.0, 0)
+                        sizes[(r["tk"], "yes")], sizes[(r["tk"], "no")] = ys, ns
+                    settle = max(filter(None, (r["exp"] or r["close"] for r in ra + rb)))
+                    rows = []
+                    for kind, legs in sets_at(ra, rb, q):
+                        j_ = judge(legs, now, settle, cfg)
+                        rows.append(dict(j_, kind=kind, legs=[(tk, sd, p, sizes.get((tk, sd))) for tk, sd, p, _ in legs]))
+                    rows.sort(key=lambda r: -r["edge"])
+                    print(f"   {d} {fams[i]}-{fams[j]}: {len(rows)} sets on the books; under $1 after fees "
+                          f"{sum(1 for r in rows if r['edge'] > 0)}; passing {sum(1 for r in rows if r['ok'])}")
+                    for r in rows[:6]:
+                        print("      BOOK " + json.dumps(r))
+
+
 def main():
     mode = sys.argv[1] if len(sys.argv) > 1 else "rules"
     if mode == "rules":
         rules()
+    elif mode == "history":
+        history()
+    elif mode == "gaps":
+        days = float(sys.argv[2]) if len(sys.argv) > 2 else 400
+        fams = sys.argv[3].split(",") if len(sys.argv) > 3 else ["D", "W", "M", "Y", "ED"]
+        gaps(days, fams)
+    elif mode == "live":
+        rounds = int(sys.argv[2]) if len(sys.argv) > 2 else 3
+        gap = float(sys.argv[3]) if len(sys.argv) > 3 else 60
+        live(rounds, gap)
 
 
 if __name__ == "__main__":
