@@ -768,6 +768,59 @@ def hourly(pairs):
         print(f"\n   {hs} summary: {json.dumps({str(k): v for k, v in tally.items()})}")
 
 
+def pyth(dates, series):
+    """Pyth's own data next to Kalshi's settled values: which feed (and which minute) each series
+    settled on. Public endpoints only."""
+    import requests
+    s = requests.Session()
+    for q in ("gold", "silver", "XAU", "XAG", "copper", "brent"):
+        try:
+            r = s.get("https://hermes.pyth.network/v2/price_feeds", params={"query": q}, timeout=30)
+            rows = r.json() if r.status_code == 200 else []
+            print(f"\nHERMES query {q}: status {r.status_code}, {len(rows)} feeds")
+            for f in rows[:25]:
+                a = f.get("attributes") or {}
+                print(f"   {f.get('id')} | {a.get('symbol')} | {a.get('asset_type')} | {a.get('description')} | "
+                      f"{a.get('generic_symbol')} | {json.dumps({k: v for k, v in a.items() if k not in ('symbol', 'asset_type', 'description', 'generic_symbol')})[:200]}")
+        except Exception as e:
+            print(f"HERMES {q}: {e}")
+    for q in ("XAU", "XAG", "GOLD", "SILVER", "1OZGOLD"):
+        try:
+            r = s.get("https://benchmarks.pyth.network/v1/shims/tradingview/search", params={"query": q, "limit": 30}, timeout=30)
+            print(f"\nTV search {q}: status {r.status_code} {plain(r.text)[:1500]}")
+        except Exception as e:
+            print(f"TV search {q}: {e}")
+    syms = ["Metal.XAU/USD", "Metal.XAG/USD", "Metal.Index.1OZGOLD/USD", "Metal.Index.SILVER/USD", "Metal.Index.GOLD/USD",
+            "Commodities.Index.CU/USD", "Commodities.Index.BRENT/USD"]
+    kal = {}
+    c = Kalshi()
+    for ser in series:
+        for m in all_markets(c, ser, statuses=("settled",)):
+            d = rules_date(m.get("rules_primary"))
+            if d in dates and m.get("expiration_value") not in (None, ""):
+                kal.setdefault((ser, d), set()).add(str(m.get("expiration_value")))
+    print("\nKALSHI values: " + json.dumps({f"{k[0]} {k[1]}": sorted(v) for k, v in sorted(kal.items())}))
+    for d in dates:
+        y, mo, dd = map(int, d.split("-"))
+        t5 = int(datetime(y, mo, dd, 17, 0, tzinfo=ET).timestamp())
+        print(f"\n== {d} (5 PM ET = {t5})")
+        for sym in syms:
+            try:
+                r = s.get("https://benchmarks.pyth.network/v1/shims/tradingview/history",
+                          params={"symbol": sym, "resolution": "1", "from": t5 - 300, "to": t5 + 240}, timeout=30)
+                j = r.json() if r.status_code == 200 else {}
+            except Exception as e:
+                print(f"   {sym}: {e}")
+                continue
+            if j.get("s") != "ok":
+                print(f"   {sym}: status {r.status_code} {plain(r.text)[:160]}")
+                continue
+            rows = [(datetime.fromtimestamp(t, ET).strftime("%H:%M"), o, h, l, cl)
+                    for t, o, h, l, cl in zip(j["t"], j["o"], j["h"], j["l"], j["c"])]
+            print(f"   {sym}: " + "; ".join(f"{hm} o{o} c{cl}" for hm, o, h, l, cl in rows))
+        sys.stdout.flush()
+
+
 # ======================= gaps =======================
 
 def candles_for(c, e, t0, t1):
@@ -1179,6 +1232,8 @@ def main():
             detail(rest[0].split(","))
         elif mode == "hourly":
             hourly([tuple(p.split("~")) for p in rest[0].split(",")])
+        elif mode == "pyth":
+            pyth(rest[0].split(","), rest[1].split(","))
         else:
             print(f"unknown mode {mode}")
         sys.stdout.flush()
