@@ -420,7 +420,7 @@ def history():
             by_date[date][fam] = rs
     shared = sorted(d for d, f in by_date.items() if len(f) > 1)
     print(f"\n===== SAME-DATE PAIRS: {len(shared)} dates named by 2+ families")
-    pn, pbreak, pdiff = collections.Counter(), collections.Counter(), collections.Counter()
+    pn, pbreak, pdiff, pnum = collections.Counter(), collections.Counter(), collections.Counter(), collections.Counter()
     for d in shared:
         fams = sorted(by_date[d])
         for i in range(len(fams)):
@@ -431,9 +431,13 @@ def history():
                 pn[key] += 1
                 va = sorted({str(r["v"]) for r in ra if r["v"] is not None})
                 vb = sorted({str(r["v"]) for r in rb if r["v"] is not None})
-                same = va == vb and len(va) == 1
-                br = breaks(ra, rb)
+                na_ = {r["v"].normalize() for r in ra if r["v"] is not None}
+                nb_ = {r["v"].normalize() for r in rb if r["v"] is not None}
+                same = na_ == nb_ and len(na_) == 1
                 if not same:
+                    pnum[key] += 1
+                br = breaks(ra, rb)
+                if va != vb:
                     pdiff[key] += 1
                 if br:
                     pbreak[key] += 1
@@ -451,9 +455,24 @@ def history():
                       f"broken sets {len(br)}{' e.g. ' + str(br[:2]) if br else ''}; markets {len(ra)}/{len(rb)}; "
                       f"close {ca}/{cb}; expected {ea}/{eb}; latest {la}/{lb}; settled {sa}/{sb}; "
                       f"events {sorted({r['et'] for r in ra})}/{sorted({r['et'] for r in rb})}")
-    print("\n===== SAME-DATE SUMMARY (pairs, with different values, with a broken set)")
+    print("\n===== SAME-DATE SUMMARY (pairs, values written differently, values that differ as numbers, broken sets)")
     for k in sorted(pn):
-        print(f"   {k}: {pn[k]} pairs, {pdiff[k]} with different values, {pbreak[k]} with a broken set")
+        print(f"   {k}: {pn[k]} pairs, {pdiff[k]} written differently, {pnum[k]} differ as numbers, "
+              f"{pbreak[k]} with a broken set")
+    # Each daily value next to the days around it, to see whether a differing value is another day's.
+    dv = {d: sorted({r["v"].normalize() for r in by_date[d].get("D", []) if r["v"] is not None}) for d in by_date}
+    print("\n===== DAILY VALUES around pairs whose values differ as numbers")
+    for d in shared:
+        fams = sorted(by_date[d])
+        vals = {f: sorted({str(r["v"].normalize()) for r in by_date[d][f] if r["v"] is not None}) for f in fams}
+        if len({tuple(v) for v in vals.values()}) > 1:
+            from datetime import date as _date, timedelta as _td
+            y, m_, dd = map(int, d.split("-"))
+            around = []
+            for k in range(-3, 4):
+                x = (_date(y, m_, dd) + _td(days=k)).isoformat()
+                around.append(f"{x}: {[str(v) for v in dv.get(x, [])]}")
+            print(f"   {d} {json.dumps(vals)} | daily nearby: {'; '.join(around)}")
     print(f"history done in {time.time() - t0:.0f}s")
 
 
@@ -753,6 +772,71 @@ def live(rounds, gap_s):
                         print("      BOOK " + json.dumps(r))
 
 
+def detail(items):
+    """Every market of the named events, in full enough to see what happened."""
+    c = Kalshi()
+    for et in items:
+        ms = []
+        try:
+            ms = c.markets(event_ticker=et)
+        except KalshiError as e:
+            print(f"{et}: {e}")
+        if not ms:
+            try:
+                ms = c.paginate("/historical/markets", "markets", {"limit": 1000, "event_ticker": et})
+            except KalshiError as e:
+                print(f"{et}: historical {e}")
+        print(f"\n===== {et}: {len(ms)} markets")
+        try:
+            e = c.get(f"/events/{et}")
+            meta = {k: v for k, v in (e.get("event") or {}).items() if k != "markets"}
+            print(f"   EVENT {json.dumps(meta)[:1500]}")
+        except KalshiError as e:
+            print(f"   event: {e}")
+        shown = set()
+        for m in sorted(ms, key=lambda m: float(m.get("floor_strike") or 0)):
+            print(f"   {m['ticker']} status={m.get('status')} result={m.get('result')!r} value={m.get('expiration_value')!r} "
+                  f"settle$={m.get('settlement_value_dollars')} settled={m.get('settlement_ts')} close={m.get('close_time')} "
+                  f"exp={m.get('expected_expiration_time')} late={m.get('latest_expiration_time')} st={m.get('strike_type')} "
+                  f"floor={m.get('floor_strike')} vol={m.get('volume_fp')} oi={m.get('open_interest_fp')} "
+                  f"last={m.get('last_price_dollars')} sub={m.get('yes_sub_title')!r}")
+            for k in ("rules_primary", "rules_secondary", "early_close_condition", "subtitle", "title"):
+                t = template(m.get(k))
+                if t and (k, t) not in shown:
+                    shown.add((k, t))
+                    print(f"      {k}: {plain(m.get(k))}")
+        extra = sorted({k for m in ms for k, v in m.items() if v not in (None, "", [], {})} - set(MKT_SEEN))
+        if extra:
+            print(f"   other fields: {extra}")
+            for k in extra:
+                vals = collections.Counter(json.dumps(m.get(k))[:200] for m in ms)
+                print(f"      {k}: {dict(vals.most_common(3))}")
+
+
+MKT_SEEN = ("ticker", "status", "result", "expiration_value", "settlement_value_dollars", "settlement_ts", "close_time",
+            "expected_expiration_time", "latest_expiration_time", "strike_type", "floor_strike", "volume_fp",
+            "open_interest_fp", "last_price_dollars", "yes_sub_title", "rules_primary", "rules_secondary",
+            "early_close_condition", "subtitle", "title", "event_ticker", "_src")
+
+
+def values(series, since, until):
+    """Every settled event's value (and settle time) between two dates, one line each."""
+    c = Kalshi()
+    for s in series:
+        rows = collections.defaultdict(list)
+        for m in settled_markets(c, s) + [dict(m, _src="closed") for m in c.markets(series_ticker=s, status="closed")]:
+            r = rec(m)
+            if r["date"] and since <= r["date"] <= until:
+                rows[(r["date"], r["et"])].append(r)
+        print(f"\n===== {s} values {since}..{until}")
+        for (d, et), rs in sorted(rows.items()):
+            vals = sorted({r["vs"] for r in rs})
+            st = sorted({stamp(r["settled"]) for r in rs if r["settled"]})
+            res = collections.Counter(r["res"] for r in rs)
+            print(f"   {d} {et}: values {vals} settled {st} results {dict(res)} status "
+                  f"{dict(collections.Counter(r['status'] for r in rs))}")
+
+
 def main():
     mode = sys.argv[1] if len(sys.argv) > 1 else "rules"
     if mode == "rules":
@@ -763,6 +847,10 @@ def main():
         days = float(sys.argv[2]) if len(sys.argv) > 2 else 400
         fams = sys.argv[3].split(",") if len(sys.argv) > 3 else ["D", "W", "M", "Y", "ED"]
         gaps(days, fams)
+    elif mode == "detail":
+        detail(sys.argv[2].split(","))
+    elif mode == "values":
+        values(sys.argv[2].split(","), sys.argv[3], sys.argv[4])
     elif mode == "live":
         rounds = int(sys.argv[2]) if len(sys.argv) > 2 else 3
         gap = float(sys.argv[3]) if len(sys.argv) > 3 else 60
