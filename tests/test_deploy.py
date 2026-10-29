@@ -60,6 +60,21 @@ class DeployScriptTests(unittest.TestCase):
         self.assertIn('"$APP/deploy/kal-watch.timer" /etc/systemd/system/kal-watch.timer', text)
         self.assertIsNotNone(re.search(r"systemctl enable[^\n]*kal-watch\.timer", text))
 
+<<<<<<< HEAD
+=======
+    def test_install_and_update_never_leave_code_others_can_change(self):
+        # install-check found the venv world-writable (777): GitHub's sudo runs with umask 000.
+        # Then any user could change the code the bot runs with the key.
+        for name in ("install.sh", "kal-update.sh"):
+            with open(os.path.join(ROOT, "deploy", name)) as f:
+                text = f.read()
+            self.assertLess(text.index("\numask 022"), text.index("\nAPP="), name)
+            self.assertIn('chmod -R go-w "$APP" "$VENV"', text, name)
+        with open(os.path.join(ROOT, "deploy", "install.sh")) as f:
+            text = f.read()
+        self.assertLess(text.index('pip" install -q -r "$APP/requirements.txt"'), text.index('chmod -R go-w'))
+
+>>>>>>> lean-events-2
     def test_install_starts_the_bot_before_the_watchdog(self):
         # On a new server the watchdog's first look comes at once (its boot delay is long
         # past). If the bot weren't started yet, that look would be a false alarm.
