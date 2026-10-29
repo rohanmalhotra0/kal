@@ -619,6 +619,12 @@ def sources(e):
     return [f"{x.get('name')} <{x.get('url')}>" for x in ss]
 
 
+def feeds(e):
+    """The settlement source URLs without their query strings: which feed the event names."""
+    ss = (e.get("ev") or {}).get("settlement_sources") or []
+    return tuple(sorted(str(x.get("url") or "").split("?")[0].replace("pythdata.app", "app.pyth.com") for x in ss))
+
+
 def contracts(e):
     out = collections.Counter()
     for m in e["ms"]:
@@ -1002,6 +1008,7 @@ def gaps(fams, since_days):
         hours = collections.defaultdict(set)
         passing = collections.defaultdict(list)
         near = []
+        table = []
         for kinds, a, b in reversed(pairs):
             key = f"{a['s']}~{b['s']}"
             if time.time() - t_start > 17 * 60:
@@ -1029,6 +1036,7 @@ def gaps(fams, since_days):
             cand = {**ca, **cb}
             closes = {m["ticker"]: iso(m.get("close_time")) for m in a["ms"] + b["ms"]}
             n_hours, pass_hours, best_pair = 0, [], None
+            n_under, n_vol, best_vol = 0, 0, None
             for t in range((int(opened) // H + 1) * H, int(end) + 1, H):
                 q = {}
                 for tk, rows in cand.items():
@@ -1059,6 +1067,7 @@ def gaps(fams, since_days):
                     tally[(key, "pair-hours under $1 before fees")] += 1
                 if best["edge"] > 0:
                     hours[(key, "under $1 after fees")].add((a["et"], t))
+                    n_under += 1
                 if any(r["too_good"] and r["edge"] > 0 for r in rows_t):
                     hours[(key, "too good (>25%)")].add((a["et"], t))
                 ok = [r for r in rows_t if r["ok"]]
@@ -1071,8 +1080,22 @@ def gaps(fams, since_days):
                         hours[(key, "passing, both legs traded that hour")].add((a["et"], t))
                     if best_pair is None or bo["edge"] > best_pair["edge"]:
                         best_pair = bo
+                    okv = [r for r in ok if all(l[3] > 0 for l in r["legs"])]
+                    if okv:
+                        n_vol += 1
+                        bv = max(okv, key=lambda r: r["edge"])
+                        if best_vol is None or bv["edge"] > best_vol["edge"]:
+                            best_vol = bv
             same_rules = not rules_diff(a, b)
-            same_src = sources(a) == sources(b)
+            same_src = feeds(a) == feeds(b)
+            table.append(dict(pair=f"{a['et']}~{b['et']}", rules="same" if same_rules else "DIFF",
+                              feed="same" if same_src else "DIFF", hours=n_hours, under=n_under,
+                              passing=len(pass_hours), passing_vol=n_vol,
+                              best=(round(best_pair["edge"], 4), best_pair["t"], [(l[0].split("-", 1)[1], l[1], l[2], l[3])
+                                                                              for l in best_pair["legs"]]) if best_pair else None,
+                              best_vol=(round(best_vol["edge"], 4), best_vol["t"], [(l[0].split("-", 1)[1], l[1], l[2], l[3])
+                                                                                for l in best_vol["legs"]]) if best_vol else None,
+                              by_month=(a["strike_date"] or max(a["close"] or [0]))))
             tally[(key, f"pairs with rules {'same' if same_rules else 'different'}, sources "
                         f"{'same' if same_src else 'different'}")] += 1
             if pass_hours:
@@ -1083,6 +1106,11 @@ def gaps(fams, since_days):
                   f"{et_stamp(opened)}..{et_stamp(end)}; hours with prices {n_hours}; passing hours {len(pass_hours)}; "
                   f"best passing {json.dumps(best_pair) if best_pair else None} ({time.time() - t_pair:.0f}s)")
             sys.stdout.flush()
+        print(f"\n===== {name} PAIR TABLE (hours priced, under $1 after fees, passing, passing with trades on both legs)")
+        for r in sorted(table, key=lambda r: r["by_month"]):
+            print(f"   TABLE {r['pair']:<42} rules {r['rules']:<4} feed {r['feed']:<4} hours {r['hours']:>3} under {r['under']:>3} "
+                  f"pass {r['passing']:>3} pass+vol {r['passing_vol']:>3} | best {json.dumps(r['best'])} | best+vol "
+                  f"{json.dumps(r['best_vol'])}")
         print(f"\n===== {name} GAP SUMMARY")
         for k, v in sorted(tally.items()):
             print(f"   {k[0]} | {k[1]}: {v}")
