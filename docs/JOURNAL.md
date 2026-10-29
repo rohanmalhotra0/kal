@@ -2,6 +2,24 @@
 
 Newest first. Each 2-hour check-in adds one entry: what it checked, what it found, links.
 
+## 2026-10-29 20:50 UTC — check-in: crypto range links merged; a faster pace finds nothing more
+
+- Merged [PR #35](https://github.com/rohanmalhotra0/kal/pull/35): `range_link_arb` (crypto
+  "between" vs "above" at one minute), paper only. An independent review found no way to lose
+  money and 3 gaps, all fixed with tests: if only one series gets no data, only NO + NO still
+  pays, so only that set may ever use real money; one coin's stale quotes could take every
+  order-book slot; a too-good set could take budget from a real one (shared code: real sets
+  now go first). 982 tests.
+- Merged [PR #36](https://github.com/rohanmalhotra0/kal/pull/36): DEPLOY step 10 now says to
+  give Claude's GitHub app access to `kal-status`. Without it the check-in can't read the report.
+- Every arbitrage scan once a minute for 4 hours (240 scans, branch `probe/arb-watch-1min`):
+  0 gaps, 0 failed scans, 25 s a scan. With Oct 25's 9-hour watch: 13 hours, 0 chances. So the
+  5-minute pace stays: a faster one finds nothing more. Real-money arbitrage is very rare.
+- Checked: CI green on main 5ede476; market-check green on 45e2974 (0 trades found;
+  `range_link_arb` ran clean in 0.5 s). No status report yet: `kal-status` doesn't exist or
+  isn't shared with Claude.
+- Next: idea #20 (AAA gas daily vs weekly vs monthly).
+
 ## 2026-10-29 18:50 UTC — check-in: review holes fixed; crypto range links built on paper
 
 - Merged [PR #34](https://github.com/rohanmalhotra0/kal/pull/34): an independent review of
