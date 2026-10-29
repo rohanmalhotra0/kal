@@ -185,13 +185,26 @@ status: **testing** (add the PR link), **built**, or **rejected** (say why in on
     BTCMAXM-24MAY-69999.99 YES while BTCMAXY-24DEC31-70000 NO.
   - 1,498 nested pairs, 31 passing hours, none safe. Not built. Probe: branch `probe/fed-crypto`.
 
-**7. Scheduled data releases (weather, CPI, jobs)** - weather tested 2026-10-25: rejected
+**7. Scheduled data releases (weather, CPI, jobs)** - weather tested 2026-10-25: rejected; CPI and jobs tested 2026-10-29: rejected
 - What: compare the price with a public forecast before the report comes out.
 - Evidence: medium-low. A Fed study found Kalshi macro prices about as good as expert surveys. Weather "edges" online come from sellers, not studies.
 - Risk: medium. Model error, thin markets, news moves first.
 - Test: daily high temps (settle on the NWS Daily Climate Report). Save forecast + price 6h before close for 60+ days. Compare with results.
 - Backtest: `tools/weather_research.py` (`kal/research/weather.py`). Daily highs in 7 cities. It uses the latest NBM forecast run published 2+ hours before the decision time (the Iowa Environmental Mesonet keeps every run). Each city's bias and spread are fitted only on earlier days. It buys where the forecast and the price disagree by 5c or 10c after the taker fee, and counts one day in all cities as one unit. It also compares how well the forecast and the market called the results (Brier score).
 - Result (4,686 markets, 112 days, 7 cities): Kalshi's prices beat the NBM forecast in every city (Brier 0.095 vs 0.121 at 18 h before the end; 0.098 vs 0.122 at 30 h). The market is calibrated at every level. The forecast is overconfident in the likeliest bracket: at 60%+ it won 50%. Every trading rule lost: YES about -50%, NO -11% to -17%. The brackets map right (every event tiles), and the tails aren't fat (2.7% of results beyond 2 spreads). Rejected: the public forecast knows less than the market.
+- CPI and jobs, tested 2026-10-29: rejected. The market already knows what the experts know.
+  - The Fed's study (Diercks, Katz and Wright, FEDS 2026-010, read in full): on release
+    day, Kalshi's headline CPI error is 0.063-0.069 points vs Bloomberg's consensus 0.081
+    (significantly better). Core CPI and unemployment are a tie. "In no case is Kalshi
+    significantly worse." Its price spreads are "fairly well calibrated", with a small tilt
+    toward higher inflation and unemployment.
+  - Our own check: 682 markets in 143 releases (CPI, core CPI, both yearly, payrolls,
+    unemployment), priced 24 h before close. Brier 0.137 (0.250 for a coin flip). Well
+    calibrated. No simple rule beats the fees: YES at 10c or less -56%, YES at 85c+ -8%,
+    NO on 85c+ YES -14%, NO on 30-70c YES -0.5%. Best: NO on 10c-or-less YES, +1.2%,
+    too small to tell from zero (that's `longshot_fade`'s job anyway).
+  - The Cleveland Fed's free nowcast is public, and Kalshi beats the consensus that uses
+    it. Not built. Probe: branch `probe/macro` (never merged).
 
 **8. Mention words** - built, paper
 - What: YES on words said more often than the price says. NO on less.
