@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from unittest import mock
 
 from kal import config, db, ledger, risk, scheduler
-from kal.client import Kalshi, KalshiError, fee, load_key
+from kal.client import BASES, Kalshi, KalshiError, fee, load_key
 from kal.dashboard import app as dash
 from kal.research import backtest, promote
 from kal.scheduler import Scheduler
@@ -682,6 +682,33 @@ class BacktestApiTests(Base):
         self.assertTrue(Kalshi.from_env(self.home).can_trade)  # a key really is there...
         self.assertFalse(dash._market_client().can_trade)      # ...but the backtester's client can't trade
 
+    def test_a_switch_during_a_test_keeps_it_on_one_exchange(self):
+        # A test can take many minutes. Started on demo, its prices and its record stay demo's
+        # even if someone switches to real money meanwhile: prod's research reads its cache.
+        add_history(self.market, "KXA", 40, 0.93, 0.92)
+        add_history(self.market, "KXS", 40, 0.30, 0.29)
+        config.switch({"env": "demo"})
+        load = backtest.load_observations
+
+        def then_switch(client, series, *a, **kw):
+            out = load(client, series, *a, **kw)
+            if series == "KXA":
+                config.switch({"env": "prod"})   # someone switches part way through
+            return out
+        with mock.patch.object(backtest, "load_observations", side_effect=then_switch):
+            self.assertEqual(self.post("/api/backtest", {"series": "KXA, KXS"}).status_code, 202)
+            self.wait()
+        self.assertTrue(self.runner().state()["last"]["ok"])
+        self.assertEqual(config.load()["env"], "prod")
+        self.assertFalse(os.path.exists(os.path.join(self.home, "cache", "KXS_close6_v5.json")))
+        self.assertTrue(os.path.exists(os.path.join(self.home, "cache-demo", "KXS_close6_v5.json")))
+        self.assertEqual(db.query("SELECT * FROM backtests"), [])      # prod's db
+        with db.pinned("demo"):
+            self.assertEqual(len(db.query("SELECT * FROM backtests")), 1)
+            with mock.patch.dict(os.environ):   # the real client is for the test's exchange too
+                os.environ.pop("KALSHI_API_BASE", None)
+                self.assertEqual(dash._market_client().base, BASES["demo"])
+
 
 class SeriesSearchTests(Base):
     def setUp(self):
@@ -873,6 +900,16 @@ class ConfigApiTests(Base):
         self.assertEqual(config.load()["env"], "prod")
         config.update({"enabled": False})
         self.assertEqual(self.post("/api/config", {"env": "demo"}).status_code, 200)
+
+    def test_switching_to_prod_puts_the_real_budget_back(self):
+        config.update({"budget": 300})
+        self.assertEqual(self.post("/api/config", {"env": "demo"}).status_code, 200)
+        self.assertEqual(self.post("/api/config", {"budget": 5000}).status_code, 200)   # practice
+        r = self.post("/api/config", {"env": "prod"})
+        self.assertEqual(r.status_code, 200, r.get_json())
+        self.assertEqual(config.load()["budget"], 300)
+        self.assertEqual(r.get_json()["notes"],
+                         ["Back to the real-money settings: budget $300. Settings on demo were practice."])
 
     def test_switching_exchange_waits_for_a_trade_run(self):
         """Turned off mid-run, the run still finishes its basket: switching then would book

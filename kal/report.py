@@ -80,22 +80,31 @@ def _today(now):
     start = _day_start(now)
     live = db.query("SELECT COALESCE(SUM(pnl), 0) AS p, COUNT(*) AS n FROM settlements WHERE settled_ts >= ?",
                     start)[0]
+    # Contracts written off (Kalshi showed them gone) are lost money too, booked when they go.
+    gone = db.query("SELECT COALESCE(SUM(cost), 0) AS c FROM writeoffs WHERE ts >= ?", start)[0]["c"]
     pap = db.query("SELECT COALESCE(SUM(pnl), 0) AS p, COUNT(*) AS n FROM paper "
                    "WHERE settled = 1 AND settled_ts >= ?", start)[0]
-    out = {"live_settled_pnl": round(live["p"], 2), "live_settled": live["n"],
+    out = {"live_settled_pnl": round(live["p"] - gone, 2), "live_settled": live["n"],
+           "live_written_off": round(gone, 2),
            "paper_settled_pnl": round(pap["p"], 2), "paper_settled": pap["n"], "equity_change": None}
-    day = db.get("day_start") or {}
+    day, last = db.get("day_start") or {}, db.get("last_pnl") or {}
     latest = db.query("SELECT equity FROM equity WHERE ts >= ? AND equity > 0 ORDER BY ts DESC LIMIT 1", start)
     today = datetime.fromtimestamp(now, timezone.utc).date().isoformat()
-    if day.get("day") == today and latest:
+    if day.get("day") == today and day.get("pnl") is not None and (last.get("ts") or 0) >= start:
+        # Profit and loss, as the daily stop counts it: equity also moves when the budget does.
+        out["equity_change"] = round(last["pnl"] - day["pnl"], 2)
+    elif day.get("day") == today and latest:
         out["equity_change"] = round(latest[0]["equity"] - day["equity"], 2)
     return out
 
 
 def _live_stats():
-    """Per strategy, from our own fills: what was bought, and how the settled part did."""
-    rows = db.query("""SELECT o.strategy, o.ticker, o.side, o.filled, o.price, s.result
+    """Per strategy, from our own fills: what was bought, and how the settled part did, as the
+    books count it (contracts written off earn nothing)."""
+    rows = db.query("""SELECT o.id, o.strategy, o.ticker, o.side, o.filled, o.price, s.result
         FROM orders o LEFT JOIN settlements s ON s.ticker = o.ticker WHERE o.filled > 0""")
+    gone = ledger.written_off_shares()
+    pnl = ledger.settled_order_pnl(gone)
     out = {}
     for r in rows:
         st = out.setdefault(r["strategy"] or "?", {"fills": 0, "spent": 0.0, "settled": 0, "wins": 0, "pnl": 0.0})
@@ -105,8 +114,8 @@ def _live_stats():
         if r["result"] not in (None, ""):
             paid = ledger.payout_of(r["result"], r["side"])  # 1, 0, or a split (a called-off market)
             st["settled"] += 1
-            st["wins"] += paid == 1
-            st["pnl"] += r["filled"] * paid - cost
+            st["wins"] += paid == 1 and gone.get(r["id"], 0.0) < 1   # all written off: nothing was won
+            st["pnl"] += pnl.get(r["id"], 0.0)
     for st in out.values():
         st["spent"], st["pnl"] = round(st["spent"], 2), round(st["pnl"], 2)
     return out
@@ -328,6 +337,9 @@ def daily(now=None):
     cfg = config.load()
     live = db.query("SELECT COALESCE(SUM(pnl), 0) AS p, COUNT(*) AS n FROM settlements "
                     "WHERE settled_ts >= ? AND settled_ts < ?", start, end)[0]
+    gone = db.query("SELECT COALESCE(SUM(cost), 0) AS c FROM writeoffs WHERE ts >= ? AND ts < ?",
+                    start, end)[0]["c"]   # lost money too, booked the day it was written off
+    real = live["p"] - gone
     pap = db.query("SELECT COALESCE(SUM(pnl), 0) AS p, COUNT(*) AS n FROM paper "
                    "WHERE settled = 1 AND settled_ts >= ? AND settled_ts < ?", start, end)[0]
     held = ledger.open_positions()
@@ -347,7 +359,7 @@ def daily(now=None):
         lines += [push["detail"], ""]
     lines += [
         f"Yesterday ({datetime.fromtimestamp(start, timezone.utc):%a %b %d}, UTC):",
-        f"{money}: {_signed(live['p'])} from {_bets(live['n'])}",
+        f"{money}: {_signed(real)} from {_bets(live['n'])}" + (f" and {_money(gone)} written off" if gone else ""),
         f"Paper: {_signed(pap['p'])} from {_bets(pap['n'])}",
         f"Capital now: {_money(ledger.capital(cfg))} (budget {_money(cfg.get('budget'))})",
         f"Open bets: {len(held)} real ({_money(sum(r['cost'] for r in held))}), {paper_open} paper",
@@ -357,7 +369,7 @@ def daily(now=None):
         "Bot now: " + ("STOPPED" if reason else "ON" if cfg.get("enabled") else "OFF")
         + (" (demo)" if demo else ""),
     ]
-    title = f"kal{' demo' if demo else ''} yesterday: {_signed(live['p'])}"
+    title = f"kal{' demo' if demo else ''} yesterday: {_signed(real)}"
     return scrub(title), scrub("\n".join(lines)), "high" if reason else "low"
 
 
@@ -379,7 +391,8 @@ def markdown(rep, short=False):
              f"- Budget: {_money(c['budget'])}. Capital now: {_money(led['capital'])}. "
              f"Free to trade: {_money(led['available'])}.",
              f"- Today: live {_money(today['live_settled_pnl'])} settled"
-             + (f", equity {today['equity_change']:+.2f}" if today["equity_change"] is not None else "")
+             + (f" ({_money(today['live_written_off'])} written off)" if today.get("live_written_off") else "")
+             + (f", {today['equity_change']:+.2f} with open bets" if today["equity_change"] is not None else "")
              + f". Paper {_money(today['paper_settled_pnl'])} settled.",
              (f"- Equity: {_money(eq['equity'])} (Kalshi balance {_money(eq['balance'])}). "
               f"Paper: {_money(eq['paper_equity'])}." if eq else "- Equity: no runs yet.")]

@@ -4,13 +4,15 @@ import json
 import time
 import unittest
 from contextlib import redirect_stdout
+from datetime import datetime, timezone
 from unittest import mock
 
 import requests
 
 import kal.__main__ as cli
-from kal import client, config, db, engine, gate, ledger, maintenance, paper, risk
+from kal import client, config, db, engine, gate, ledger, maintenance, paper, report, risk
 from kal.client import KalshiError
+from kal.dashboard import app as dash
 from kal.strategies import base, basket_arb
 from tests.fakes import FakeKalshi
 from tests.helpers import TempHome, orders_proven
@@ -182,7 +184,8 @@ class LiveBasketTests(TempHome):
         self.assertIn("r1", reason)
         self.assertNotIn("cancelled it", reason)
         self.assertEqual(db.query("SELECT status FROM orders")[0]["status"], "unknown")
-        # After Reset, the next run looks the order up first and cancels it if it's still there.
+        # After Reset, the next run looks the order up first. Still on the book: it cancels it
+        # and stops again. Once Kalshi shows it cancelled, what filled is booked.
         coid = db.query("SELECT client_order_id FROM orders")[0]["client_order_id"]
         c.order_list = [{"client_order_id": coid, "order_id": "r1", "status": "resting",
                          "fill_count_fp": "0.00", "ticker": "EV1-0"}]
@@ -190,9 +193,67 @@ class LiveBasketTests(TempHome):
         c.event_list = []
         config.clear_trip()
         config.update({"enabled": True})
+        engine.run_once(c)
+        self.assertEqual(c.cancelled, ["r1"])
+        self.assertIn("stayed on the book", config.load()["disabled_reason"])
+        c.order_list[0]["status"] = "canceled"
+        config.clear_trip()
+        config.update({"enabled": True})
         s = engine.run_once(c)
         self.assertEqual(s.get("reconciled"), 1, s)
-        self.assertEqual(c.cancelled, ["r1"])
+
+    def test_an_order_found_resting_on_lookup_stops_the_bot(self):
+        # The reply was lost, and the lookup shows the order still on the book: Kalshi ignored
+        # immediate-or-cancel. Stop, as when a reply shows it.
+        db.insert("orders", strategy="favorites", ticker="OTHER-1", side="yes", count=5, price=0.5,
+                  filled=0, status="unknown", client_order_id="lost-1", ts=time.time() - 30)
+        c = fake_with_arb()
+        c.order_list = [{"client_order_id": "lost-1", "order_id": "x1", "ticker": "OTHER-1",
+                         "status": "resting", "fill_count_fp": "2.00", "remaining_count_fp": "3.00"}]
+        c.held["OTHER-1"] = 2
+        engine.run_once(c)
+        self.assertEqual(c.cancelled, ["x1"])
+        self.assertIn("stayed on the book", config.load()["disabled_reason"])
+        self.assertEqual(c.orders, [])   # nothing else bought
+        # More can fill before the cancel lands, so the 2 isn't booked: it's looked up again.
+        self.assertEqual([r["status"] for r in ledger.unresolved_orders()], ["unknown"])
+        c.order_list[0].update(status="canceled", fill_count_fp="3.00", remaining_count_fp="0.00")
+        c.held["OTHER-1"] = 3
+        c.event_list = []
+        config.clear_trip()
+        config.update({"enabled": True})
+        engine.run_once(c)
+        self.assertEqual(db.query("SELECT filled FROM orders WHERE client_order_id = 'lost-1'")[0]["filled"], 3)
+        self.assertEqual(config.load()["disabled_reason"], "")
+
+    def test_a_fractional_first_fill_is_matched_by_every_leg(self):
+        # Kalshi can fill part of a contract. Rounding leg 1's 9.5 down to 9 for the later legs
+        # would leave half a contract as a bet no limit checked, and nothing would say so.
+        c = fake_with_arb()
+        c.fill = lambda t, side, n, p: n - 0.5 if t == "EV1-0" else n
+        engine.run_once(c)
+        self.assertEqual([o[2] for o in c.orders], [10, 9.5, 9.5, 9.5])
+        self.assertEqual({abs(n) for n in c.held.values()}, {9.5})
+        self.assertEqual(config.load()["disabled_reason"], "")
+
+    def test_a_part_fill_read_from_what_was_left_matches_every_leg(self):
+        # A reply with only initial and remaining counts: 10.00 - 1.13 is 8.870000000000001 in
+        # floats. The later legs must ask for the 8.87 they send, not read 8.87 as short (critic).
+        c = fake_with_arb()
+        real_buy = c.buy
+
+        def buy(ticker, side, count, price, client_order_id=None):
+            r = real_buy(ticker, side, count, price, client_order_id)
+            if len(c.orders) == 1:
+                c.held[ticker] += 1.13 if c.held[ticker] < 0 else -1.13   # 1.13 never filled
+                return {"order_id": "o1", "status": "canceled", "initial_count_fp": f"{count:.2f}",
+                        "remaining_count_fp": "1.13"}
+            return r
+        c.buy = buy
+        engine.run_once(c)
+        self.assertEqual(config.load()["disabled_reason"], "")
+        self.assertEqual([o[2] for o in c.orders], [10, 8.87, 8.87, 8.87])
+        self.assertEqual([r["filled"] for r in db.query("SELECT filled FROM orders ORDER BY id")], [8.87] * 4)
 
     def test_env_switch_mid_run_keeps_one_runs_orders_in_one_books(self):
         c = fake_with_arb()
@@ -339,6 +400,42 @@ class RestoreCatchUpTests(TempHome):
                   order_id="old1", client_order_id="c0")
         db.put("restored", {"day": "2026-10-01", "since": 1000.0})   # never caught up
         maintenance.backup()
+        maintenance.restore(maintenance.backups()[0][0])
+        self.assertEqual(db.get("restored")["since"], 1000.0)
+
+    def test_a_restore_that_stops_after_the_swap_still_adds_the_later_buys(self):
+        # Audit round 3: the books became the backup's, then the check after the swap failed
+        # before the catch-up marker was written. After Reset the buy below was gone from the
+        # books, and the bot could spend that money again.
+        db.insert("orders", ticker="OLD", side="no", count=5, price=0.8, filled=5, status="executed",
+                  order_id="old1", client_order_id="c0")
+        maintenance.backup()
+        db.insert("orders", ticker="N", side="no", count=10, price=0.9, filled=10, status="executed",
+                  order_id="new1", client_order_id="c1")   # made after the backup
+        before = ledger.open_cost()
+        real = maintenance._problem
+
+        def check(path):   # the check of the books once they are the backup's: it fails
+            if path == db.path() and not db.query("SELECT 1 FROM orders WHERE order_id = 'new1'"):
+                return "disk I/O error"
+            return real(path)
+        with mock.patch.object(maintenance, "_problem", side_effect=check), \
+                self.assertRaises(maintenance.MaintenanceError):
+            maintenance.restore(maintenance.backups()[0][0])
+        c = FakeKalshi()
+        c.fill_list = [self.fill("old1", "OLD", n=5, p=0.8), self.fill("new1")]
+        c.position_list = [{"ticker": "OLD", "position": -5, "exposure": 4},
+                           {"ticker": "N", "position": -10, "exposure": 9}]
+        config.clear_trip()
+        config.update({"enabled": True})
+        engine.run_once(c)
+        self.assertAlmostEqual(ledger.open_cost(), before)   # the buy is back in the books
+
+    def test_a_restore_keeps_a_catch_up_still_waiting_in_the_live_books(self):
+        db.insert("orders", ticker="OLD", side="no", count=5, price=0.8, filled=5, status="executed",
+                  order_id="old1", client_order_id="c0")
+        maintenance.backup()                                         # nothing waits in the backup
+        db.put("restored", {"day": "2026-10-01", "since": 1000.0})   # an earlier restore, not caught up
         maintenance.restore(maintenance.backups()[0][0])
         self.assertEqual(db.get("restored")["since"], 1000.0)
 
@@ -503,6 +600,37 @@ class DailyStopTests(TempHome):
         self._lose_it()
         self.assertIn("daily limit", config.load()["disabled_reason"])
 
+    def test_a_loss_booked_just_after_midnight_still_counts(self):
+        # The day's first run books the loss. The day starts from the run before midnight,
+        # not from after the loss, so it counts.
+        with mock.patch.object(risk, "datetime") as dt:
+            dt.now.return_value = datetime(2026, 10, 28, 23, 55, tzinfo=timezone.utc)
+            engine.run_once(self.c)
+            dt.now.return_value = datetime(2026, 10, 29, 0, 0, tzinfo=timezone.utc)
+            self._lose_it()
+        self.assertIn("daily limit", config.load()["disabled_reason"])
+
+    def test_after_a_night_off_the_day_starts_fresh(self):
+        # No run from 22:00 to 09:00 (say it was turned off): turning it back on doesn't
+        # stop it at once for what happened meanwhile.
+        with mock.patch.object(risk, "datetime") as dt:
+            dt.now.return_value = datetime(2026, 10, 28, 22, 0, tzinfo=timezone.utc)
+            engine.run_once(self.c)
+            dt.now.return_value = datetime(2026, 10, 29, 9, 0, tzinfo=timezone.utc)
+            self._lose_it()
+        self.assertEqual(config.load()["disabled_reason"], "")
+
+    def test_a_win_just_after_midnight_doesnt_widen_the_day(self):
+        cfg = {**config.DEFAULTS, "budget": 300.0}
+        with mock.patch.object(risk, "datetime") as dt:
+            dt.now.return_value = datetime(2026, 10, 28, 23, 55, tzinfo=timezone.utc)
+            risk.daily_loss(cfg, 300.0, 300.0, pnl=0.0)
+            dt.now.return_value = datetime(2026, 10, 29, 0, 0, tzinfo=timezone.utc)
+            self.assertIsNone(risk.daily_loss(cfg, 350.0, 300.0, pnl=50.0))   # a $50 win settles
+            dt.now.return_value = datetime(2026, 10, 29, 12, 0, tzinfo=timezone.utc)
+            # $35 lost since the win: over the $30 limit. The win doesn't cover it.
+            self.assertIn("daily limit", risk.daily_loss(cfg, 315.0, 300.0, pnl=15.0))
+
 
 class SoldThenSettledTests(TempHome):
     """A run sees contracts sold outside the bot in Kalshi's positions only while the market
@@ -569,8 +697,10 @@ class SoldThenSettledTests(TempHome):
 
 
 class DemoPracticeTests(TempHome):
-    """Strategy modes are one setting for both exchanges. One turned live for practice on
-    demo (fake money) goes back to paper on the switch to prod, and the owner is told."""
+    """Strategy modes, the budget and the money limits are one setting for both exchanges.
+    Back on prod each gets what prod had: one turned live for practice on demo (fake money)
+    goes back to paper, a practice budget or cap goes back to the real one, and the owner
+    is told."""
 
     def cli(self, *argv):
         out = io.StringIO()
@@ -584,7 +714,7 @@ class DemoPracticeTests(TempHome):
         config.update({"strategies": {"ladder_arb": {"mode": "live"}}})   # fake-money practice
         config.switch({"env": "prod"})                                    # then real money
         self.assertEqual(config.load()["strategies"]["ladder_arb"]["mode"], "paper")
-        config.update({"enabled": True})
+        config.update({"enabled": True, "budget": 60})   # no real budget was saved: set on prod
         orders_proven("prod")
         c = fake_for(ladder_event())
         set_book(c, "LAD-60", .62, .64, bid_size=15)
@@ -608,6 +738,93 @@ class DemoPracticeTests(TempHome):
         self.assertEqual(code, 0)
         self.assertIn("Back to the real-money modes: ladder_arb paper.", text)
         self.assertIn("Live (real money): basket_arb.", text)
+
+    def practice(self, **loose):
+        """$300 of real money on prod, then demo with looser settings for practice."""
+        config.update({"budget": 300.0})
+        config.switch({"env": "demo"})
+        config.update(loose)
+
+    def test_a_practice_budget_never_becomes_the_real_one(self):
+        self.practice(budget=5000.0)   # practice with more fake money
+        self.assertEqual(config.switch({"env": "prod"})["budget"], 300.0)
+
+    def test_practice_limits_never_reach_real_money(self):
+        self.practice(budget=1000.0, max_per_arb=500.0, max_per_trade=50.0, kelly_fraction=1.0,
+                      daily_loss_limit=1.0, strategies={"bracket_arb": {"mode": "live", "verified": True}})
+        cfg = config.switch({"env": "prod"})
+        self.assertEqual((cfg["budget"], cfg["max_per_arb"], cfg["max_per_trade"], cfg["kelly_fraction"],
+                          cfg["daily_loss_limit"]), (300.0, 30.0, 10.0, 0.25, 0.10))
+        self.assertEqual(cfg["strategies"]["bracket_arb"], {"mode": "paper", "verified": False})
+        config.update({"enabled": True, "strategies": {**_all_off(), "basket_arb": {"mode": "live"}}})
+        orders_proven("prod")
+        c = fake_with_arb(balance=1000.0)   # the account holds more than the bot's $300
+        s = engine.run_once(c)
+        self.assertTrue(s["ok"], s)
+        self.assertTrue(c.orders)
+        self.assertLessEqual(sum(n * p for _, _, n, p in c.orders), 30.0)   # max_per_arb, not 500
+
+    def test_every_money_limit_goes_back(self):
+        mine = {"budget": 300.0, "cash_floor": 20.0, "max_per_trade": 8.0, "max_per_arb": 25.0,
+                "max_per_event": 15.0, "max_exposure": 0.4, "max_arb_days": 20, "min_arb_apr": 0.3,
+                "daily_loss_limit": 0.05, "kelly_fraction": 0.2, "max_consecutive_errors": 2,
+                "reinvest_profits": False, "auto_promote": False}
+        config.update(mine)
+        config.switch({"env": "demo"})
+        config.update({"budget": 5000.0, "cash_floor": 0.0, "max_per_trade": 50.0, "max_per_arb": 500.0,
+                       "max_per_event": 200.0, "max_exposure": 1.0, "max_arb_days": 365, "min_arb_apr": 0.0,
+                       "daily_loss_limit": 1.0, "kelly_fraction": 1.0, "max_consecutive_errors": 50,
+                       "reinvest_profits": True, "auto_promote": True})
+        cfg = config.switch({"env": "prod"})
+        self.assertEqual({k: cfg[k] for k in mine}, mine)
+
+    def test_a_bracket_check_made_on_demo_buys_nothing_real(self):
+        """`set env prod` prints how to turn a strategy live. Doing that for bracket_arb must
+        not bring back the hand check made on demo."""
+        from tests.test_arb_strategies import bracket_event, fake_for
+        config.update({"budget": 60.0, "strategies": _all_off()})
+        config.switch({"env": "demo"})
+        config.update({"strategies": {"bracket_arb": {"mode": "live", "verified": True}}})
+        text = self.cli("set", "env", "prod")[1]
+        self.assertIn("set strategies.bracket_arb.mode live", text)
+        self.assertEqual(self.cli("set", "strategies.bracket_arb.mode", "live")[0], 0)
+        config.update({"enabled": True})
+        orders_proven("prod")
+        c = fake_for(bracket_event())
+        s = engine.run_once(c)
+        self.assertTrue(s["ok"], s)
+        self.assertEqual(c.orders, [])
+        self.assertEqual(s["paper_trades"], 1)
+
+    def test_kal_set_env_prod_names_what_went_back(self):
+        self.practice(budget=5000.0, kelly_fraction=1.0, strategies={"bracket_arb": {"verified": True}})
+        code, text = self.cli("set", "env", "prod")
+        self.assertEqual(code, 0)
+        self.assertIn("Back to the real-money settings: budget $300, kelly_fraction 0.25, "
+                      "bracket_arb.verified false. Settings on demo were practice.", text)
+
+    def test_a_budget_typed_with_the_switch_is_checked_against_prod(self):
+        self.practice(budget=3000.0)
+        with mock.patch("kal.setup.kalshi_balance", return_value=(True, 5000.0)) as balance, \
+                mock.patch.object(cli, "_tty", return_value=False):
+            code, text = self.cli("on", "--env", "prod", "--budget", "3000")
+        self.assertEqual(code, 2)
+        self.assertIn("Not changed. That's more than double the budget now ($300).", text)
+        balance.assert_called_once_with("prod")
+        cfg = config.load()
+        self.assertEqual((cfg["env"], cfg["enabled"]), ("demo", False))
+        code, text = self.cli("on", "--env", "prod")   # no budget typed: the real one comes back
+        self.assertEqual(code, 0)
+        self.assertIn("Budget: $300.00.", text)
+
+    def test_a_config_from_before_this_goes_back_safe(self):
+        """It left prod before the settings were saved. Each goes to the safer of where it is
+        and its default, so the budget must be set again on prod."""
+        config.update({"env": "demo", "budget": 3000.0, "max_per_arb": 500.0, "max_per_trade": 5.0,
+                       "strategies": {"bracket_arb": {"verified": True}}})
+        cfg = config.switch({"env": "prod"})
+        self.assertEqual((cfg["budget"], cfg["max_per_arb"], cfg["max_per_trade"]), (0.0, 30.0, 5.0))
+        self.assertIs(cfg["strategies"]["bracket_arb"]["verified"], False)
 
 
 class UnreadableReplyTests(TempHome):
@@ -912,4 +1129,157 @@ class GateVersionTests(TempHome):
         self.assertFalse(gate.passed(c, "prod"))
         gate.record(c, "prod", True, "passed again")
         self.assertTrue(gate.passed(c, "prod"))
+
+
+# ---------- holes the round-3 audit found (2026-10-29) ----------
+
+class TodayIsProfitTests(TempHome):
+    """The report's and the dashboard's "today" is profit and loss, as the daily stop counts
+    it. Equity moves with the budget, so a raise or a cut must not show as a gain or a loss."""
+
+    def setUp(self):
+        super().setUp()
+        config.update({"enabled": True, "budget": 300, "strategies": _all_off()})
+        # 40 NO at $0.50 ($20.70 with the fee), marked at $0.50.
+        db.insert("orders", ticker="M-1", side="no", count=40, price=0.5, filled=40,
+                  status="executed", order_id="o1", client_order_id="c1")
+        self.c = FakeKalshi(balance=1000)
+        self.c.market_info["M-1"] = {"ticker": "M-1", "status": "active", "no_bid_dollars": "0.5000"}
+        self.c.position_list = [{"ticker": "M-1", "position": -40, "exposure": 20}]
+        engine.run_once(self.c)   # the UTC day starts here
+
+    def today(self):
+        """Today's number in the report, and on the dashboard."""
+        _, page, _, _ = dash.account(config.load(), time.time())
+        return report.build()["today"]["equity_change"], page["pnl"]
+
+    def test_a_budget_raise_is_not_profit(self):
+        config.update({"budget": 350})
+        self.c.market_info["M-1"] = {"ticker": "M-1", "status": "finalized", "result": "yes",
+                                     "settlement_value_dollars": "1.0000"}
+        self.c.position_list = []
+        engine.run_once(self.c)   # the bet lost: the $20 it was marked at is gone
+        self.assertEqual(config.load()["disabled_reason"], "")
+        rep, page = self.today()
+        self.assertAlmostEqual(rep, -20)    # not +$30: the $50 raise is not profit
+        self.assertAlmostEqual(page, -20)
+        self.assertIn("-20.00 with open bets", report.markdown(report.build()))
+
+    def test_a_budget_cut_is_not_a_loss(self):
+        config.update({"budget": 150})
+        engine.run_once(self.c)
+        rep, page = self.today()
+        self.assertAlmostEqual(rep, 0)      # not -$150
+        self.assertAlmostEqual(page, 0)
+
+
+class LivePnlAgreesWithTheBooksTests(TempHome):
+    """Each strategy's live P&L (report, Trades tab) and the morning summary count money as the
+    books do. Contracts written off (Kalshi showed them gone) earn nothing, so they never show
+    as won. A restored order's gain never counts."""
+
+    def setUp(self):
+        super().setUp()
+        config.update({"enabled": True, "budget": 300, "strategies": _all_off()})
+        db.insert("orders", strategy="favorites", ticker="F-1", side="yes", count=10, price=0.9, filled=10,
+                  status="executed", order_id="o1", client_order_id="c1")
+        self.cost = 9 + client.fee(10, 0.9)   # $9.07
+        self.c = FakeKalshi(balance=1000)
+        self.c.market_info["F-1"] = {"ticker": "F-1", "status": "active", "yes_bid_dollars": "0.9000"}
+
+    def _sold_then_won(self, left):
+        """Kalshi shows only `left` of the 10 (the rest are written off), then F-1 settles YES."""
+        self.c.position_list = [{"ticker": "F-1", "position": left, "exposure": 0.9 * left}] if left else []
+        engine.run_once(self.c)
+        self.c.market_info["F-1"] = {"ticker": "F-1", "status": "finalized", "result": "yes",
+                                     "settlement_value_dollars": "1.0000"}
+        self.c.position_list = []
+        engine.run_once(self.c)
+        self.assertEqual(config.load()["disabled_reason"], "")
+
+    def test_contracts_written_off_never_show_as_won(self):
+        self._sold_then_won(0)
+        self.assertAlmostEqual(ledger.realized(), -self.cost)
+        live = report._live_stats()["favorites"]
+        self.assertEqual((live["settled"], live["wins"], live["pnl"]), (1, 0, -9.07))   # not a +$0.93 win
+        tab = dash.trade_totals()["live"]["favorites"]
+        self.assertEqual(tab["wins"], 0)
+        self.assertAlmostEqual(tab["pnl"], ledger.realized())
+        row = dash.trade_list(10)[0][0]
+        self.assertEqual(row["state"], "lost")
+        self.assertAlmostEqual(row["pnl"], ledger.realized())
+        rep = report.build()
+        self.assertEqual(rep["today"]["live_settled_pnl"], -9.07)
+        self.assertIn("($9.07 written off)", report.markdown(rep))
+        title, text, _ = report.daily(now=time.time() + 86400)
+        self.assertEqual(title, "kal yesterday: -$9.07")   # not +$0.00
+        self.assertIn("Real money: -$9.07 from 1 settled bet and $9.07 written off\n", text)
+
+    def test_part_written_off_pays_only_what_was_left(self):
+        self._sold_then_won(6)   # 4 of the 10 sold outside the bot
+        self.assertAlmostEqual(ledger.realized(), 6 - self.cost)
+        live = report._live_stats()["favorites"]
+        self.assertEqual((live["wins"], live["pnl"]), (1, round(6 - self.cost, 2)))
+        self.assertAlmostEqual(dash.trade_totals()["live"]["favorites"]["pnl"], ledger.realized())
+
+    def test_a_restored_orders_gain_never_counts(self):
+        # Imported after a restore, so maybe the owner's own trade: its win isn't the bot's.
+        db.insert("orders", strategy="restored", ticker="OWN-1", side="yes", count=100, price=0.10, filled=100,
+                  status="imported", order_id="own1", client_order_id="")
+        self.c.market_info["OWN-1"] = {"ticker": "OWN-1", "status": "finalized", "result": "yes",
+                                       "settlement_value_dollars": "1.0000"}
+        ledger.settle(self.c)
+        self.assertAlmostEqual(ledger.realized(), 0)
+        self.assertEqual(report._live_stats()["restored"]["pnl"], 0)   # not +$89.37
+        self.assertAlmostEqual(dash.trade_totals()["live"]["restored"]["pnl"], 0)
+
+    def _settle_t1(self):
+        self.c.market_info["T-1"] = {"ticker": "T-1", "status": "finalized", "result": "yes",
+                                     "settlement_value_dollars": "1.0000"}
+        ledger.settle(self.c)
+        tab = dash.trade_totals()["live"]
+        rows = {t["strategy"]: t for t in dash.trade_list(20)[0] if t["ticker"] == "T-1"}
+        return report._live_stats(), tab, rows
+
+    def _order(self, strategy, price, ts):
+        db.insert("orders", ts=ts, strategy=strategy, ticker="T-1", side="yes", count=10, price=price,
+                  filled=10, status="executed", order_id=f"{strategy}-1", client_order_id="")
+
+    def test_a_rebuy_after_a_sale_keeps_its_own_contracts(self):
+        # favorites' 10 were sold outside the bot and written off. Then another strategy bought
+        # 10 again, and only those won. Each keeps its own result (critic, round 3).
+        self._order("favorites", 0.5, time.time() - 60)
+        ledger.write_off("T-1", "yes", 10, "sold outside the bot")
+        self._order("longshot_fade", 0.6, time.time() + 1)
+        live, tab, rows = self._settle_t1()
+        self.assertAlmostEqual(ledger.realized(), -1.35)
+        self.assertEqual((live["favorites"]["wins"], live["favorites"]["pnl"]), (0, -5.18))
+        self.assertEqual((live["longshot_fade"]["wins"], live["longshot_fade"]["pnl"]), (1, 3.83))
+        self.assertEqual((tab["favorites"]["wins"], tab["longshot_fade"]["wins"]), (0, 1))
+        self.assertAlmostEqual(tab["favorites"]["pnl"] + tab["longshot_fade"]["pnl"], ledger.realized())
+        self.assertEqual((rows["favorites"]["state"], rows["longshot_fade"]["state"]), ("lost", "won"))
+        self.assertAlmostEqual(rows["longshot_fade"]["pnl"], 3.83)
+
+    def test_a_restored_order_with_a_write_off_still_adds_up_to_the_books(self):
+        # settle() takes a restored order's gain off its whole market. When part of that market
+        # was written off, the reports must not show more than the books (critic, round 3).
+        self._order("favorites", 0.5, time.time() - 60)
+        self._order("restored", 0.3, time.time() - 30)
+        ledger.write_off("T-1", "yes", 10, "sold outside the bot")
+        live, tab, rows = self._settle_t1()
+        self.assertAlmostEqual(ledger.realized(), -5.18)
+        self.assertAlmostEqual(live["favorites"]["pnl"] + live["restored"]["pnl"], -5.18)   # not -3.33
+        self.assertAlmostEqual(tab["favorites"]["pnl"] + tab["restored"]["pnl"], ledger.realized())
+        self.assertAlmostEqual(rows["favorites"]["pnl"] + rows["restored"]["pnl"], ledger.realized())
+        self.assertEqual(live["favorites"]["pnl"], -0.18)   # its own half: $5 back on $5.18
+        self.assertLessEqual(live["restored"]["pnl"], 0)    # a restored order never shows a gain
+
+    def test_a_restored_order_part_written_off_alone_matches_the_books(self):
+        self._order("restored", 0.4, time.time() - 60)
+        ledger.write_off("T-1", "yes", 5, "sold outside the bot")
+        live, tab, rows = self._settle_t1()
+        self.assertAlmostEqual(ledger.realized(), -4.17)
+        self.assertAlmostEqual(live["restored"]["pnl"], -4.17)
+        self.assertAlmostEqual(tab["restored"]["pnl"], -4.17)
+        self.assertAlmostEqual(rows["restored"]["pnl"], -4.17)
 

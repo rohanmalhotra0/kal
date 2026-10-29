@@ -9,7 +9,7 @@ import os
 import sqlite3
 import threading
 import time
-from contextlib import closing
+from contextlib import closing, redirect_stdout
 from datetime import datetime, timezone
 from email.utils import formatdate
 from types import SimpleNamespace
@@ -17,6 +17,7 @@ from unittest import mock
 
 import requests
 
+import kal.__main__ as cli
 from kal import config, db, ledger, logs, maintenance, paper, report, risk, scheduler
 from kal.client import fee
 from kal.scheduler import Scheduler
@@ -89,6 +90,29 @@ class BackupTests(Base):
     def seed(self):
         self.fill("A")
         db.insert("settlements", ticker="A", settled_ts=time.time(), result="no", revenue=5, cost=2.6, pnl=2.4)
+
+    def bought_after_a_backup(self):
+        self.fill("A")
+        day = maintenance.backup()["day"]
+        self.fill("B")   # bought after the backup: only the catch-up can bring it back
+        return day
+
+    def tickers(self):
+        with closing(sqlite3.connect(db.path())) as c:
+            return sorted(r[0] for r in c.execute("SELECT ticker FROM orders"))
+
+    def trouble_after_the_swap(self, trouble):
+        """_problem(), but once the live books are the backup's, `trouble` is raised (or
+        reported, if it's text): the check after the swap goes wrong."""
+        real = maintenance._problem
+
+        def check(path):
+            if path == db.path() and self.tickers() == ["A"]:
+                if isinstance(trouble, BaseException):
+                    raise trouble
+                return trouble
+            return real(path)
+        return mock.patch.object(maintenance, "_problem", side_effect=check)
 
     def test_copies_every_db_and_keeps_the_newest_14_days(self):
         self.seed()
@@ -163,6 +187,66 @@ class BackupTests(Base):
         self.assertIn("damaged", str(e.exception))
         self.assertEqual(len(db.query("SELECT * FROM orders")), 1)
         self.assertEqual(config.load()["disabled_reason"], "")
+
+    def test_a_restore_that_fails_before_the_swap_changes_nothing(self):
+        # Audit round 3: the books were swapped first and the catch-up marker written after. When
+        # that write failed it said "Not restored", but B had dropped out of the books for good.
+        # Now the marker goes into a copy of the backup first, and only that copy is swapped in.
+        day = self.bought_after_a_backup()
+        for trouble, says in ((sqlite3.OperationalError("database is locked"), "books were not changed"),
+                              (KeyboardInterrupt(), "Run the restore again")):
+            with self.subTest(trouble=type(trouble).__name__):
+                with mock.patch.object(maintenance, "_mark_restored", side_effect=trouble), \
+                        self.assertRaises(type(trouble)):
+                    maintenance.restore(day)
+                self.assertEqual(self.tickers(), ["A", "B"])
+                self.assertIsNone(db.get("restored"))
+                self.assertIn(says, config.load()["disabled_reason"])
+
+    def test_a_restore_that_stops_after_the_swap_keeps_the_marker(self):
+        # From the swap on, the books may be the backup's. They already hold the marker, so B
+        # still comes back, and neither the stop nor the command says "Not restored".
+        day = self.bought_after_a_backup()
+        out = io.StringIO()
+        with self.trouble_after_the_swap("disk I/O error"), redirect_stdout(out):
+            code = cli.main(["restore", day, "--yes"])
+        self.assertEqual(self.tickers(), ["A"])
+        self.assertEqual((db.get("restored") or {}).get("day"), day)   # the catch-up will run
+        self.assertEqual(code, 1)
+        self.assertNotIn("Not restored", out.getvalue())
+        self.assertIn(f"restore {day} --yes", out.getvalue())          # run it again
+        reason = config.load()["disabled_reason"]
+        self.assertIn("stopped part way", reason)
+        self.assertIn("Run the restore again", reason)
+
+    def test_a_restore_cut_off_after_the_swap_keeps_the_marker(self):
+        day = self.bought_after_a_backup()
+        with self.trouble_after_the_swap(KeyboardInterrupt()), self.assertRaises(KeyboardInterrupt):
+            maintenance.restore(day)   # Ctrl-C, or the SSH window closed
+        self.assertEqual(self.tickers(), ["A"])
+        self.assertEqual((db.get("restored") or {}).get("day"), day)
+        self.assertIn("Run the restore again", config.load()["disabled_reason"])
+
+    def test_restoring_broken_books_never_leaves_them_missing(self):
+        # Broken books are swapped as files. The new file (marker inside) replaces them in one
+        # step, so a cut-off restore never leaves no books, which the bot would start afresh.
+        self.seed()
+        b = maintenance.backup()
+        with open(db.path(), "wb") as f:
+            f.write(b"not a database " * 100)
+        real = os.replace
+
+        def replace(src, dst):
+            if dst == db.path():
+                raise KeyboardInterrupt   # cut off right at the swap
+            return real(src, dst)
+        with mock.patch("kal.maintenance.os.replace", side_effect=replace), self.assertRaises(KeyboardInterrupt):
+            maintenance.restore(b["day"])
+        with open(db.path(), "rb") as f:
+            self.assertTrue(f.read().startswith(b"not a database"))   # still there
+        maintenance.restore(b["day"])   # run again, as the stop says
+        self.assertEqual(len(db.query("SELECT * FROM orders")), 1)
+        self.assertEqual(db.get("restored")["day"], b["day"])
 
     def test_restore_waits_for_a_trade_run(self):
         self.seed()

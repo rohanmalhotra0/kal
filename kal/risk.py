@@ -113,22 +113,41 @@ def mark_to_market(client, positions):
     return value
 
 
+DAY_CARRY = 3600   # seconds: a check this recent still starts the next UTC day
+
+
+def _loss_since(start, equity, pnl):
+    if pnl is not None and start.get("pnl") is not None:
+        return start["pnl"] - pnl
+    return start["equity"] - equity
+
+
 def daily_loss(cfg, equity, at_risk=None, pnl=None):
     """A reason to stop if today's loss passed the limit, else None. Day = UTC date.
     `at_risk` (what the bot could really lose: capital, capped by what the account holds)
     caps the base, so a budget typed bigger than the account can't loosen the stop.
     `pnl` (realized profit plus open positions at their bids, less their cost) measures the
     loss when given: equity moves with the budget, so raising it the same day would hide
-    that day's losses."""
-    today = datetime.now(timezone.utc).date().isoformat()
+    that day's losses.
+
+    Every call is saved. If money was lost since the last call before midnight, and that call
+    was within DAY_CARRY, the new day starts from it: a loss the day's first run books (a
+    market that settled at midnight) still counts. A gain then never widens the new day. After
+    a longer gap (say the bot was off), the day starts fresh, so turning it back on doesn't
+    stop it at once."""
+    now = datetime.now(timezone.utc)
+    today = now.date().isoformat()
+    seen = {"ts": now.timestamp(), "equity": equity, "pnl": pnl}   # the next call's "last"
     start = db.get("day_start")
     if not start or start["day"] != today:
-        db.put("day_start", {"day": today, "equity": equity, "pnl": pnl})
-        return None
-    if pnl is not None and start.get("pnl") is not None:
-        loss = start["pnl"] - pnl
-    else:
-        loss = start["equity"] - equity
+        last = (start or {}).get("last")
+        recent = last and abs(seen["ts"] - last["ts"]) <= DAY_CARRY
+        if not (recent and _loss_since(last, equity, pnl) > 0):   # nothing to carry: start fresh
+            db.put("day_start", {"day": today, "equity": equity, "pnl": pnl, "last": seen})
+            return None
+        start = {"day": today, "equity": last["equity"], "pnl": last["pnl"]}
+    db.put("day_start", {**start, "last": seen})
+    loss = _loss_since(start, equity, pnl)
     base = max(cfg["budget"], start["equity"])
     if at_risk is not None:
         base = min(base, at_risk)

@@ -65,6 +65,10 @@ class MaintenanceError(RuntimeError):
     pass
 
 
+class RestoreUnfinished(MaintenanceError):
+    """A restore stopped once it had begun to swap the books: they may be the backup's now."""
+
+
 def _row(check, level, detail, **extra):
     return {"check": check, "ok": level == "ok", "level": level, "detail": str(detail)[:300], **extra}
 
@@ -262,7 +266,8 @@ def restore(day, env=None, wait=120):
 
     The bot is tripped first and stays stopped: trades made after the backup are missing
     from those books, so a person must check Kalshi before pressing Reset. The books as
-    they were are kept in backups/before-restore-<time>/ (or beside them, if broken)."""
+    they were are kept in backups/before-restore-<time>/ (or beside them, if broken).
+    RestoreUnfinished means it stopped part way: the books may be the backup's, so run it again."""
     if not isinstance(day, str) or not DAY.match(day):
         raise MaintenanceError("give the day as YYYY-MM-DD, like 2026-10-24")
     live = db.path(env or _env())
@@ -284,60 +289,109 @@ def restore(day, env=None, wait=120):
             before = str(config.load().get("disabled_reason") or "")[:200]
         except Exception:
             before = ""
+        earlier = f" (It had stopped before: {before})" if before else ""
         config.trip(f"Books restored from the {day} backup. When you press Reset, the bot first adds the "
-                    "trades Kalshi shows since then." + (f" (It had stopped before: {before})" if before else ""))
+                    "trades Kalshi shows since then." + earlier)
+        again = "The books may be the backup's now. Run the restore again before you press Reset."
         try:
-            saved = _put_back(src, live, name, stamp)
-            _mark_restored(live, day)
+            saved = _put_back(src, live, name, stamp, day)
+        except RestoreUnfinished as e:
+            config.trip(f"Restoring the {day} backup stopped part way: {e}. {again}{earlier}")
+            raise
         except Exception as e:
-            config.trip(f"Restoring the {day} backup failed: {e}. Check the books before you press Reset.")
+            config.trip(f"Restoring the {day} backup failed: {e}. The books were not changed.{earlier}")
+            raise
+        except BaseException:   # Ctrl-C: it may have stopped anywhere
+            config.trip(f"Restoring the {day} backup was cut off. {again}{earlier}")
             raise
     return {"db": live, "from": src, "saved": saved}
 
 
-def _mark_restored(path, day):
+def _waiting(c):
+    """Where a catch-up still waiting in these books starts (their 'restored' row), else None.
+    Unreadable: 0, so it looks at every fill Kalshi has."""
+    kv = c.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'kv'").fetchone()
+    row = kv and c.execute("SELECT value FROM kv WHERE key = 'restored'").fetchone()
+    if not row:
+        return None
+    try:
+        return float(json.loads(row[0])["since"])
+    except (TypeError, ValueError, KeyError):
+        return 0
+
+
+def _mark_restored(path, day, live=None):
     """Tell the next live run to bring the books up to date: every buy Kalshi shows since the
     backup's day (an hour early, for clock slack) that these books don't have gets added
-    (ledger.catch_up). Until then the bot doesn't trade: the restore tripped it. A backup
-    taken while an older restore still waited keeps the older, earlier start."""
+    (ledger.catch_up). Until then the bot doesn't trade: the restore tripped it. A catch-up
+    still waiting, in the backup or in the `live` books it replaces, keeps its earlier start."""
     since = day_start(day) - 3600
+    waiting = []
+    if live:
+        with _open(live) as c:
+            waiting.append(_waiting(c))
     with _open(path) as c:
+        waiting.append(_waiting(c))
+        since = min([since] + [w for w in waiting if w is not None])
         c.execute("CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT)")
-        row = c.execute("SELECT value FROM kv WHERE key = 'restored'").fetchone()
-        try:
-            since = min(since, float(json.loads(row[0])["since"])) if row else since
-        except (TypeError, ValueError, KeyError):
-            since = 0   # unreadable: look at every fill Kalshi has
         c.execute("INSERT OR REPLACE INTO kv (key, value) VALUES ('restored', ?)",
                   (json.dumps({"day": day, "since": since, "at": time.time()}),))
         c.commit()
 
 
-def _put_back(src, live, name, stamp):
-    """Copy the backup over the live db. Returns where the old books went."""
-    if os.path.exists(live) and not _problem(live):
-        saved = os.path.join(backups_dir(), f"before-restore-{stamp}")
-        os.makedirs(saved, mode=0o700, exist_ok=True)
-        _copy(live, os.path.join(saved, name))
-        # Through SQLite, not a file copy, so a process that has the db open stays consistent.
-        with _open(src) as s, _open(live) as d:
-            s.backup(d)
-        problem = _problem(live)
+def _put_back(src, live, name, stamp, day):
+    """Swap the backup in for the live books. Returns where the old books went.
+
+    The catch-up marker goes into a checked copy of the backup first, and only that copy is
+    swapped in, in one step. So the backup's books are never there without the marker, which
+    would drop every buy since the backup from the books. Until the swap begins the live
+    books are untouched. A failure after that raises RestoreUnfinished."""
+    healthy = os.path.exists(live) and not _problem(live)
+    tmp = _tmp(live)
+    try:
+        for p in (tmp, tmp + "-journal"):   # left by a crash: an old journal would be played into the copy
+            if os.path.exists(p):
+                os.remove(p)
+        shutil.copyfile(src, tmp)
+        _mark_restored(tmp, day, live if healthy else None)
+        problem = _problem(tmp)
         if problem:
-            raise MaintenanceError(f"the restored books failed their check: {problem}")
+            raise MaintenanceError(f"the copy of the backup failed its check: {problem}")
+        if healthy:
+            saved = os.path.join(backups_dir(), f"before-restore-{stamp}")
+            os.makedirs(saved, mode=0o700, exist_ok=True)
+            _copy(live, os.path.join(saved, name))
+        elif os.path.exists(live):
+            saved = f"{live}.broken-{stamp}"   # a second name keeps them: the books never go missing
+            if not (os.path.exists(saved) and os.path.samefile(live, saved)):   # else a cut-off run did
+                try:
+                    os.link(live, saved)
+                except OSError:
+                    shutil.copyfile(live, saved)   # no links here, or the name is taken
+        else:
+            saved = None
+        try:   # the swap: from here on the books may be the backup's
+            if healthy:
+                # Through SQLite, not a file copy, so a process that has the db open stays
+                # consistent. One write: the books and the marker land together, or not at all.
+                with _open(tmp) as s, _open(live) as d:
+                    s.backup(d)
+            else:
+                for suffix in ("-wal", "-shm"):   # a stale -wal beside the new file would corrupt it
+                    if os.path.exists(live + suffix):
+                        os.replace(live + suffix, f"{live}{suffix}.broken-{stamp}")
+                os.replace(tmp, live)   # one step, the marker already inside
+            problem = _problem(live)
+            if problem:
+                raise MaintenanceError(f"the restored books failed their check: {problem}")
+        except Exception as e:
+            raise RestoreUnfinished(str(e)) from e
         return saved
-    saved = None
-    shutil.copyfile(src, _tmp(live))   # copy first, so the swap below is just quick renames
-    for suffix in ("", "-wal", "-shm"):   # a stale -wal beside a new file would corrupt it
-        if os.path.exists(live + suffix):
-            os.replace(live + suffix, f"{live}{suffix}.broken-{stamp}")
-            if not suffix:
-                saved = f"{live}.broken-{stamp}"
-    os.replace(_tmp(live), live)
-    problem = _problem(live)
-    if problem:
-        raise MaintenanceError(f"the restored books failed their check: {problem}")
-    return saved
+    finally:
+        try:
+            os.remove(tmp)   # already gone if it was swapped in as a file
+        except OSError:
+            pass
 
 
 # ---------- prune ----------

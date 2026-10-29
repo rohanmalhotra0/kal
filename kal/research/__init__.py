@@ -18,6 +18,20 @@ from . import discover, longshot, promote
 log = logging.getLogger(__name__)
 
 
+def _promote_settings(cfg):
+    """cfg with auto_promote on only if it was on when research started (maybe hours ago) and
+    still is: the owner may have turned it off since. A value read now can only turn it off.
+    It may be another exchange's (the owner switched to demo meanwhile and practiced there),
+    and that must never promote this run's real money. Settings that can't be read count as
+    off. The run's exchange stays as it was."""
+    try:
+        on = cfg.get("auto_promote") is True and config.load().get("auto_promote") is True
+    except Exception as e:
+        log.warning("research: can't read the settings, so nothing is promoted this run: %s", e)
+        on = False
+    return {**cfg, "auto_promote": on}
+
+
 def run_all(client=None, quick=False):
     """Discover (favorite ranges, then longshot cells), then promote. quick=True tests only a
     few series (for CI and smoke tests)."""
@@ -43,7 +57,8 @@ def run_all(client=None, quick=False):
                 log.error("research discovery failed: %s", traceback.format_exc())
             summary["longshot"] = longshot.run(client, cfg, quick=quick)  # never raises
             try:
-                summary["changes"] = promote.apply(cfg, client) + longshot.apply_longshot(cfg, client)
+                fresh = _promote_settings(cfg)
+                summary["changes"] = promote.apply(fresh, client) + longshot.apply_longshot(fresh, client)
             except Exception as e:
                 summary.update(ok=False, promote_error=str(e)[:500])
                 log.error("research promote failed: %s", traceback.format_exc())

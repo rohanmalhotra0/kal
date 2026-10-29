@@ -59,6 +59,13 @@ MODES = ("off", "paper", "live")
 _MONEY = ("budget", "cash_floor", "max_per_trade", "max_per_arb", "max_per_event", "paper_bankroll")
 _POSITIVE_INTS = ("max_consecutive_errors", "trade_interval_min", "research_interval_hours",
                   "research_max_series", "research_max_markets", "max_arb_days")
+# The money limits, and which way is safer (min: smaller is). Like the modes, each is one
+# setting for both exchanges, so a switch to prod puts back what prod had (prod_settings).
+# A new money limit goes here too.
+LIMITS = {"budget": min, "cash_floor": max, "max_per_trade": min, "max_per_arb": min,
+          "max_per_event": min, "max_exposure": min, "max_arb_days": min, "min_arb_apr": max,
+          "daily_loss_limit": min, "kelly_fraction": min, "max_consecutive_errors": min,
+          "reinvest_profits": min, "auto_promote": min}
 
 
 def home():
@@ -255,15 +262,16 @@ def switch(changes, wait=None):
         if cur["enabled"]:
             raise ValueError("turn the bot off before you switch")
         if changes["env"] == "prod":
-            # Modes are one setting for both exchanges, so real money is chosen on prod itself:
-            # back on prod, each strategy gets the mode it had there (saved when leaving), and
-            # one turned live for practice on demo (fake money) goes back to paper.
+            # Modes and money limits are one setting for both exchanges, so real money is set
+            # on prod itself: back on prod, each gets what it had there (saved when leaving).
+            # One turned live for practice on demo (fake money) goes back to paper, and a
+            # practice budget or cap goes back to the real one. A budget in `changes` wins.
             back = {name: {"mode": mode} for name, mode in prod_modes(cur).items()
                     if mode != (cur["strategies"].get(name) or {}).get("mode")}
-            changes = _merge({"strategies": back}, changes)
+            changes = _merge(_merge(prod_settings(cur), {"strategies": back}), changes)
         elif cur["env"] == "prod":
             modes = {name: (s or {}).get("mode") for name, s in cur["strategies"].items()}
-            changes = {**changes, "prod_modes": modes}   # for the way back
+            changes = {**changes, "prod_modes": modes, "prod_settings": _settings(cur)}   # for the way back
         return update(changes)
 
 
@@ -281,6 +289,35 @@ def prod_modes(cfg):
     practice = set(practice_live(cfg))
     return {name: saved.get(name) or ("paper" if name in practice else (s or {}).get("mode"))
             for name, s in cfg["strategies"].items()}
+
+
+def _settings(cfg):
+    """The money limits, and each strategy's settings besides its mode (like bracket_arb's
+    hand check, "verified")."""
+    return {**{k: cfg[k] for k in LIMITS},
+            "strategies": {name: {k: v for k, v in (s or {}).items() if k != "mode"}
+                           for name, s in cfg["strategies"].items()}}
+
+
+def prod_settings(cfg):
+    """What _settings() become on a switch to prod: what prod had when it last left
+    (cfg["prod_settings"]). With nothing saved (it left prod before they were saved), each
+    limit goes to the safer of where it is and its default, so the budget goes to $0, and a
+    strategy setting goes to its default (a hand check is undone)."""
+    saved, now = cfg.get("prod_settings") or {}, _settings(cfg)
+    out = {k: saved[k] if k in saved else safer(now[k], DEFAULTS[k]) for k, safer in LIMITS.items()}
+    kept = saved.get("strategies") or {}
+    out["strategies"] = {
+        name: {k: (kept.get(name) or {}).get(k, (DEFAULTS["strategies"].get(name) or {}).get(k, v))
+               for k, v in s.items()}
+        for name, s in now["strategies"].items()}
+    return out
+
+
+def budget_on(cfg, env):
+    """The budget in force on `env` once switched there, before any new one typed with it:
+    on a switch from demo to prod, the one prod had."""
+    return prod_settings(cfg)["budget"] if env == "prod" and cfg["env"] != "prod" else cfg["budget"]
 
 
 def back_on_prod(before, after):
@@ -301,3 +338,37 @@ def back_on_prod_note(moved):
         return ""
     return (f"Back to the real-money modes: {', '.join(f'{n} {m}' for n, m in moved.items())}. "
             f"Modes on demo were practice.")
+
+
+def settings_back_on_prod(before, after):
+    """{setting: new value} for the _settings() a switch from demo to prod changed. A
+    strategy's own setting is named like "bracket_arb.verified"."""
+    if before["env"] == "prod" or after["env"] != "prod":
+        return {}
+    was, now = _settings(before), _settings(after)
+    out = {k: now[k] for k in LIMITS if now[k] != was[k]}
+    for name, s in sorted(now["strategies"].items()):
+        out.update({f"{name}.{k}": v for k, v in sorted(s.items())
+                    if v != (was["strategies"].get(name) or {}).get(k)})
+    return out
+
+
+def _shown(key, v):
+    """A setting's value as the owner reads it: $300, 0.25, false."""
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return json.dumps(v)
+    if key in _MONEY:
+        from .setup import dollars
+        return dollars(v)
+    return f"{v:g}"
+
+
+def back_on_prod_notes(before, after):
+    """The owner's lines for a switch from demo to prod: the modes, then the settings that
+    went back to their real-money values. [] for any other change."""
+    notes = [back_on_prod_note(back_on_prod(before, after))]
+    changed = settings_back_on_prod(before, after)
+    if changed:
+        shown = ", ".join(f"{k} {_shown(k, v)}" for k, v in changed.items())
+        notes.append(f"Back to the real-money settings: {shown}. Settings on demo were practice.")
+    return [n for n in notes if n]

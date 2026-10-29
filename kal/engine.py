@@ -92,6 +92,21 @@ def research_outputs():
     return out
 
 
+def _stop_resting(client, ticker, order):
+    """Immediate-or-cancel should never rest. If it does, Kalshi isn't doing what we assume:
+    pull it and stop everything. Returns the Halted to raise. The caller leaves the order's
+    row unresolved, so the run after Reset looks it up and books what filled before the cancel."""
+    try:
+        client.cancel(order.get("order_id", ""))
+        done = "cancelled it and stopped"
+    except Exception as e:
+        log.error("cancel of resting order %s failed: %s", order.get("order_id"), e)
+        done = (f"the cancel FAILED ({type(e).__name__}): cancel order {order.get('order_id', '?')} "
+                f"on Kalshi now")
+    config.trip(f"an order on {ticker} stayed on the book (status {order.get('status')!r}); {done}")
+    return Halted(f"{ticker} order rested instead of filling or cancelling")
+
+
 def reconcile(client):
     """Find out what happened to orders whose reply we never got. Raises if we can't."""
     rows = ledger.unresolved_orders()
@@ -102,7 +117,9 @@ def reconcile(client):
         if found:
             o = found[0]
             if resting(o):
-                client.cancel(o["order_id"])
+                # Still on the book: stop, as when a reply shows it. More can fill before the
+                # cancel lands, so its count now isn't booked. It's looked up again after Reset.
+                raise _stop_resting(client, r["ticker"], o)
             if not fill_known(o):
                 # "canceled" alone can hide a part fill: never book it as nothing. It stays
                 # 'unknown', and the bot stops for a person to check it.
@@ -178,19 +195,10 @@ def execute(client, sig, signal_id):
         db.execute("UPDATE orders SET status = ?, filled = ?, order_id = ? WHERE id = ?",
                    order.get("status", "?"), n, order.get("order_id", ""), oid)
         if resting(order):
-            # Immediate-or-cancel should never rest. If it does, Kalshi isn't doing what we
-            # assume: pull it and stop everything. 'unknown' makes the next run look the order
-            # up, so whatever filled before the cancel lands in the books.
+            # 'unknown' makes the next run look the order up, so whatever filled before the
+            # cancel lands in the books.
             db.execute("UPDATE orders SET status = 'unknown' WHERE id = ?", oid)
-            try:
-                client.cancel(order.get("order_id", ""))
-                done = "cancelled it and stopped"
-            except Exception as e:
-                log.error("cancel of resting order %s failed: %s", order.get("order_id"), e)
-                done = (f"the cancel FAILED ({type(e).__name__}): cancel order {order.get('order_id', '?')} "
-                        f"on Kalshi now")
-            config.trip(f"an order on {leg.ticker} stayed on the book (status {order.get('status')!r}); {done}")
-            raise Halted(f"{leg.ticker} order rested instead of filling or cancelling")
+            raise _stop_resting(client, leg.ticker, order)
         if not fill_known(order):
             # The reply doesn't say how much filled ("canceled" alone can hide a part fill).
             # Never read that as nothing: 'unknown' makes the next run look the order up.
@@ -205,7 +213,7 @@ def execute(client, sig, signal_id):
         if i == 0:
             if n == 0:
                 return 0.0  # nothing bought: the chance was gone, no harm done
-            count = int(n)  # later legs match what the first leg actually got
+            count = n  # later legs match what the first leg actually got, a part contract too
         elif n < want:
             raise LegFailed(f"leg {i + 1}/{len(sig.legs)} {leg.ticker} filled {n}/{want}; "
                             f"basket incomplete")
@@ -414,12 +422,16 @@ def _trade(client, cfg, summary):
             capital = ledger.capital(cfg)
         equity = ledger.equity(client, cfg)
         open_cost = ledger.open_cost()
+        # Profit so far: realized, plus open bets at their bids, less their cost. Unlike equity,
+        # it doesn't move with the budget. The daily stop and "today" (report, dashboard) use it.
+        pnl = equity - capital + ledger.realized()
         db.insert("equity", balance=balance, exposure=open_cost, equity=equity,
                   paper_equity=paper.equity(cfg))
+        db.put("last_pnl", {"ts": time.time(), "pnl": pnl})
         # The limits that scale with capital (daily stop, bets cap, bet size) use what the bot
         # could really lose, so a budget typed bigger than the account can't loosen them.
         at_risk = min(capital, balance + open_cost)
-        reason = risk.daily_loss(cfg, equity, at_risk, pnl=equity - capital + ledger.realized())
+        reason = risk.daily_loss(cfg, equity, at_risk, pnl=pnl)
         if not reason and cfg["budget"] > 0 and capital < 1:
             reason = f"the ${cfg['budget']:.2f} of capital is used up"
         if reason:

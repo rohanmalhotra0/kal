@@ -689,6 +689,51 @@ class ResearchKeepsOneExchangeTests(TempHome):
             self.assertEqual(db.query("SELECT * FROM runs WHERE kind = 'research'"), [])
 
 
+class AutoPromoteOffMidRunTests(TempHome):
+    """Research can take an hour or two. If the owner turns auto_promote off meanwhile, that
+    run must not promote anything (round-3 audit)."""
+    EDGE = "KXS:no:0.90-0.95"
+
+    def setUp(self):
+        super().setUp()
+        discover.save_edges([edge(self.EDGE)])
+        for i in range(60):  # 60 wins on 60 days: proof enough on the real exchange
+            ts = T0 + i * DAY
+            paper_win("favorites", i, ts, f"KXS-{i}", {"edge": self.EDGE, "group": f"KXS:{day_of(ts)}"}, p=0.90)
+
+    def run_with(self, change_settings):
+        from kal import research
+        from kal.research import longshot
+
+        def discover_then_change(client, cfg, quick=False):
+            change_settings()   # the owner, mid-run
+            return {"tested": [], "failed": {}}
+        with mock.patch.object(discover, "run", discover_then_change), \
+                mock.patch.object(longshot, "run", return_value={"ok": True}), \
+                mock.patch.object(longshot, "apply_longshot", return_value=[]) as cells:
+            s = research.run_all(client=FakeKalshi())
+        with db.pinned("prod"):   # the settings may be broken now
+            self.assertEqual(discover.load_edges()[0]["status"], "candidate")
+        self.assertEqual(s["changes"], [f"{self.EDGE} is ready for real money. Auto promote is off."])
+        self.assertIs(cells.call_args.args[0]["auto_promote"], False)   # longshot cells too
+
+    def test_turned_off_during_the_run(self):
+        self.run_with(lambda: config.update({"auto_promote": False}))
+
+    def test_settings_it_cant_read_mean_off(self):
+        def break_the_file():
+            with open(os.path.join(config.home(), "config.json"), "w") as f:
+                f.write("{half a file")
+        self.run_with(break_the_file)
+
+    def test_practice_on_demo_meanwhile_promotes_nothing_on_prod(self):
+        # Prod's owner said no. Switching to demo mid-run and turning auto_promote on there
+        # to practice must not promote prod's edge (critic, round 3).
+        config.update({"auto_promote": False})
+        self.run_with(lambda: (config.switch({"env": "demo"}), config.update({"auto_promote": True})))
+        self.assertIs(config.switch({"env": "prod"})["auto_promote"], False)
+
+
 # ---------- 5. no filter on volume known only after settling ----------
 
 class VolumeTests(TempHome):

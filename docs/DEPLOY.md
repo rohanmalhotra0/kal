@@ -212,6 +212,8 @@ best YES buyer pays $0.90 or less. Nobody trades that far off, so they cost noth
 
 The budget is the most the bot can ever lose in total. It may reinvest its own profits.
 Demo and real money keep separate books, so demo results never count as real profit.
+What you change on demo (budget, caps, modes) is practice too. Back on prod, each goes
+back to what it was on prod. On a new server that's a $0 budget, so set it as above.
 
 Tip: Kalshi pays interest on balances of **$250 or more**.
 
@@ -361,6 +363,7 @@ Only do this if the books (`kal.db`) are broken.
 2. Put one back: `sudo kal restore 2026-10-24 --yes`
    If it says to stop the service first: `sudo systemctl stop kal`,
    run step 2 again, then `sudo systemctl start kal`.
+   If it says it stopped part way, run step 2 again.
 3. The bot stops. Turn it back on: `sudo kal on --clear-trip`
 4. Before it trades again, it adds the trades Kalshi shows since that day
    to the books, so the $300 limit stays true. If it can't read them, it
@@ -414,7 +417,8 @@ Each morning (about 09:30 UTC) it fetches `main` and then, to stay safe:
 
 - **Docs-only changes** (like the check-in's journal) fast-forward with no restart.
 - **Code must have come through a pull request.** Code pushed straight to `main` is
-  refused, and your phone gets "kal update refused" naming the commit.
+  refused, and your phone gets "kal update refused" naming the commit. So is a merge
+  that would put older code back.
 - It **builds the new code and runs every test in a throwaway copy**, as a locked-down
   user that can't read your key, topic or books. Only if the tests pass does it swap the
   new code into `/opt/kal`. If a test fails, it stays put and sends "kal update failed

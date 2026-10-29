@@ -236,7 +236,7 @@ def run(input_fn=input, print_fn=print, selftest_fn=None, balance_fn=None, inter
         if not 1 <= x <= 100_000:
             return False, None, "Pick between $1 and $100,000."
         return True, x, ""
-    old = float(cfg["budget"] or 0)
+    old = float(config.budget_on(cfg, env) or 0)   # back on prod: prod's own, not the practice one
     while True:
         budget = ask("4. How many dollars can the bot use? It can never lose more than this",
                      plain_money(old) if old else 300, money)
@@ -271,9 +271,9 @@ def run(input_fn=input, print_fn=print, selftest_fn=None, balance_fn=None, inter
         # A switch of exchange waits for a trade run to finish: each exchange has its own books.
         before = config.load()
         new = config.switch({"env": env, "budget": budget})
-        note = config.back_on_prod_note(config.back_on_prod(before, new))
-        if note:
-            say("", note)
+        notes = config.back_on_prod_notes(before, new)
+        if notes:
+            say("", *notes)
     except config.Busy:
         say("", f"A trade run is still going. Try again in a minute: {config.command('setup')}")
         return end(1)

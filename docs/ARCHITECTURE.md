@@ -96,12 +96,13 @@ tests/            unittest; tests/fakes.py has FakeKalshi, tests/helpers.py has 
   toward the error trip (nothing can be bought then); 6+ hours of that sends one alert.
 - Waiting for a lost order to show up isn't counted as an error: a network blip
   mustn't trip the bot. If cancelling a resting order fails, the trip says so, and the
-  order is looked up again after Reset.
+  order is looked up again after Reset. A lookup that finds an order still resting
+  cancels it and trips too, so its final count is read after the next Reset.
 - No clear reply on a basket's 2nd+ leg -> trip at once. Each live run also checks for
   baskets an earlier run left part-bought (a lost reply, or a crash between legs) and
   trips once for each.
-- Each trade run keeps one exchange's books from start to end (`db.pinned`), even if
-  someone switches env part way.
+- Each trade run (and each research run or dashboard backtest) keeps one exchange's books
+  and files from start to end (`db.pinned`), even if someone switches env part way.
 - Kalshi shows more contracts than the books explain on a market the bot traded -> trip.
   Fewer, on a market still trading (someone sold them outside the bot) -> those are
   written off as lost, so the books never earn on contracts they don't hold.
@@ -109,6 +110,8 @@ tests/            unittest; tests/fakes.py has FakeKalshi, tests/helpers.py has 
 - After `kal restore`, the next live run adds the buys Kalshi shows since the backup's
   day before it trades (`ledger.catch_up`). A fill it can't read -> trip. Then any
   Kalshi position the books still don't know -> one trip (the owner's own? Reset).
+  The marker that asks for this is written into a copy of the backup, and only that copy
+  is swapped in, so restored books never come back without it.
 - The daily stop, the bets cap and bet sizes scale with min(capital, account cash +
   open cost), so a budget typed bigger than the account can't loosen them.
 - Baskets skip events with a market closing in under 5 minutes.
