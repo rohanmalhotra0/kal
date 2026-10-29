@@ -397,6 +397,55 @@ class ScanTests(TempHome):
         sigs = STRATEGY.scan(ctx(fake_for(evs)))
         self.assertTrue(sigs and all(s.meta["paper_only"] for s in sigs))
 
+    def test_a_moved_release_goes_back_to_paper(self):
+        # A shutdown moves the release. Most of these rules never name the day, so the pin
+        # holds the dates too: once they change, the release trades on paper again.
+        evs = [exact_event("KXECONSTATCPICORE", prices=GAP), ladder_event("KXECONSTATCPICORE")]
+        self.pin(evs)
+        self.assertFalse(STRATEGY.scan(ctx(fake_for(evs)))[0].meta["paper_only"])
+        moved = copy.deepcopy(evs)
+        for m in moved[0]["markets"] + moved[1]["markets"]:
+            m["close_time"] = iso(exact_link_arb.close_ts(m) + 9 * 86400)
+        sigs = STRATEGY.scan(ctx(fake_for(moved)))
+        self.assertTrue(sigs and all(s.meta["paper_only"] for s in sigs))
+
+    def test_recheck_keeps_a_too_good_price_off_real_money(self):
+        # Scan saw an 87c set; just before buying, "exactly 0.2%" drops to 12c. At 79c before
+        # fees it's too good to be true (scan would keep the release on paper), so no buy.
+        evs = self.events()
+        self.pin(evs)
+        c = fake_for(evs)
+        sig = STRATEGY.scan(ctx(c))[0]
+        self.assertFalse(sig.meta["paper_only"])
+        self.assertIsNotNone(STRATEGY.recheck(ctx(c), sig))
+        exact = next(leg.ticker for leg in sig.legs if leg.ticker.startswith("KXECONSTAT"))
+        c.books[exact] = {"yes": [(.10, 40)], "no": [(.88, 40)]}
+        self.assertIsNone(STRATEGY.recheck(ctx(c), sig))
+
+    def test_a_paper_set_leaves_what_is_already_open_on_paper(self):
+        # A live scan (some other release pinned): an unpinned set that reuses a paper holding
+        # would take its tickers from the next best set, then the engine would skip it.
+        evs = [exact_event(prices={2: (.13, .15), 3: (.12, .14)}), ladder_event()]
+        held = frozenset({evs[0]["markets"][3]["ticker"]})   # "exactly 0.2%", open on paper
+        live = Context(fake_for(evs), dict(config.DEFAULTS, max_per_arb=30.0), "live", 100.0, 100.0, set(), {}, {},
+                       held_paper=held)
+        sigs = STRATEGY.scan(live)
+        self.assertTrue(sigs)
+        self.assertFalse([leg.ticker for s in sigs for leg in s.legs if leg.ticker in held])
+        self.assertIn("KXECONSTATCPI", " ".join(leg.ticker for leg in sigs[0].legs))
+
+    def test_one_odd_event_cant_hide_the_rest(self):
+        year = data_month(release()[0])[0]
+        odd = exact_event("KXECONSTATCPIYOY")
+        for m in odd["markets"]:
+            m["rules_primary"] = m["rules_primary"].replace(str(year), "0000")
+        late = ladder_event("KXECONSTATCPICORE")
+        for m in late["markets"]:
+            m["close_time"] = "0001-01-01T00:00:00+14:00"
+        evs = [odd, ladder_event("KXECONSTATCPIYOY"), exact_event("KXECONSTATCPICORE"), late,
+               {"event_ticker": 7, "markets": []}, exact_event(), ladder_event()]
+        self.assertEqual([p["series"] for p in exact_link_arb.pairs(evs)], ["KXECONSTATCPI"])
+
     def test_recheck_rebuilds_from_fresh_books(self):
         c = fake_for(self.events())
         sig = STRATEGY.scan(ctx(c))[0]

@@ -95,11 +95,19 @@ def check(client, sig, now=None):
             return f"fees: {series}: {why}"
         # An override can be scheduled for later; any one that would break the math
         # counts now (null fields only clear an override, so they are fine).
-        event = leg.ticker.rsplit("-", 1)[0] if leg.ticker.count("-") >= 2 else sig.event
-        for fee_type, mult in overrides.get(event, []) + overrides.get(sig.event, []):
-            if fee_type is None and mult is None:
-                continue
-            why = _bad(fee_type if fee_type is not None else got[0], mult if mult is not None else got[1])
-            if why:
-                return f"fees: {event}: an event fee change: {why}"
+        for event in dict.fromkeys(events_of(leg.ticker) + [sig.event]):
+            for fee_type, mult in overrides.get(event, []):
+                if fee_type is None and mult is None:
+                    continue
+                why = _bad(fee_type if fee_type is not None else got[0], mult if mult is not None else got[1])
+                if why:
+                    return f"fees: {event}: an event fee change: {why}"
     return None
+
+
+def events_of(ticker):
+    """Every event a market ticker can belong to: each "-" prefix past the series. A
+    negative strike has a "-" of its own (KXCPI-26OCT-T-0.1 is in KXCPI-26OCT), so the
+    last "-" isn't always where the event ends, and a signal can span two events."""
+    parts = str(ticker).split("-")
+    return ["-".join(parts[:i]) for i in range(2, len(parts))]

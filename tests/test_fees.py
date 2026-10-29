@@ -49,6 +49,21 @@ class FeeCheckTests(TempHome):
         self.assertIn("an event fee change", fees.check(c, sig(), now=NOW))
         self.assertIsNone(fees.check(c, sig("KXOTHER-1-A", "KXOTHER-1"), now=NOW))  # another event
 
+    def test_an_override_on_any_event_of_the_signal_counts(self):
+        # A negative strike has its own "-", and exact_link_arb's sets span two events: the
+        # override is on the ladder's event, not the signal's, and must still be found.
+        c = FakeKalshi()
+        c.series_fees = {s: {"fee_type": "quadratic", "fee_multiplier": 1} for s in ("KXCPI", "KXECONSTATCPI")}
+        c.fee_overrides = [{"event_ticker": "KXCPI-26OCT", "fee_type_override": "quadratic",
+                            "fee_multiplier_override": 3}]
+        two = Signal("t", "KXECONSTATCPI-26OCT", "t", [Leg("KXCPI-26OCT-T-0.2", "no", 0.35, 1),
+                                                         Leg("KXCPI-26OCT-T-0.1", "yes", 0.3, 1),
+                                                         Leg("KXECONSTATCPI-26OCT-T-0.1", "yes", 0.28, 1)])
+        self.assertIn("fees: KXCPI-26OCT: an event fee change", fees.check(c, two, now=NOW))
+        self.assertEqual(fees.events_of("KXCPI-26OCT-T-0.1"), ["KXCPI-26OCT", "KXCPI-26OCT-T"])
+        self.assertEqual(fees.events_of("KXCPI-26OCT-T0.2"), ["KXCPI-26OCT"])
+        self.assertEqual(fees.events_of("KXELONMARS-99"), [])   # falls back to the signal's event
+
     def test_harmless_overrides_pass(self):
         db.put(fees.OVERRIDES_KEY, {})
         c = FakeKalshi()

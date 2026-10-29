@@ -292,6 +292,8 @@ class DateLadderArb(Strategy):
             checked = key is not None and VERIFIED.get(ev["event_ticker"]) == key   # else paper only
             for earlier, later in hot:
                 e, lt = earlier["ticker"], later["ticker"]
+                if not checked and (e in ctx.held_paper or lt in ctx.held_paper):
+                    continue   # paper only, and already open on paper: the engine would skip it
                 quotes = [(lt, "yes", *quote(books[lt], "yes")), (e, "no", *quote(books[e], "no"))]
                 meta = {"earlier": e, "later": lt, "paper_only": not checked,
                         "deadlines": {e: deadline(earlier).isoformat(), lt: deadline(later).isoformat()}}
