@@ -984,6 +984,9 @@ def main():
         rounds = int(sys.argv[2]) if len(sys.argv) > 2 else 5
         gap = float(sys.argv[3]) if len(sys.argv) > 3 else 60
         live(CRYPTO + OTHER, rounds, gap)
+    elif mode == "samples":
+        import range_samples
+        range_samples.main()
 
 
 if __name__ == "__main__":
