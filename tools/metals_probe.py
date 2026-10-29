@@ -875,6 +875,37 @@ def hermes(dates, offsets):
             sys.stdout.flush()
 
 
+def bench(dates, offsets):
+    """Like hermes(), from Pyth's Benchmarks API (public, slow pace)."""
+    import requests
+    s = requests.Session()
+    for d in dates:
+        y, mo, dd = map(int, d.split("-"))
+        t5 = int(datetime(y, mo, dd, 17, 0, tzinfo=ET).timestamp())
+        print(f"\n== {d}")
+        for name, fid in FEEDS.items():
+            row = []
+            for off in offsets:
+                t = t5 + off
+                try:
+                    r = s.get(f"https://benchmarks.pyth.network/v1/updates/price/{t}",
+                              params={"ids": fid, "parsed": "true"}, timeout=30)
+                    if r.status_code != 200:
+                        row.append(f"{off:+d}s: status {r.status_code} {plain(r.text)[:100]}")
+                    else:
+                        j = r.json()
+                        parsed = j.get("parsed") if isinstance(j, dict) else None
+                        p = ((parsed or [{}])[0]).get("price") or {}
+                        v = int(p["price"]) * 10 ** int(p["expo"])
+                        pt = datetime.fromtimestamp(int(p["publish_time"]), ET).strftime("%H:%M:%S")
+                        row.append(f"{off:+d}s -> {v:.4f} (published {pt})")
+                except Exception as e:
+                    row.append(f"{off:+d}s: {str(e)[:100]}")
+                time.sleep(2.5)
+            print(f"   {name}: " + "; ".join(row))
+            sys.stdout.flush()
+
+
 # ======================= gaps =======================
 
 def candles_for(c, e, t0, t1):
@@ -1310,6 +1341,8 @@ def main():
             hourly([tuple(p.split("~")) for p in rest[0].split(",")])
         elif mode == "pyth":
             pyth(rest[0].split(","), rest[1].split(","))
+        elif mode == "bench":
+            bench(rest[0].split(","), [int(x) for x in (rest[1] if len(rest) > 1 else "-1").split(",")])
         elif mode == "hermes":
             hermes(rest[0].split(","), [int(x) for x in (rest[1] if len(rest) > 1 else "-61,-1,0").split(",")])
         else:
