@@ -96,7 +96,8 @@ tests/            unittest; tests/fakes.py has FakeKalshi, tests/helpers.py has 
   toward the error trip (nothing can be bought then); 6+ hours of that sends one alert.
 - Waiting for a lost order to show up isn't counted as an error: a network blip
   mustn't trip the bot. If cancelling a resting order fails, the trip says so, and the
-  order is looked up again after Reset.
+  order is looked up again after Reset. A lookup that finds an order still resting
+  cancels it and trips too, so its final count is read after the next Reset.
 - No clear reply on a basket's 2nd+ leg -> trip at once. Each live run also checks for
   baskets an earlier run left part-bought (a lost reply, or a crash between legs) and
   trips once for each.

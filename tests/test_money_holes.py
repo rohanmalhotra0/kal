@@ -4,6 +4,7 @@ import json
 import time
 import unittest
 from contextlib import redirect_stdout
+from datetime import datetime, timezone
 from unittest import mock
 
 import requests
@@ -182,7 +183,8 @@ class LiveBasketTests(TempHome):
         self.assertIn("r1", reason)
         self.assertNotIn("cancelled it", reason)
         self.assertEqual(db.query("SELECT status FROM orders")[0]["status"], "unknown")
-        # After Reset, the next run looks the order up first and cancels it if it's still there.
+        # After Reset, the next run looks the order up first. Still on the book: it cancels it
+        # and stops again. Once Kalshi shows it cancelled, what filled is booked.
         coid = db.query("SELECT client_order_id FROM orders")[0]["client_order_id"]
         c.order_list = [{"client_order_id": coid, "order_id": "r1", "status": "resting",
                          "fill_count_fp": "0.00", "ticker": "EV1-0"}]
@@ -190,9 +192,48 @@ class LiveBasketTests(TempHome):
         c.event_list = []
         config.clear_trip()
         config.update({"enabled": True})
+        engine.run_once(c)
+        self.assertEqual(c.cancelled, ["r1"])
+        self.assertIn("stayed on the book", config.load()["disabled_reason"])
+        c.order_list[0]["status"] = "canceled"
+        config.clear_trip()
+        config.update({"enabled": True})
         s = engine.run_once(c)
         self.assertEqual(s.get("reconciled"), 1, s)
-        self.assertEqual(c.cancelled, ["r1"])
+
+    def test_an_order_found_resting_on_lookup_stops_the_bot(self):
+        # The reply was lost, and the lookup shows the order still on the book: Kalshi ignored
+        # immediate-or-cancel. Stop, as when a reply shows it.
+        db.insert("orders", strategy="favorites", ticker="OTHER-1", side="yes", count=5, price=0.5,
+                  filled=0, status="unknown", client_order_id="lost-1", ts=time.time() - 30)
+        c = fake_with_arb()
+        c.order_list = [{"client_order_id": "lost-1", "order_id": "x1", "ticker": "OTHER-1",
+                         "status": "resting", "fill_count_fp": "2.00", "remaining_count_fp": "3.00"}]
+        c.held["OTHER-1"] = 2
+        engine.run_once(c)
+        self.assertEqual(c.cancelled, ["x1"])
+        self.assertIn("stayed on the book", config.load()["disabled_reason"])
+        self.assertEqual(c.orders, [])   # nothing else bought
+        # More can fill before the cancel lands, so the 2 isn't booked: it's looked up again.
+        self.assertEqual([r["status"] for r in ledger.unresolved_orders()], ["unknown"])
+        c.order_list[0].update(status="canceled", fill_count_fp="3.00", remaining_count_fp="0.00")
+        c.held["OTHER-1"] = 3
+        c.event_list = []
+        config.clear_trip()
+        config.update({"enabled": True})
+        engine.run_once(c)
+        self.assertEqual(db.query("SELECT filled FROM orders WHERE client_order_id = 'lost-1'")[0]["filled"], 3)
+        self.assertEqual(config.load()["disabled_reason"], "")
+
+    def test_a_fractional_first_fill_is_matched_by_every_leg(self):
+        # Kalshi can fill part of a contract. Rounding leg 1's 9.5 down to 9 for the later legs
+        # would leave half a contract as a bet no limit checked, and nothing would say so.
+        c = fake_with_arb()
+        c.fill = lambda t, side, n, p: n - 0.5 if t == "EV1-0" else n
+        engine.run_once(c)
+        self.assertEqual([o[2] for o in c.orders], [10, 9.5, 9.5, 9.5])
+        self.assertEqual({abs(n) for n in c.held.values()}, {9.5})
+        self.assertEqual(config.load()["disabled_reason"], "")
 
     def test_env_switch_mid_run_keeps_one_runs_orders_in_one_books(self):
         c = fake_with_arb()
@@ -502,6 +543,37 @@ class DailyStopTests(TempHome):
         db.put("day_start", {"day": start["day"], "equity": start["equity"]})   # the old record, no pnl
         self._lose_it()
         self.assertIn("daily limit", config.load()["disabled_reason"])
+
+    def test_a_loss_booked_just_after_midnight_still_counts(self):
+        # The day's first run books the loss. The day starts from the run before midnight,
+        # not from after the loss, so it counts.
+        with mock.patch.object(risk, "datetime") as dt:
+            dt.now.return_value = datetime(2026, 10, 28, 23, 55, tzinfo=timezone.utc)
+            engine.run_once(self.c)
+            dt.now.return_value = datetime(2026, 10, 29, 0, 0, tzinfo=timezone.utc)
+            self._lose_it()
+        self.assertIn("daily limit", config.load()["disabled_reason"])
+
+    def test_after_a_night_off_the_day_starts_fresh(self):
+        # No run from 22:00 to 09:00 (say it was turned off): turning it back on doesn't
+        # stop it at once for what happened meanwhile.
+        with mock.patch.object(risk, "datetime") as dt:
+            dt.now.return_value = datetime(2026, 10, 28, 22, 0, tzinfo=timezone.utc)
+            engine.run_once(self.c)
+            dt.now.return_value = datetime(2026, 10, 29, 9, 0, tzinfo=timezone.utc)
+            self._lose_it()
+        self.assertEqual(config.load()["disabled_reason"], "")
+
+    def test_a_win_just_after_midnight_doesnt_widen_the_day(self):
+        cfg = {**config.DEFAULTS, "budget": 300.0}
+        with mock.patch.object(risk, "datetime") as dt:
+            dt.now.return_value = datetime(2026, 10, 28, 23, 55, tzinfo=timezone.utc)
+            risk.daily_loss(cfg, 300.0, 300.0, pnl=0.0)
+            dt.now.return_value = datetime(2026, 10, 29, 0, 0, tzinfo=timezone.utc)
+            self.assertIsNone(risk.daily_loss(cfg, 350.0, 300.0, pnl=50.0))   # a $50 win settles
+            dt.now.return_value = datetime(2026, 10, 29, 12, 0, tzinfo=timezone.utc)
+            # $35 lost since the win: over the $30 limit. The win doesn't cover it.
+            self.assertIn("daily limit", risk.daily_loss(cfg, 315.0, 300.0, pnl=15.0))
 
 
 class SoldThenSettledTests(TempHome):
