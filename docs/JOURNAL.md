@@ -2,6 +2,22 @@
 
 Newest first. Each 2-hour check-in adds one entry: what it checked, what it found, links.
 
+## 2026-10-29 18:50 UTC — check-in: review holes fixed; crypto range links built on paper
+
+- Merged [PR #34](https://github.com/rohanmalhotra0/kal/pull/34): an independent review of
+  `exact_link_arb` found no hole in its math, but 5 in the guards around a pin. Fixed:
+  `fees.check` missed a fee change on a ticker with a negative strike when a set spans two
+  events; recheck didn't redo the too-good check; a pin didn't cover dates (a moved release or
+  meeting kept it); paper-only sets could crowd out others; one odd event hid the rest. None
+  could lose real money (every pin list is empty). 9 tests, each fails on the old code.
+- Idea #19 (one price asked two ways) on real data: crypto "between" vs "above" at the same
+  minute is safe (0 broken in about 4,000 settled pairs), but gaps are rare and small (5 in
+  the last 30 days, 1-2c each). S&P, Nasdaq and natural gas rejected: the two series settle
+  on different numbers. Built as `range_link_arb`, paper only, on branch `range-link-arb`
+  (50 tests). An independent review runs before its PR. Idea #20 (AAA gas) added.
+- Checked: CI, install-check and market-check green on main c0e6d59 (0 trades found, nothing
+  suspicious). No status report yet: `kal-status` doesn't exist or isn't shared with Claude.
+
 ## 2026-10-29 16:50 UTC — check-in: all green; three checks running
 
 - Checked: CI green on main eabc082; market-check green at 16:32 (0 trades found, nothing
