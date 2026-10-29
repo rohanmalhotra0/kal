@@ -313,8 +313,9 @@ class SameTradesTests(TempHome):
         return out
 
     def test_the_filter_changes_no_accepted_trade(self):
-        from kal.strategies import basket_arb, bracket_arb, date_ladder_arb, fed_link_arb, ladder_arb
-        from tests import test_arb_strategies as arb, test_date_ladder as dl, test_fed_link_arb as fed
+        from kal.strategies import basket_arb, bracket_arb, date_ladder_arb, exact_link_arb, fed_link_arb, ladder_arb
+        from tests import test_arb_strategies as arb, test_date_ladder as dl, test_exact_link_arb as ex
+        from tests import test_fed_link_arb as fed
         cfg = dict(config.DEFAULTS)
         cut = engine.horizon_days(cfg)
         traded = 0
@@ -328,7 +329,9 @@ class SameTradesTests(TempHome):
                      (basket_arb, basket_fake(close)),
                      (basket_arb, basket_fake(close, ELECTION)),
                      (date_ladder_arb, dl.fake_for(dl.date_event(days=(days, days + 5, days + 10)))),
-                     (fed_link_arb, fed.fake_for(fed.gap_meeting(days)))]
+                     (fed_link_arb, fed.fake_for(fed.gap_meeting(days))),
+                     (exact_link_arb, ex.fake_for([ex.exact_event(days=days, prices=ex.GAP),
+                                                   ex.ladder_event(days=days)]))]
             for mod, c in cases:
                 cut_off = self.accepted(mod.STRATEGY, c, cut, cfg)
                 self.assertEqual(cut_off, self.accepted(mod.STRATEGY, c, float("inf"), cfg), (mod.__name__, days))
