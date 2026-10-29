@@ -71,6 +71,7 @@ can't fill, to prove Kalshi accepts its orders. Want to practice with fake money
 | `date_ladder_arb` | "Before Aug 1" can't win unless "before Sep 1" wins. Buys when that pair costs less than $1. | Low, once checked. | Paper. Real money only for events whose rules a person has read |
 | `fed_link_arb` | If the Fed holds, the rate stays the same. So the Fed's decision and the rate after the meeting must agree. Buys a set that must pay $1 when it costs less. | Low, once checked. A rate move off the meeting date breaks it. | Paper. Real money only for meetings a person has checked |
 | `exact_link_arb` | "CPI exactly 0.3%" and "CPI above 0.2%" ask about one number. They must agree. Buys a set that must pay $1 when it costs less. | Low, once checked. A report that never comes out breaks it. | Paper. Real money only for releases a person has checked |
+| `range_link_arb` | "BTC between $71,700 and $71,799.99 at 2 PM" and "BTC above $71,699.99 at 2 PM" ask about one price. They must agree. Buys a set that must pay when it costs less. 8 coins. | Low, once checked. Gaps are rare and small. | Paper. Real money only for pairs a person has checked |
 | `bracket_arb` | Ranges that cover every result: one must win. Buys all when they cost less than $1. | Low, once checked. | Paper, until a person checks it |
 | `favorites` | Buys price ranges that won more often than their price in past markets. | Medium. A bet, not a sure thing. | Paper |
 | `mentions` | "Will X say Y?" markets. Uses how often each word was said before. | Higher. | Paper |

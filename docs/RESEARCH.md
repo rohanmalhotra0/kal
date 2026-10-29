@@ -304,6 +304,69 @@ status: **testing** (add the PR link), **built**, or **rejected** (say why in on
   `VERIFIED` pins by PR only where the rules are safe.
 - Until the server has run 4 weeks, skip it.
 
+**19. One price asked two ways (range vs above)** - tested 2026-10-29: crypto built as `range_link_arb` (paper only); S&P, Nasdaq and natural gas rejected
+- What: Kalshi asks some prices two ways at the same moment. KXBTC asks "is BTC between
+  71700-71799.99 at 1 PM?". KXBTCD asks "is BTC above 71699.99 at 1 PM?". Both settle on one
+  number. So NO "between" + YES "above 71699.99" + NO "above 71799.99" pays $2 at any price.
+- Crypto pairs: BTC, ETH, SOL, XRP, DOGE, BNB and HYPE (hourly and 5 PM), and SHIB (5 PM).
+  The two rules match word for word except the strike: "the simple average of the sixty
+  seconds of CF Benchmarks' Bitcoin Real-Time Index (BRTI) before 1 PM EDT".
+- The edges line up. Each bracket starts 1 tick above an "above" strike and ends on one. The
+  terms say "between" counts both ends (BTC, ETH, DOGE, SHIB). "Above" means strictly greater
+  (CRYPTO terms; every strike is type "greater").
+- 4 sets pay at any price, with either bracket end in or out, and even if no data comes:
+  - YES "above" under the bracket + NO bracket.
+  - NO "above" at the bracket top + NO bracket.
+  - NO bracket + YES "above" under it + NO "above" at its top. Pays $2.
+  - The same top tail in both series, YES in one and NO in the other.
+- 2 sets are not safe:
+  - YES bracket + NO "above" + YES "above". It needs the price to land on the cent. The rules
+    never say the price is rounded (settled values do show cents).
+  - YES "below" + YES "above" for SOL, XRP, BNB and HYPE. Their terms say "if no data is
+    available or incomplete ... affected strikes resolve to No". Both legs lose.
+- Settled: 0 broken links. Both series settled on the same number every time. 60 days: 238
+  event pairs each for BTC, ETH, SOL, XRP, DOGE and BNB (HYPE 152, SHIB 60). Last 30 days:
+  317-357 hourly pairs each.
+- History (after fees; passes the bot's rules: pays within 30 days, 20%+ a year, 1-25% return):
+  - 60 days, all 5 PM events and 3 hourly events a day: 69 gap hours. DOGE 39, XRP 22, SOL 3,
+    BNB 3, BTC 1, SHIB 1, ETH and HYPE 0. Most were Sep 5-19.
+  - Last 30 days, 12 hourly events a day: 5 (XRP 3, BTC 1, BNB 1). All 1-2%.
+  - Best with trades on every leg: XRP, Sep 16 at 4 PM ET. NO "1.26-1.2799" at 92c + YES
+    "above 1.2399" at 92c + NO "above 1.2799" at 10c. +4.3c on a $2 set (105, 2,000 and 1,528
+    traded that hour).
+  - DOGE's gaps (up to +24c on $2) had no trades on most legs that hour. They look like stale
+    quotes. 4 more were over the 25% cap.
+  - Many more sets beat fees by under 1% (BTC: 79 hours). The 1% floor stops them.
+- Order books (2 watches of 15 min): nothing in crypto. BTC came closest, 0.2c short.
+- Built as `range_link_arb`, paper only. It reads only these 8 pairs and fails closed on any
+  wording, time, tick or ticker that differs. Before it offers a set, it plays it out at every
+  price that matters. Real money only for an event pair a person pins in `VERIFIED`.
+- Live check (2026-10-29, real API, 4 rounds): it reads all 22 open pairs (3 per coin, 1 for
+  SHIB). All 2,452 sets pass the play-out. A scan reads 0-3 order books (60 at most).
+- Other assets:
+  - S&P 500 (KXINX vs KXINXU): rejected. Even with the same wording, 30 of 50 days settled on
+    different numbers (Sep 16: 7551.81 vs 7552.25). 11 more pairs are now worded differently
+    ("end-of-day" vs "at 4pm EDT").
+  - Nasdaq-100: rejected. 43 of 43 days differ by rounding (29813.16 vs 29813.157).
+  - Natural gas, daily vs monthly: rejected (2.93 vs 2.934 on Aug 31).
+  - Gold, silver, copper and Brent, daily vs monthly: they close together only at month end.
+    0 of 2 broke for each. Gold had 35 gap hours, e.g. Aug 31, +5.5c with 788 and 2,317
+    traded. In some months only the monthly rules name a futures contract (copper, Brent).
+  - WTI weekly vs daily (Fridays): 0 of 14 broke, 5 gap hours. But only the daily rules say
+    when it rolls to the next futures month. Unsafe until that is known.
+  - AAA gas: idea #20.
+  - Treasury yields: 0 gap hours. FX daily and weekly never close at the same time.
+- Probes: branches `probe/price-links` and `probe/range-link-dry` (never merged).
+
+**20. AAA gas daily vs weekly vs monthly** - untested
+- What: KXAAAGASD, KXAAAGASW and KXAAAGASM ask about the same AAA national average on the same
+  day, word for word ("strictly greater than $4.2600 on Oct 26, 2026 according to AAA").
+  YES on a lower strike in one + NO on a higher strike in another pays $1.
+- From #19's probe: 0 of 16 settled pairs broke. 85 gap hours in 100 days passed the bot's
+  rules, with real volume (daily vs weekly: 17, in 7 events).
+- Test: a person must read every market's rules in full (the probe couldn't parse "strictly
+  greater than"). Then count gaps over more settled weeks. Gold and silver at month end next.
+
 ## Sources
 
 Numbers come from abstracts and summaries. Check the paper before relying on one.
