@@ -363,6 +363,7 @@ Only do this if the books (`kal.db`) are broken.
 2. Put one back: `sudo kal restore 2026-10-24 --yes`
    If it says to stop the service first: `sudo systemctl stop kal`,
    run step 2 again, then `sudo systemctl start kal`.
+   If it says it stopped part way, run step 2 again.
 3. The bot stops. Turn it back on: `sudo kal on --clear-trip`
 4. Before it trades again, it adds the trades Kalshi shows since that day
    to the books, so the $300 limit stays true. If it can't read them, it

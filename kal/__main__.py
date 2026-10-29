@@ -398,6 +398,11 @@ def cmd_restore(args):
         return 2
     try:
         r = maintenance.restore(args.day)
+    except maintenance.RestoreUnfinished as e:
+        say(f"The restore stopped part way: {e}",
+            "The books may be the backup's now. The bot is stopped.",
+            f"Run it again: {_cmd('restore ' + args.day + ' --yes')}")
+        return 1
     except Exception as e:
         say(f"Not restored: {e}")
         return 1

@@ -383,6 +383,42 @@ class RestoreCatchUpTests(TempHome):
         maintenance.restore(maintenance.backups()[0][0])
         self.assertEqual(db.get("restored")["since"], 1000.0)
 
+    def test_a_restore_that_stops_after_the_swap_still_adds_the_later_buys(self):
+        # Audit round 3: the books became the backup's, then the check after the swap failed
+        # before the catch-up marker was written. After Reset the buy below was gone from the
+        # books, and the bot could spend that money again.
+        db.insert("orders", ticker="OLD", side="no", count=5, price=0.8, filled=5, status="executed",
+                  order_id="old1", client_order_id="c0")
+        maintenance.backup()
+        db.insert("orders", ticker="N", side="no", count=10, price=0.9, filled=10, status="executed",
+                  order_id="new1", client_order_id="c1")   # made after the backup
+        before = ledger.open_cost()
+        real = maintenance._problem
+
+        def check(path):   # the check of the books once they are the backup's: it fails
+            if path == db.path() and not db.query("SELECT 1 FROM orders WHERE order_id = 'new1'"):
+                return "disk I/O error"
+            return real(path)
+        with mock.patch.object(maintenance, "_problem", side_effect=check), \
+                self.assertRaises(maintenance.MaintenanceError):
+            maintenance.restore(maintenance.backups()[0][0])
+        c = FakeKalshi()
+        c.fill_list = [self.fill("old1", "OLD", n=5, p=0.8), self.fill("new1")]
+        c.position_list = [{"ticker": "OLD", "position": -5, "exposure": 4},
+                           {"ticker": "N", "position": -10, "exposure": 9}]
+        config.clear_trip()
+        config.update({"enabled": True})
+        engine.run_once(c)
+        self.assertAlmostEqual(ledger.open_cost(), before)   # the buy is back in the books
+
+    def test_a_restore_keeps_a_catch_up_still_waiting_in_the_live_books(self):
+        db.insert("orders", ticker="OLD", side="no", count=5, price=0.8, filled=5, status="executed",
+                  order_id="old1", client_order_id="c0")
+        maintenance.backup()                                         # nothing waits in the backup
+        db.put("restored", {"day": "2026-10-01", "since": 1000.0})   # an earlier restore, not caught up
+        maintenance.restore(maintenance.backups()[0][0])
+        self.assertEqual(db.get("restored")["since"], 1000.0)
+
     def test_a_fill_it_cant_read_stops_the_bot(self):
         db.put("restored", {"day": "2026-10-24", "since": time.time() - 86400})
         c = FakeKalshi()

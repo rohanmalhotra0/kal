@@ -110,6 +110,8 @@ tests/            unittest; tests/fakes.py has FakeKalshi, tests/helpers.py has 
 - After `kal restore`, the next live run adds the buys Kalshi shows since the backup's
   day before it trades (`ledger.catch_up`). A fill it can't read -> trip. Then any
   Kalshi position the books still don't know -> one trip (the owner's own? Reset).
+  The marker that asks for this is written into a copy of the backup, and only that copy
+  is swapped in, so restored books never come back without it.
 - The daily stop, the bets cap and bet sizes scale with min(capital, account cash +
   open cost), so a budget typed bigger than the account can't loosen them.
 - Baskets skip events with a market closing in under 5 minutes.

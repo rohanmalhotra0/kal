@@ -84,19 +84,34 @@ if ! git merge-base --is-ancestor "$before" "$after"; then
   exit 1
 fi
 
-# Accident guard: every first-parent commit that touches code (anything outside docs/) must
-# have come through GitHub's merge button (committer noreply@github.com). A check-in that
-# pushed code straight to main by mistake is refused, named, and left for a person.
+# Accident guard: each first-parent commit is judged by what it brings into main, against its
+# first parent, so a merge counts with everything it merges in. If that touches code (anything
+# outside docs/), GitHub's merge button must have made it (committer noreply@github.com). A
+# check-in that pushed code straight to main, or merged a branch itself and pushed that, is
+# refused, named, and left for a person.
+by_github() { [ "$(git show -s --format='%ce' "$1")" = "noreply@github.com" ]; }
+code_differs() {  # rev rev: any change outside docs/? Can't tell (an error, no parent): yes.
+  git diff --quiet "$1" "$2" -- . ':(exclude)docs' 2>/dev/null
+  [ $? -ne 0 ]
+}
+# One exception: a check-in that pulls with a merge before it pushes the journal. Its merge is
+# fine if it brings in only what GitHub merged: its code is exactly the pulled side's, that side
+# changed code only in commits GitHub made (walked back like main, until it meets our side), and
+# our side changed no code since then.
+pulled_in() {  # merge
+  local m=$1 c
+  c=$(git rev-parse -q --verify "$m^2") || return 1   # not a merge
+  code_differs "$c" "$m" && return 1                  # the merge has code of its own
+  while ! git merge-base --is-ancestor "$c" "$m^1"; do
+    code_differs "$c^1" "$c" && ! by_github "$c" && return 1
+    c=$(git rev-parse -q --verify "$c^1") || return 1  # never met our side
+  done
+  ! code_differs "$c" "$m^1"                          # our side changed no code since
+}
 bad=""
 for sha in $(git rev-list --first-parent "$before..$after"); do
-  files=$(git diff-tree --no-commit-id --name-only -r --first-parent "$sha")
-  [ -n "$files" ] || continue
-  if printf '%s\n' "$files" | grep -qvE '^docs/'; then
-    if [ "$(git show -s --format='%ce' "$sha")" != "noreply@github.com" ]; then
-      bad=$sha
-      break
-    fi
-  fi
+  code_differs "$sha^1" "$sha" || continue
+  by_github "$sha" || pulled_in "$sha" || { bad=$sha; break; }
 done
 if [ -n "$bad" ]; then
   echo "$after" > "$failed"

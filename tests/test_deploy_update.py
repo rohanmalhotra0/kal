@@ -14,6 +14,7 @@ import unittest
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 UPDATE = os.path.join(ROOT, "deploy", "kal-update.sh")
 GIT = "g" + "it"
+CHECKIN = {"email": "noreply@anthropic.com", "name": "Check-in"}   # a check-in session, not GitHub
 
 FAKE_PY = """#!/bin/sh
 # fake python/pip for kal-update tests
@@ -159,11 +160,28 @@ exit 0
                   email="noreply@anthropic.com", name="Claude")
         self._git(self.work, "push", "-q", "origin", "main")
 
+    def _checkin(self):
+        """A check-in's own copy of the repo, cloned now."""
+        path = os.path.join(self.d, "checkin")
+        self._git(self.d, "clone", "-q", "-b", "main", self.origin, path)
+        return path
+
+    def _journal(self, repo):
+        _write(os.path.join(repo, "docs", "JOURNAL.md"), "# journal\n\nentry\n")
+        self._git(repo, "commit", "-q", "-am", "journal", **CHECKIN)
+
     def _head(self):
         return self._git(self.app, "rev-parse", "HEAD")
 
     def _active(self):
         open(self.active, "w").close()
+
+    def _refused(self, before):
+        r = self._run()
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertEqual(self._head(), before)               # nothing changed
+        self.assertIn("kal update refused", _read(self.curl_log))
+        self.assertNotIn("try-restart", _read(self.sysctl_log))
 
     # ---- the tests ----
     def test_docs_only_fast_forwards_without_tests_or_restart(self):
@@ -186,6 +204,82 @@ exit 0
         self.assertNotIn("try-restart", _read(self.sysctl_log))
         self.assertEqual(_read(os.path.join(self.data, "update_failed")).strip(),
                          self._git(self.app, "rev-parse", "origin/main"))
+
+    def test_a_github_merge_commit_still_updates(self):
+        # GitHub's merge button can make a real merge commit. The pull request's own commits
+        # aren't GitHub's, and that's fine: GitHub made the merge.
+        before = self._head()
+        self._git(self.work, "checkout", "-q", "-b", "pr")
+        _write(os.path.join(self.work, "kal", "x.py"), "x = 2\n")
+        self._git(self.work, "commit", "-q", "-am", "code", **CHECKIN)
+        self._git(self.work, "checkout", "-q", "main")
+        self._git(self.work, "merge", "-q", "--no-ff", "--no-edit", "pr")
+        self._git(self.work, "push", "-q", "origin", "main")
+        r = self._run()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertNotEqual(self._head(), before)
+
+    def test_a_branch_merged_by_hand_is_refused(self):
+        # A merge commit lists no files of its own, so the check skipped it, and the code on
+        # the merged branch went live without a pull request (audit round 3).
+        self._active()
+        before = self._head()
+        self._git(self.work, "checkout", "-q", "-b", "feature")
+        _write(os.path.join(self.work, "kal", "x.py"), "x = 'UNREVIEWED'\n")
+        self._git(self.work, "commit", "-q", "-am", "code", **CHECKIN)
+        self._git(self.work, "checkout", "-q", "main")
+        self._push_docs()   # main moves on, so the merge below is a real merge commit
+        self._git(self.work, "merge", "-q", "--no-edit", "feature", **CHECKIN)
+        self._git(self.work, "push", "-q", "origin", "main")
+        self._refused(before)
+
+    def test_a_pull_that_merges_in_a_pull_request_still_updates(self):
+        # A check-in pulled with a merge before pushing its journal. That merge brings in only
+        # what GitHub merged, so this is fine.
+        self._active()
+        before = self._head()
+        checkin = self._checkin()
+        self._push_code()   # GitHub merges a pull request meanwhile
+        self._journal(checkin)
+        self._git(checkin, "pull", "-q", "--no-rebase", "--no-edit", "origin", "main", **CHECKIN)
+        self._git(checkin, "push", "-q", "origin", "main")
+        r = self._run()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertNotEqual(self._head(), before)
+        self.assertIn("try-restart kal", _read(self.sysctl_log))
+        self.assertIn("kal updated", _read(self.curl_log))
+
+    def test_a_pull_merge_with_code_of_its_own_is_refused(self):
+        # The same pull, but the merge itself also changes code (say, a conflict fixed by hand).
+        before = self._head()
+        checkin = self._checkin()
+        self._push_code()
+        self._journal(checkin)
+        self._git(checkin, "pull", "-q", "--no-rebase", "--no-commit", "origin", "main", **CHECKIN)
+        _write(os.path.join(checkin, "kal", "y.py"), "y = 'UNREVIEWED'\n")
+        self._git(checkin, "add", "-A")
+        self._git(checkin, "commit", "-q", "--no-edit", **CHECKIN)
+        self._git(checkin, "push", "-q", "origin", "main")
+        self._refused(before)
+
+    def test_a_merge_that_puts_old_code_back_is_refused(self):
+        # A merge of a docs-only branch that takes that branch's older code: it would undo a
+        # pull request the server already runs.
+        checkin = self._checkin()
+        self._push_code()
+        self.assertEqual(self._run().returncode, 0)   # the server runs the new code
+        before = self._head()
+        self._git(checkin, "checkout", "-q", "-b", "notes")
+        _write(os.path.join(checkin, "docs", "NOTES.md"), "notes\n")
+        self._git(checkin, "add", "-A")
+        self._git(checkin, "commit", "-q", "-m", "notes", **CHECKIN)
+        self._git(checkin, "checkout", "-q", "main")
+        self._git(checkin, "pull", "-q", "--ff-only", "origin", "main")
+        self._git(checkin, "merge", "-q", "--no-commit", "notes", **CHECKIN)
+        self._git(checkin, "checkout", "notes", "--", "kal/x.py")
+        self._git(checkin, "commit", "-q", "--no-edit", **CHECKIN)
+        self._git(checkin, "push", "-q", "origin", "main")
+        self._refused(before)
 
     def test_pull_request_code_passes_tests_then_restarts(self):
         self._active()
