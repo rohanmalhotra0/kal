@@ -1,108 +1,176 @@
-"""Idea #6, other links: which Kalshi series are tied together, so their prices must agree?
-Discovery only (public data: no key, no orders). Probe branch only, never merged.
+"""Idea #6, other links, on real data: series whose rules nest, so their prices must agree.
+Public data only (no key, no orders). Probe branch only, never merged.
 
-1. Series by family (sports futures, Fed, crypto), with open events, markets and samples.
-2. Sports futures: pairs of series that share 5+ outcome names (teams). For a champion
-   series and a conference / pennant / playoff series, "wins the title" means "won the
-   conference" (or "made the playoffs"), so YES(conference) + NO(champion) pays $1 at least.
-   Prints today's after-fee gaps on those pairs.
-3. Fed: open rate-level and decision events, with prices, to see how they line up.
+Each pair (A, B) below is picked by hand: a YES on A means a YES on B (the champion won its
+conference; a conference champion played in its title game). So YES on B plus NO on A pays
+at least $1 whatever happens. A gap is an hour where that pair cost under $1 after fees.
+
+For each pair, open and settled seasons are matched by team name (yes_sub_title, exact).
+Prints: rules of each series (first market), settled results that break the nesting,
+today's gaps, and hourly gaps in the last 45 days before each season's final settlement,
+counted as the bot's rules count locked-in trades (pays within max_arb_days, at least
+min_arb_apr a year, at least 1% return).
 """
 import collections
 import json
 import os
-import re
 import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from kal.client import Kalshi, fee, price  # noqa: E402
+from kal import config  # noqa: E402
+from kal.client import Kalshi, fee, price, ts  # noqa: E402
+from kal.research.backtest import candle_close  # noqa: E402
+from kal.risk import yearly_return  # noqa: E402
 
-FAMILY = {
-    "sports": re.compile(r"champion|finals|super bowl|world series|stanley cup|pennant|conference|playoff|division", re.I),
-    "fed": re.compile(r"\bfed\b|fomc|federal funds|rate cut|rate hike|interest rate", re.I),
-    "crypto": re.compile(r"bitcoin|\bbtc\b|ethereum|\beth\b|solana|crypto", re.I),
-}
-NARROW = re.compile(r"conference|pennant|playoff|division|\b(?:east|west|afc|nfc|al|nl)\b", re.I)
+PAIRS = [   # (A, B): YES on A means YES on B
+    ("KXNBA", "KXNBAEAST"), ("KXNBA", "KXNBAWEST"), ("KXNBA", "KXNBAPLAYOFF"),
+    ("KXNBAEAST", "KXNBAECFQUAL"), ("KXNBAWEST", "KXNBAWCFQUAL"),
+    ("KXNBAECFQUAL", "KXNBAPLAYOFF"), ("KXNBAWCFQUAL", "KXNBAPLAYOFF"),
+    ("KXNBAEAST1SEED", "KXNBAPLAYOFF"), ("KXNBAWEST1SEED", "KXNBAPLAYOFF"),
+    ("KXSB", "KXNFLAFCCHAMP"), ("KXSB", "KXNFLNFCCHAMP"), ("KXSB", "KXNFLPLAYOFF"),
+    ("KXNFLAFCCHAMP", "KXNFLPLAYOFF"), ("KXNFLNFCCHAMP", "KXNFLPLAYOFF"),
+    ("KXNFL1SEED", "KXNFLPLAYOFF"), ("KXNFL1SEED", "KXNFLPLAYOFFHOST"), ("KXNFLPLAYOFFHOST", "KXNFLPLAYOFF"),
+    ("KXNHL", "KXNHLPLAYOFF"), ("KXNHL", "KXNHLEAST"), ("KXNHL", "KXNHLWEST"),
+    ("KXMLB", "KXMLBAL"), ("KXMLB", "KXMLBNL"), ("KXMLB", "KXMLBPLAYOFF"),
+    ("KXMLSCUP", "KXMLSEAST"), ("KXMLSCUP", "KXMLSWEST"),
+    ("KXNCAAF", "KXNCAAFSF"), ("KXNCAAF", "KXNCAAFQF"), ("KXNCAAF", "KXNCAAFPLAYOFF"),
+    ("KXNCAAFSF", "KXNCAAFQF"), ("KXNCAAFSF", "KXNCAAFPLAYOFF"), ("KXNCAAFQF", "KXNCAAFPLAYOFF"),
+    ("KXNCAAFTOPSEED", "KXNCAAFPLAYOFF"),
+    ("KXNCAAFAAC", "KXNCAAFAACQUAL"), ("KXNCAAFACC", "KXNCAAFACCQUAL"), ("KXNCAAFB10", "KXNCAAFB10QUAL"),
+    ("KXNCAAFB12", "KXNCAAFB12QUAL"), ("KXNCAAFCUSA", "KXNCAAFCUSAQUAL"), ("KXNCAAFMAC", "KXNCAAFMACQUAL"),
+    ("KXNCAAFMWC", "KXNCAAFMWCQUAL"), ("KXNCAAFPAC12", "KXNCAAFPAC12QUAL"), ("KXNCAAFSBELT", "KXNCAAFSBELTQUAL"),
+    ("KXNCAAFSEC", "KXNCAAFSECQ"),
+    ("KXNCAAMBACC", "KXNCAAMBACCQUAL"), ("KXNCAAMBBIG12", "KXNCAAMBBIG12QUAL"),
+    ("KXNCAAMBBIGEAST", "KXNCAAMBBIGEASTQUAL"), ("KXNCAAMBBIG10", "KXNCAAMBBIGTENQUAL"),
+]
+H, DAY = 3600, 86400
 
 
-def name(m):
-    return re.sub(r"[^a-z0-9 ]", "", (m.get("yes_sub_title") or "").lower()).strip()
+def close_of(m):
+    try:
+        return ts(m["close_time"])
+    except (KeyError, TypeError, ValueError, AttributeError):
+        return None
+
+
+def seasons(c, s):
+    """{event_ticker: [markets]} for open and settled events of a series."""
+    out = collections.defaultdict(list)
+    for ev in c.events(series_ticker=s, status="open", with_nested_markets="true"):
+        out[ev["event_ticker"]] += ev.get("markets") or []
+    for m in c.settled_markets(s, limit=600):
+        out[m.get("event_ticker")].append(m)
+    return out
+
+
+def match(ea, eb):
+    """Pair each season of A with the season of B it nests in: B settles no later than A
+    (plus a day) and no more than 250 days before it."""
+    out = []
+    for ka, ma in ea.items():
+        ca = max(filter(None, (close_of(m) for m in ma)), default=None)
+        if ca is None:
+            continue
+        best = None
+        for kb, mb in eb.items():
+            cb = max(filter(None, (close_of(m) for m in mb)), default=None)
+            if cb is not None and ca - 250 * DAY <= cb <= ca + DAY and (best is None or cb > best[0]):
+                best = (cb, kb)
+        if best:
+            out.append((ka, best[1]))
+    return out
 
 
 def main():
+    cfg = config.load()
     c = Kalshi()
-    t0 = time.time()
-    series = {s["ticker"]: s for s in c.series() if s.get("ticker")}
-    events = list(c.events(status="open", with_nested_markets="true"))
-    print(f"series: {len(series)}; open events: {len(events)}")
-    evs = collections.defaultdict(list)
-    for ev in events:
-        evs[ev.get("series_ticker")].append(ev)
-
-    picked = {}
-    for fam, rx in FAMILY.items():
-        hits = sorted(t for t, s in series.items() if evs.get(t) and rx.search(s.get("title") or ""))
-        picked[fam] = hits
-        print(f"\n== {fam}: {len(hits)} series with open events")
-        for t in hits[:150]:
-            s = series[t]
-            ms = [m for e in evs[t] for m in e.get("markets") or []]
-            src = [x.get("name") for x in s.get("settlement_sources") or []][:2]
-            print(f"  {t:<24} {(s.get('frequency') or '')[:10]:<10} ev={len(evs[t]):<4} mk={len(ms):<5} "
-                  f"{(s.get('title') or '')[:70]!r} src={src} e.g. {[m.get('yes_sub_title') for m in ms[:3]]}")
-
-    # Sports futures: few events, many outcomes. Pair series sharing team names.
-    fut = {}
-    for t in picked["sports"]:
-        ms = [m for e in evs[t] for m in e.get("markets") or []]
-        if len(evs[t]) <= 3 and len(ms) >= 8:
-            fut[t] = {name(m): m for m in ms if name(m)}
-    print(f"\n== sports futures series: {len(fut)}")
-    pairs = []
-    ts = sorted(fut)
-    for i, a in enumerate(ts):
-        for b in ts[i + 1:]:
-            both = set(fut[a]) & set(fut[b])
-            if len(both) >= 5:
-                pairs.append((len(both), a, b))
-    pairs.sort(reverse=True)
-    for n, a, b in pairs[:80]:
-        print(f"  {n:>3} shared: {a} {series[a].get('title')!r} <> {b} {series[b].get('title')!r}")
-
-    gaps, checked = [], 0
-    for n, a, b in pairs:
-        ta, tb = series[a].get("title") or "", series[b].get("title") or ""
-        if bool(NARROW.search(ta)) == bool(NARROW.search(tb)):
-            continue   # need one title-wide series and one narrower series
-        champ, narrow = (a, b) if NARROW.search(tb) else (b, a)
-        for team in set(fut[champ]) & set(fut[narrow]):
-            mc, mn = fut[champ][team], fut[narrow][team]
-            bid_c, ask_n = price(mc, "yes_bid"), price(mn, "yes_ask")
-            if not (bid_c and ask_n and 0 < bid_c < 1 and 0 < ask_n < 1):
-                continue
-            checked += 1
-            cost = ask_n + (1 - bid_c) + fee(1, ask_n) + fee(1, round(1 - bid_c, 4))
-            gaps.append((round(1 - cost, 4), champ, narrow, team, bid_c, ask_n, mc.get("close_time"), mn.get("close_time")))
-    gaps.sort(reverse=True)
-    print(f"\n== champion vs narrower pairs: {checked} team pairs priced; {sum(g[0] > 0 for g in gaps)} with a gap after fees")
-    for g in gaps[:25]:
-        print("  " + json.dumps(dict(zip(("edge", "champion", "narrower", "team", "champ_yes_bid", "narrow_yes_ask",
-                                          "champ_close", "narrow_close"), g))))
-
-    print("\n== fed events (up to 12)")
-    shown = 0
-    for t in picked["fed"]:
-        for e in evs[t]:
-            if shown >= 12:
-                break
-            shown += 1
-            ms = e.get("markets") or []
-            print(f"  {t} {e.get('event_ticker')} {e.get('title')!r} close={ms[0].get('close_time') if ms else None}")
-            for m in ms[:12]:
-                print(f"    {m.get('ticker'):<34} {(m.get('yes_sub_title') or '')[:40]!r:<44} "
-                      f"bid={price(m, 'yes_bid')} ask={price(m, 'yes_ask')}")
+    now, t0 = time.time(), time.time()
+    cache, rules_shown = {}, set()
+    totals = collections.Counter()
+    gaps_now, gap_hours = [], []
+    per_pair = collections.Counter()
+    broken = []
+    for a, b in PAIRS:
+        for s in (a, b):
+            if s not in cache:
+                try:
+                    cache[s] = seasons(c, s)
+                except Exception as e:
+                    print(f"{s}: failed: {e}")
+                    cache[s] = {}
+            if s not in rules_shown and cache[s]:
+                rules_shown.add(s)
+                m = next((m for ms in cache[s].values() for m in ms if m.get("rules_primary")), {})
+                print(f"RULES {s}: {(m.get('rules_primary') or '')[:420]!r}")
+        ea, eb = cache[a], cache[b]
+        if not ea or not eb:
+            print(f"pair {a} -> {b}: missing ({len(ea)} / {len(eb)} seasons)")
+            continue
+        for ka, kb in match(ea, eb):
+            ma = {m.get("yes_sub_title"): m for m in ea[ka] if m.get("yes_sub_title")}
+            mb = {m.get("yes_sub_title"): m for m in eb[kb] if m.get("yes_sub_title")}
+            teams = set(ma) & set(mb)
+            totals["season pairs"] += 1
+            totals["team pairs"] += len(teams)
+            for team in teams:
+                x, y = ma[team], mb[team]
+                if x.get("result") == "yes" and y.get("result") == "no":
+                    broken.append((a, b, ka, team))
+                    continue
+                if x.get("status") in (None, "active", "open") and y.get("status") in (None, "active", "open"):
+                    bid_a, ask_b = price(x, "yes_bid"), price(y, "yes_ask")
+                    if bid_a and ask_b and 0 < bid_a < 1 and 0 < ask_b < 1:
+                        cost = ask_b + (1 - bid_a) + fee(1, ask_b) + fee(1, round(1 - bid_a, 4))
+                        if cost < 1:
+                            gaps_now.append((round(1 - cost, 4), a, b, team, bid_a, ask_b, x.get("close_time")))
+                ca, cb = close_of(x), close_of(y)
+                if ca is None or cb is None:
+                    continue
+                pay = max(ca, cb)                    # $1 is locked in once both have paid
+                end = min(ca, cb, now)               # both must still trade
+                start = pay - 45 * DAY
+                if end <= start:
+                    continue
+                try:
+                    cx = {k["end_period_ts"]: k for k in c.candles(a, x["ticker"], int(start), int(end)) or []}
+                    cy = {k["end_period_ts"]: k for k in c.candles(b, y["ticker"], int(start), int(end)) or []}
+                except Exception as e:
+                    totals["candle errors"] += 1
+                    continue
+                totals["candle pairs"] += 1
+                for t in sorted(set(cx) & set(cy)):
+                    bid_a, ask_b = candle_close(cx[t], "yes_bid"), candle_close(cy[t], "yes_ask")
+                    if not (0 < bid_a < 1 and 0 < ask_b < 1):
+                        continue
+                    totals["pair-hours"] += 1
+                    cost = ask_b + (1 - bid_a) + fee(1, ask_b) + fee(1, round(1 - bid_a, 4))
+                    if cost >= 1:
+                        continue
+                    totals["gap hours"] += 1
+                    days = max((pay - t) / DAY, 1 / 24)
+                    apr = yearly_return(1 / cost, days)
+                    good = days <= cfg["max_arb_days"] and apr >= cfg["min_arb_apr"] and (1 - cost) / cost >= 0.01
+                    if good:
+                        totals["passing hours"] += 1
+                        per_pair[(a, b, ka, team)] += 1
+                    gap_hours.append((round(1 - cost, 4), a, b, ka, team, time.strftime("%Y-%m-%d %H:%M", time.gmtime(t)),
+                                      bid_a, ask_b, round(days, 1), round(apr, 2), good))
+    print(f"\ntotals: {dict(totals)}")
+    print(f"settled results that break a link (A yes, B no): {len(broken)} {broken[:10]}")
+    gaps_now.sort(reverse=True)
+    print(f"\ngaps now (open markets, after fees): {len(gaps_now)}")
+    for g in gaps_now[:20]:
+        print("  NOW " + json.dumps(dict(zip(("edge", "A", "B", "team", "A_yes_bid", "B_yes_ask", "A_close"), g))))
+    gap_hours.sort(reverse=True)
+    print(f"\nhistory: {totals['gap hours']} gap hours; {totals['passing hours']} pass the bot's rules, "
+          f"in {len(per_pair)} team-seasons")
+    for k, n in per_pair.most_common(20):
+        print(f"  PASS {n:>4}h {k}")
+    for g in gap_hours[:30]:
+        print("  GAP " + json.dumps(dict(zip(("edge", "A", "B", "season", "team", "hour", "A_yes_bid", "B_yes_ask",
+                                               "days_to_pay", "apr", "passes"), g))))
     print(f"\ndone in {time.time() - t0:.0f}s")
 
 
