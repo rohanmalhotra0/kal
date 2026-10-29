@@ -2,6 +2,20 @@
 
 Newest first. Each 2-hour check-in adds one entry: what it checked, what it found, links.
 
+## 2026-10-29 14:40 UTC — Fed links built on paper; CPI and jobs rejected; new ideas
+
+- Merged [PR #28](https://github.com/rohanmalhotra0/kal/pull/28): `fed_link_arb`, paper only.
+  It buys a set of Fed markets that must pay $1 (rate after the meeting vs the decision)
+  when it costs less. 34 tests. Checked on the live API: it reads the Dec meeting right
+  (rate before 4.00%, no gap today). Critics' points fixed: a too-good price keeps even a
+  pinned meeting on paper, and the docs say a moved meeting breaks some sets.
+- Merged [PR #29](https://github.com/rohanmalhotra0/kal/pull/29): idea #7, CPI and jobs,
+  rejected. The Fed's study finds Kalshi as good as or better than the experts. Our check
+  of 682 markets in 143 releases: well calibrated, no rule beats the fees. Added ideas
+  #16-#18 so the check-ins have work.
+- Checked: CI green on main f1773d9. Market-check green; its real-data scan runs the new
+  strategy. Waiting on the owner's `sudo kal doctor` output.
+
 ## 2026-10-29 12:55 UTC — money audit round 3 merged; Fed links look real; crypto links rejected
 
 - Merged [PR #27](https://github.com/rohanmalhotra0/kal/pull/27): 18 money holes closed.
