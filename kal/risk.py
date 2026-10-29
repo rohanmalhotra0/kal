@@ -55,6 +55,12 @@ def too_late(closes_at, cfg, now=None):
     return max((closes_at - now) / 86400, 1 / 24) > cfg["max_arb_days"]
 
 
+def too_good(sig):
+    """True if a locked-in trade returns over MAX_ARB_ROI: Limits.refuse turns it down as a
+    misread. allocate() uses it too, so such a trade never takes budget from a real one."""
+    return sig.guaranteed and (sig.cost <= 0 or sig.payout_min / sig.cost - 1 > MAX_ARB_ROI)
+
+
 class Limits:
     """Tracks spending within one run so no signal can push past a limit."""
 
@@ -81,7 +87,7 @@ class Limits:
         if sig.guaranteed:
             if sig.cost > cfg["max_per_arb"] + 1e-9:
                 return f"arbitrage cost ${sig.cost:.2f} over max_per_arb"
-            if sig.payout_min / sig.cost - 1 > MAX_ARB_ROI:
+            if too_good(sig):
                 return (f"too good to be true: ${sig.cost:.2f} 'locked in' to pay ${sig.payout_min:.2f}. "
                         f"Probably a misread market")
             if not sig.closes_at:

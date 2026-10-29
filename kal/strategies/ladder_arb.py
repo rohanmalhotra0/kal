@@ -25,7 +25,7 @@ import re
 import time
 
 from ..client import fee, price, ts
-from ..risk import too_late, yearly_return
+from ..risk import too_good, too_late, yearly_return
 from .base import Leg, Signal, Strategy, plain_payouts
 
 MIN_PROFIT = 0.05      # dollars per signal, after fees
@@ -145,11 +145,12 @@ def partial_cost(quotes, c):
     return sum(c * p + fee(c, p) for _, _, p, _ in ordered[:-1])
 
 
-def locked_basket(quotes, budget, max_partial=float("inf")):
+def locked_basket(quotes, budget, max_partial=float("inf"), pay=1.0):
     """quotes: [(ticker, side, ask, size)] where one contract of each, together, pays
-    at least $1 in every outcome. Pick the count with the most locked-in profit that
-    fits the budget, and whose half-built worst case fits max_partial (risk.Limits
-    refuses anything bigger), or None if fees eat it or it's too small to bother."""
+    at least `pay` dollars in every outcome ($1 for most sets; some of range_link_arb's
+    pay $2). Pick the count with the most locked-in profit that fits the budget, and whose
+    half-built worst case fits max_partial (risk.Limits refuses anything bigger), or None
+    if fees eat it or it's too small to bother."""
     if len(quotes) < 2 or any(p is None or s < 1 for _, _, p, s in quotes):
         return None
     best = None
@@ -157,8 +158,8 @@ def locked_basket(quotes, budget, max_partial=float("inf")):
         cost = sum(c * p + fee(c, p) for _, _, p, _ in quotes)
         if cost > budget or partial_cost(quotes, c) > max_partial:
             break  # both only grow with c
-        if best is None or c - cost > best["profit"]:
-            best = {"count": c, "quotes": quotes, "cost": cost, "profit": c - cost}
+        if best is None or pay * c - cost > best["profit"]:
+            best = {"count": c, "quotes": quotes, "cost": cost, "profit": pay * c - cost}
     if best and best["profit"] >= MIN_PROFIT and best["profit"] / best["cost"] >= MIN_ROI:
         return best
     return None
@@ -171,25 +172,33 @@ def thinnest_first(quotes):
 
 
 def allocate(ctx, candidates):
-    """candidates: [(quotes, make)] with make(basket) -> Signal. Best first, no ticker in two
+    """candidates: [(quotes, make)] with make(basket) -> Signal, or [(quotes, make, pay)] for a
+    set that pays at least `pay` dollars a contract (else $1). Best first, no ticker in two
     signals (they'd count the same liquidity twice), and together they fit budget_left."""
     cap, partial = float(ctx.cfg["max_per_arb"]), float(ctx.cfg["max_per_trade"])
     left, used, ranked, out = ctx.budget_left, set(), [], []
-    for quotes, make in candidates:
-        basket = locked_basket(quotes, min(cap, left), partial)
+    for quotes, make, *pay in candidates:
+        pay = pay[0] if pay else 1.0
+        basket = locked_basket(quotes, min(cap, left), partial, pay)
         if basket:
             sig = make(basket)
             if too_late(sig.closes_at, ctx.cfg):
                 continue   # Limits.refuse turns it down: it mustn't take budget from the rest first
-            ranked.append((yearly(sig), quotes, make))
-    for _, quotes, make in sorted(ranked, key=lambda r: -r[0]):
-        tickers = {q[0] for q in quotes}
-        basket = locked_basket(quotes, min(cap, left), partial)  # resized to what's left
-        if tickers & used or not basket:
-            continue
-        used |= tickers
-        left -= basket["cost"]
-        out.append(make(basket))
+            ranked.append((yearly(sig), quotes, make, pay, too_good(sig)))
+    ranked.sort(key=lambda r: -r[0])
+    # Real sets first. One Limits.refuse turns down as too good to be true (a misread?) is still
+    # shown, but only with budget and tickers no real set wanted.
+    for misreads in (False, True):
+        for _, quotes, make, pay, misread in ranked:
+            if misread != misreads:
+                continue
+            tickers = {q[0] for q in quotes}
+            basket = locked_basket(quotes, min(cap, left), partial, pay)  # resized to what's left
+            if tickers & used or not basket:
+                continue
+            used |= tickers
+            left -= basket["cost"]
+            out.append(make(basket))
     return sorted(out, key=lambda s: -yearly(s))
 
 

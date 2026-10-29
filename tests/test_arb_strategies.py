@@ -239,11 +239,13 @@ class LadderTests(OutcomeChecks):
         self.assertEqual(self.scan(ev, client=c)[0].legs[0].side, "no")
 
     def test_signals_never_share_a_ticker_and_fit_the_budget(self):
-        # 60->50 and 70->50 are both inverted and share LAD-50.
+        # 60->50 and 70->50 are both inverted and share LAD-50. 60->50 (33%) is too good to be
+        # true, so Limits.refuse turns it down: 70->50 (25%), the one it takes, gets LAD-50.
         ev = ladder_event(quotes=((.30, .32), (.60, .62), (.55, .57)))
         sigs = self.scan(ev)
         self.assertEqual(len(sigs), 1)
-        self.assertEqual({leg.ticker for leg in sigs[0].legs}, {"LAD-50", "LAD-60"})
+        self.assertEqual({leg.ticker for leg in sigs[0].legs}, {"LAD-50", "LAD-70"})
+        self.assertFalse(risk.too_good(sigs[0]))
         # Two separate inversions: 60->50 and 80->70. Both fit, within one budget.
         ev = ladder_event(strikes=(50, 60, 70, 80), quotes=((.30, .32), (.60, .62), (.25, .27), (.50, .52)))
         sigs = self.scan(ev, budget=40)
@@ -253,6 +255,16 @@ class LadderTests(OutcomeChecks):
         self.assertLessEqual(sum(s.cost for s in sigs), 40)
         for s in sigs:
             self.assertLockedIn(s, ev["markets"])
+
+    def test_a_too_good_set_takes_nothing_a_real_one_needs(self):
+        # 60->50 at 33% is too good to be true (Limits.refuse turns it down); 80->70 at 25% is real.
+        # With budget for one, the real one gets it. The other shows only with what's left.
+        ev = ladder_event(strikes=(50, 60, 70, 80), quotes=((.30, .32), (.60, .62), (.25, .27), (.50, .52)))
+        sigs = self.scan(ev, budget=16)
+        self.assertEqual([(risk.too_good(s), sorted(leg.ticker for leg in s.legs)) for s in sigs],
+                         [(False, ["LAD-70", "LAD-80"])])
+        sigs = self.scan(ev, budget=40)   # room for both: the too-good one is still shown, to be refused
+        self.assertEqual(sorted(risk.too_good(s) for s in sigs), [False, True])
 
     def test_recheck(self):
         ev = ladder_event()
