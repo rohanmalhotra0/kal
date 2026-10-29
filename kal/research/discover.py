@@ -28,7 +28,7 @@ import re
 import time
 from datetime import datetime, timezone
 
-from ..client import num
+from ..client import brief_series, num
 from .. import db
 from ..strategies import favorites
 from . import backtest
@@ -189,21 +189,29 @@ def active_series(client, pool=ACTIVE_POOL):
     so research spends its daily budget there. Returns [] if the events call fails.
 
     A page at a time, keeping only each series' volume: all open events with their markets
-    is over 700 MB in Python, twice the server's memory cap."""
+    is over 700 MB in Python, and research shares the server's memory cap with trading."""
     volume = {}
     try:
         pages = getattr(client, "event_pages", None)
-        for page in (pages(status="open", with_nested_markets="true") if pages
-                     else [client.events(status="open", with_nested_markets="true")]):
-            for ev in page:
-                s = ev.get("series_ticker")
-                if not s or s.startswith("KXMVE"):  # combo bets: not a series we'd trade
-                    continue
-                v = sum(num(m, "volume_24h") for m in ev.get("markets") or [])
-                volume[s] = volume.get(s, 0.0) + v
+        pages = iter(pages(status="open", with_nested_markets="true") if pages
+                     else [client.events(status="open", with_nested_markets="true")])
     except Exception as e:
         log.warning("research: couldn't list open events: %s", e)
         return []
+    while True:
+        try:
+            page = next(pages)
+        except StopIteration:
+            break
+        except Exception as e:   # only the download: odd data raises, as it always did
+            log.warning("research: couldn't list open events: %s", e)
+            return []
+        for ev in page:
+            s = ev.get("series_ticker")
+            if not s or s.startswith("KXMVE"):  # combo bets: not a series we'd trade
+                continue
+            v = sum(num(m, "volume_24h") for m in ev.get("markets") or [])
+            volume[s] = volume.get(s, 0.0) + v
     busy = sorted((s for s, v in volume.items() if v > 0), key=lambda s: (-volume[s], s))
     return busy[:pool]
 
@@ -328,7 +336,7 @@ def run(client, cfg, quick=False, now=None, series=None):
         max_series, max_markets = min(max_series, 3), min(max_markets, 200)
 
     edges, words = load_edges(), load_words()
-    all_series = {s["ticker"]: s for s in client.series() if isinstance(s, dict) and s.get("ticker")}
+    all_series = {s["ticker"]: s for s in brief_series(client.series()) if s["ticker"]}
     # One-off series have a single event: never enough events to show an edge.
     testable = [t for t, s in all_series.items() if s.get("frequency") != "one_off"]
     active = [t for t in active_series(client) if t in all_series and all_series[t].get("frequency") != "one_off"]

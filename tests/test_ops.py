@@ -1245,7 +1245,7 @@ class DeployFileTests(unittest.TestCase):
         # Health checks are local (no network) and use the CLI command, which really exists.
         for text in (df, compose):
             self.assertIn('"python", "-m", "kal", "health", "--alive"', text)
-        self.assertIn("mem_limit: 400m", compose)
+        self.assertIn("mem_limit: 1200m", compose)
         self.assertTrue(cli.parser().parse_args(["health", "--alive"]).alive)
 
     def test_systemd(self):
@@ -1254,7 +1254,7 @@ class DeployFileTests(unittest.TestCase):
         self.assertIn("-m kal app", unit)
         self.assertNotIn("0.0.0.0", unit)
         for line in ("User=kal", "Restart=always", "NoNewPrivileges=true", "ProtectSystem=strict",
-                     "ReadWritePaths=/var/lib/kal", "PrivateTmp=true", "MemoryMax=400M", "StartLimitIntervalSec=0"):
+                     "ReadWritePaths=/var/lib/kal", "PrivateTmp=true", "MemoryMax=60%", "StartLimitIntervalSec=0"):
             self.assertIn(line, lines)
         restart = [int(x.split("=")[1]) for x in lines if x.startswith("RestartSec=")]
         self.assertTrue(restart and restart[0] <= 10)

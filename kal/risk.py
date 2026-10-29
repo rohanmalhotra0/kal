@@ -45,6 +45,16 @@ def yearly_return(ratio, days):
     return math.exp(min(math.log(ratio) * 365 / days, 50.0)) - 1
 
 
+def too_late(closes_at, cfg, now=None):
+    """True if money put in now would be locked up past max_arb_days, or until a date nobody
+    knows: Limits.refuse turns such a locked-in trade down. The strategies use it too, so a
+    trade that would be refused never takes budget from one that wouldn't."""
+    if not closes_at:
+        return True
+    now = time.time() if now is None else now
+    return max((closes_at - now) / 86400, 1 / 24) > cfg["max_arb_days"]
+
+
 class Limits:
     """Tracks spending within one run so no signal can push past a limit."""
 
@@ -77,7 +87,7 @@ class Limits:
             if not sig.closes_at:
                 return "locked-in trade with no known settle date"
             days = max((sig.closes_at - time.time()) / 86400, 1 / 24)
-            if days > cfg["max_arb_days"]:
+            if too_late(sig.closes_at, cfg):
                 return f"locks money up for {days:.0f} days (max {cfg['max_arb_days']})"
             apr = yearly_return(sig.payout_min / sig.cost, days)
             if apr < cfg["min_arb_apr"]:

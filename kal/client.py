@@ -159,8 +159,7 @@ class Kalshi:
 
     def pages(self, endpoint, key, params=None, strict=False):
         """Like paginate(), one page at a time, so a caller can keep only what it needs:
-        all open events with their markets is 350 MB of JSON, far more than the server's
-        memory cap."""
+        all open events with their markets is 350 MB of JSON, over 700 MB in Python."""
         params = dict(params or {})
         while True:
             d = self.get(endpoint, params)
@@ -441,6 +440,16 @@ def resting(order):
 def candle_close(candle, field):
     """Closing yes_bid / yes_ask / price of a candle, in dollars."""
     return price(candle.get(field) or {}, "close")
+
+
+BRIEF = ("ticker", "title", "category", "frequency")
+
+
+def brief_series(rows):
+    """What research and the dashboard read from Kalshi's list of every series (15,000+ rows,
+    12 MB of JSON, some 50 MB in full): kept for a whole research run or an hour."""
+    return [{k: s.get(k) for k in BRIEF} for s in rows or []
+            if isinstance(s, dict) and isinstance(s.get("ticker"), str)]
 
 
 def ts(iso):

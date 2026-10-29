@@ -32,12 +32,29 @@ UNREAD = ("price_ranges", "early_close_condition", "updated_time", "latest_expir
           "last_price", "last_price_dollars", "open_interest", "open_interest_fp")
 
 
-def horizon_days(cfg):
+def _hours(research, depth=0):
+    """Every hours_before_close in the research outputs (each longshot cell keeps the one it
+    was tested at, which can be older than the config's)."""
+    if depth > 6:
+        return
+    if isinstance(research, dict):
+        if "hours_before_close" in research:
+            yield research["hours_before_close"]
+        research = research.values()
+    if isinstance(research, (list, tuple, type({}.values()))):
+        for v in research:
+            if isinstance(v, (dict, list)):
+                yield from _hours(v, depth + 1)
+
+
+def horizon_days(cfg, research=None):
     """How far ahead any strategy can act. A locked-in trade must settle within max_arb_days:
-    Limits.refuse turns down later ones, on paper too. Bets look a few hours ahead (their
-    research's hours before close). Anything unreadable: no limit."""
+    Limits.refuse turns down later ones, on paper too, and the strategies skip them before they
+    take budget (risk.too_late). Bets look a few hours ahead: each research result's hours before
+    close. Anything unreadable: no limit."""
     try:
-        days = max(float(cfg["max_arb_days"]), float(cfg.get("research_hours_before_close") or 0) / 24)
+        hours = [float(cfg.get("research_hours_before_close") or 0)] + [float(h) for h in _hours(research)]
+        days = max(float(cfg["max_arb_days"]), max(hours) / 24)
     except (KeyError, TypeError, ValueError):
         return float("inf")
     return days + 1
@@ -55,27 +72,27 @@ def _wanted(ev, until, keep):
     """Keep an open event if one of its markets is due by `until`: it closes by then, or the
     scheduled end a bet times itself by (the event's strike_date, the market's
     occurrence_datetime: base.scheduled_end) comes by then. Or if the bot holds one of its
-    markets (`keep`), or anything can't be read: then the strategies judge it, as before."""
-    markets = ev.get("markets") if isinstance(ev, dict) else None
-    if not isinstance(markets, list) or _due(ev.get("strike_date"), until):
-        return True
-    for m in markets:
-        if not isinstance(m, dict) or m.get("ticker") in keep:
+    markets (`keep`), or anything can't be read, even no markets at all: then the strategies
+    judge it, as before (fed_link_arb won't trade a meeting it can't place among the others)."""
+    try:
+        markets = ev.get("markets")
+        if not isinstance(markets, list) or not markets or _due(ev.get("strike_date"), until):
             return True
-        try:
-            if ts(m["close_time"]) <= until:
+        for m in markets:
+            if not isinstance(m, dict) or m.get("ticker") in keep:
                 return True
-        except Exception:
-            return True
-        if _due(m.get("occurrence_datetime"), until):
-            return True
-    return False
+            if ts(m["close_time"]) <= until or _due(m.get("occurrence_datetime"), until):
+                return True
+        return False
+    except Exception:
+        return True
 
 
 def _lean(ev, pool):
     """One open event, slimmed in place: the unread fields go, and each text is shared with
-    its copies (an event's markets repeat the same rules and times)."""
-    for m in ev.get("markets") or []:
+    its copies (an event's markets repeat the same rules and times). Anything odd stays as is."""
+    markets = ev.get("markets") if isinstance(ev, dict) else None
+    for m in markets if isinstance(markets, list) else ():
         if isinstance(m, dict):
             for k in UNREAD:
                 m.pop(k, None)
@@ -91,8 +108,9 @@ class RunCache:
     orders always go straight through: those must be fresh.
 
     All open events with their markets is 350 MB of JSON (2026-10-29), over 700 MB in
-    Python: twice the server's cap (deploy/kal.service). So the run keeps only the events
-    a strategy can act on (scope()), read a page at a time, and slimmed (_lean)."""
+    Python, and research runs alongside within the same cap (deploy/kal.service). So the run
+    keeps only the events a strategy can act on (scope()), read a page at a time, and slimmed
+    (_lean): a run peaks near 320 MB."""
 
     CACHED = ("events", "markets", "series")
 
@@ -555,7 +573,7 @@ def _trade(client, cfg, summary):
     held_live, held_paper = {p["ticker"] for p in positions}, paper.held()
     paper_kinds = paper.open_cost_by_kind()   # kinds that may hold only a share of paper money
     if hasattr(client, "scope"):
-        client.scope(held_live | held_paper, horizon_days(cfg))   # what the run's events list keeps
+        client.scope(held_live | held_paper, horizon_days(cfg, research))   # what the run's events list keeps
 
     # Bet smaller after losses (Grossman-Zhou style); arbitrage sizing doesn't use this.
     live_peak = max(ledger.peak_equity() or 0, cfg["budget"])

@@ -132,7 +132,7 @@ class DateLadderTests(unittest.TestCase):
         # one's (Kalshi rewrites close_time). The earlier DEADLINE is still the NO leg.
         ev = date_event()
         early, mid, late = ev["markets"]
-        early["close_time"] = iso(time.time() + 40 * DAY)
+        early["close_time"] = iso(time.time() + 22 * DAY)   # after the 20-day market's, within max_arb_days
         ev["markets"] = [late, mid, early]
         sigs = self.scan(ev)
         self.assertEqual(len(sigs), 1)
@@ -662,17 +662,15 @@ class EngineTests(TempHome):
 
     def test_money_locked_past_max_arb_days_is_refused(self):
         # The run's events list leaves out an event whose dates are all past max_arb_days
-        # (engine.horizon_days); one with an early date stays, and the risk check refuses
-        # the pairs that pay too late.
+        # (engine.horizon_days). One with an early date stays, but a pair that pays too late
+        # is never offered (risk.too_late), so it takes no budget from the rest.
         config.update({"strategies": {"date_ladder_arb": {"mode": "paper"}}})
         s = engine.run_once(fake_for(date_event(days=(40, 50, 55))))
         self.assertTrue(s["ok"], s)
         self.assertEqual((s["paper_trades"], s["signals"]), (0, 0))
         s = engine.run_once(fake_for(date_event(quotes=((.30, .32), (.45, .47), (.38, .40)), days=(20, 40, 50))))
         self.assertTrue(s["ok"], s)
-        self.assertEqual(s["paper_trades"], 0)
-        statuses = [r["status"] for r in db.query("SELECT status FROM signals")]
-        self.assertTrue(statuses and all("locks money up" in x for x in statuses), statuses)
+        self.assertEqual((s["paper_trades"], s["signals"]), (0, 0))
 
     def test_too_good_to_be_true_is_refused(self):
         # 70c bid on the earlier date, 10c ask on the later: "locked in" at 40% is a misread.

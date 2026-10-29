@@ -1,5 +1,5 @@
-"""The run's copy of all open events must fit the server's memory cap (deploy/kal.service,
-MemoryMax=400M). The real list is 15,600 events and 163,000 markets: 350 MB of JSON, over
+"""The run's copy of all open events must fit the server's memory cap (deploy/kal.service:
+60% of its RAM, shared with research). The real list is 15,600 events and 163,000 markets: 350 MB of JSON, over
 700 MB in Python (measured 2026-10-29). So a run keeps only events a strategy can act on,
 reads them a page at a time, and slims each market, without changing what a strategy sees
 in the events it keeps. python -m unittest tests.test_engine_memory
@@ -11,9 +11,10 @@ import time
 from datetime import datetime, timezone
 from unittest import mock
 
-from kal import client, config, db, engine
+from kal import client, config, db, engine, risk
 from kal.research import discover
 from kal.strategies import load_all
+from kal.strategies.base import Context
 from tests.fakes import FakeKalshi
 from tests.helpers import TempHome
 
@@ -188,3 +189,148 @@ class StreamTests(TempHome):
                 yield [{"series_ticker": "KXA", "markets": [{"volume_24h_fp": "5"}]}]
                 raise client.KalshiError("GET /events -> 500")
         self.assertEqual(discover.active_series(Broken([])), [])
+
+
+ELECTION = ("If the election is postponed beyond one year from the original date or cancelled entirely, the "
+            "market resolves to the last fair market price.")
+
+
+def basket_fake(close, rules=""):
+    """A one-winner event whose NO basket pays: YES bids add up to $1.12."""
+    from tests.test_core import arb_event
+    ev = arb_event(close=close)
+    c = FakeKalshi()
+    c.event_list = [ev]
+    for m in ev["markets"]:
+        m["rules_secondary"] = rules
+        b = float(m["yes_bid_dollars"])
+        c.books[m["ticker"]] = {"yes": [(b, 40)], "no": []}
+    return c
+
+
+class ReviewTests(TempHome):
+    """What a review of the lean events list found (PR #32)."""
+
+    def test_an_event_with_no_markets_is_kept(self):
+        # fed_link_arb won't trade a meeting while another Fed event can't be placed in time.
+        rc = engine.RunCache(Pages([[{"event_ticker": "KXFED-26NOV", "series_ticker": "KXFED", "markets": []},
+                                     event("FAR-A", 200)]]))
+        rc.scope((), 31)
+        got = [ev["event_ticker"] for ev in rc.events(status="open", with_nested_markets="true")]
+        self.assertEqual(got, ["KXFED-26NOV"])
+
+    def test_odd_entries_never_stop_the_run_and_stay_as_they_are(self):
+        odd = [None, "junk", {"event_ticker": "N", "markets": 5},
+               {"event_ticker": "U", "markets": [{"ticker": ["a", "list"],
+                                                  "close_time": iso(time.time() + 200 * DAY)}]}]
+        rc = engine.RunCache(Pages([odd + [event("NEAR-A", 2)]]))
+        rc.scope((), 31)
+        got = rc.events(status="open", with_nested_markets="true")
+        self.assertEqual(got[:4], odd)
+        self.assertEqual(got[4]["event_ticker"], "NEAR-A")
+
+    def test_the_horizon_covers_every_research_result(self):
+        cfg = config.load()
+        cells = {"longshot": {"cells": [{"hours_before_close": 6}, {"hours_before_close": 2400}]}}
+        self.assertEqual(engine.horizon_days(cfg, cells), 101)
+        self.assertEqual(engine.horizon_days(cfg, {"longshot": [{"hours_before_close": "junk"}]}), float("inf"))
+        self.assertEqual(engine.horizon_days(cfg, {}), cfg["max_arb_days"] + 1)
+
+    def test_research_still_fails_loudly_on_odd_data(self):
+        # Only the download is caught: junk in a reply fails discovery, as it always did.
+        c = Pages([[{"series_ticker": "KXA", "markets": [{"volume_24h_fp": "1,234.00"}]}]])
+        with self.assertRaises(ValueError):
+            discover.active_series(c)
+
+    def test_every_strategy_asks_for_the_one_list_the_run_slims(self):
+        # Any other spelling would download, and hold, all 163,000 markets again.
+        calls = []
+        for path in glob.glob(os.path.join(ROOT, "kal", "strategies", "*.py")):
+            with open(path) as f:
+                calls += [(os.path.basename(path), a) for a in re.findall(r"\.events\(([^)]*)\)", f.read())]
+        self.assertTrue(calls)
+        odd = [c for c in calls if c[1] != 'status="open", with_nested_markets="true"' and "series_ticker" not in c[1]]
+        self.assertEqual(odd, [])
+
+    def test_a_cancel_clause_basket_that_settles_too_late_is_skipped(self):
+        # Not locked in (Kalshi may pick the price), but its money is tied up like a locked-in
+        # trade's: no longer than max_arb_days.
+        from kal.strategies import basket_arb
+        cfg = dict(config.DEFAULTS)
+        for days, want in ((10, 1), (400, 0)):
+            rc = engine.RunCache(basket_fake(iso(time.time() + days * DAY), ELECTION))
+            rc.scope((), float("inf"))
+            sigs = basket_arb.STRATEGY.scan(Context(rc, cfg, "paper", 100.0, 100.0, set(), {}, {}))
+            self.assertEqual(len(sigs), want, days)
+            self.assertTrue(all(s.meta.get("paper_only") for s in sigs))
+
+    def test_a_trade_that_would_be_refused_takes_no_budget(self):
+        # Ranked first by yearly return, a 40-day ladder used to take the budget, then be
+        # refused (over max_arb_days), leaving the 10-day one less than it could have had.
+        from kal.strategies import ladder_arb
+        from tests import test_arb_strategies as arb
+        near = arb.ladder_event(strikes=(50, 60), quotes=((.48, .50), (.56, .58)), ev="NEAR",
+                                close=iso(time.time() + 10 * DAY))
+        far = arb.ladder_event(strikes=(50, 60), quotes=((.38, .40), (.60, .62)), ev="FAR",
+                               close=iso(time.time() + 40 * DAY))
+
+        def scan(*events):
+            return ladder_arb.STRATEGY.scan(arb.ctx(arb.fake_for(*events), budget=30.0))
+        alone, both = scan(near), scan(near, far)
+        self.assertEqual([s.event for s in both], ["NEAR"])
+        self.assertEqual([(s.event, s.cost) for s in both], [(s.event, s.cost) for s in alone])
+
+    def test_a_strategy_sees_far_events_the_bot_holds_for_real(self):
+        config.update({"enabled": True, "budget": 0,
+                       "strategies": {k: {"mode": "off"} for k in config.DEFAULTS["strategies"]}})
+        config.update({"strategies": {"ladder_arb": {"mode": "paper"}}})
+        c = Pages([[event("NEAR-A", 2), event("FAR-A", 200), event("FAR-B", 200)]], can_trade=True)
+        c.position_list = [{"ticker": "FAR-A-1", "position": 3, "exposure": 1.5}]   # the owner's own, say
+        c.market_info["FAR-A-1"] = {"ticker": "FAR-A-1", "status": "active", "yes_bid_dollars": "0.5000"}
+        seen = []
+        strat = load_all()["ladder_arb"]
+        with mock.patch.object(type(strat), "scan",
+                               lambda self, ctx: seen.append(ctx.client.events(status="open",
+                                                                               with_nested_markets="true")) or []):
+            engine.run_once(c)
+        self.assertEqual([{ev["event_ticker"] for ev in evs} for evs in seen], [{"NEAR-A", "FAR-A"}])
+
+
+class SameTradesTests(TempHome):
+    """The filter must change no trade the bot would make: every arbitrage strategy, on events
+    a few days to a year off, accepts the same signals with it as without it."""
+
+    def accepted(self, strat, client, horizon, cfg):
+        rc = engine.RunCache(client)
+        rc.scope((), horizon)
+        limits = risk.Limits(cfg, 100.0)
+        out = []
+        for sig in strat.scan(Context(rc, cfg, "paper", 100.0, 100.0, set(), {}, {})):
+            if not limits.refuse(sig):
+                limits.spend(sig)
+                legs = sorted((leg.ticker, leg.side, leg.count) for leg in sig.legs)
+                out.append((sig.event, round(sig.cost, 4), legs))
+        return out
+
+    def test_the_filter_changes_no_accepted_trade(self):
+        from kal.strategies import basket_arb, bracket_arb, date_ladder_arb, fed_link_arb, ladder_arb
+        from tests import test_arb_strategies as arb, test_date_ladder as dl, test_fed_link_arb as fed
+        cfg = dict(config.DEFAULTS)
+        cut = engine.horizon_days(cfg)
+        traded = 0
+        for days in (2, 29.5, 30.5, 31.5, 40, 400):
+            close = iso(time.time() + days * DAY)
+            br = arb.bracket_event()
+            for m in br["markets"]:
+                m["close_time"] = close
+            cases = [(ladder_arb, arb.fake_for(arb.ladder_event(close=close))),
+                     (bracket_arb, arb.fake_for(br)),
+                     (basket_arb, basket_fake(close)),
+                     (basket_arb, basket_fake(close, ELECTION)),
+                     (date_ladder_arb, dl.fake_for(dl.date_event(days=(days, days + 5, days + 10)))),
+                     (fed_link_arb, fed.fake_for(fed.gap_meeting(days)))]
+            for mod, c in cases:
+                cut_off = self.accepted(mod.STRATEGY, c, cut, cfg)
+                self.assertEqual(cut_off, self.accepted(mod.STRATEGY, c, float("inf"), cfg), (mod.__name__, days))
+                traded += bool(cut_off)
+        self.assertGreater(traded, 5)   # the fixtures do trade when they're near

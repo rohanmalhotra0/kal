@@ -609,7 +609,7 @@ class MemoryTests(TempHome):
         with open(os.path.join(config.ROOT, "deploy", "kal.service")) as f:
             unit = f.read()
         self.assertIn("\nOOMPolicy=continue\n", unit)
-        self.assertIn("\nMemoryMax=400M\n", unit)
+        self.assertIn("\nMemoryMax=60%\n", unit)
         self.assertIs(scheduler.DEFAULT_JOBS["research"], scheduler.run_research_apart)
 
 

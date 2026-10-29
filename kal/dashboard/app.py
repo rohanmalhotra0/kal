@@ -31,7 +31,7 @@ from flask import Flask, jsonify, render_template, request
 from werkzeug.serving import make_server
 
 from .. import config, db, gate, ledger, notify, paper
-from ..client import Kalshi, fee, load_key
+from ..client import Kalshi, brief_series, fee, load_key
 from ..scheduler import Scheduler
 from ..strategies import load_all
 
@@ -726,8 +726,7 @@ class SeriesList:
             hit = self.cache.get(env)
         if hit and self.clock() - hit[0] < self.ttl:
             return hit[1]
-        rows = [s for s in self.client_factory().series() or []
-                if isinstance(s, dict) and isinstance(s.get("ticker"), str)]
+        rows = brief_series(self.client_factory().series())
         with self.lock:
             self.cache[env] = (self.clock(), rows)
         return rows

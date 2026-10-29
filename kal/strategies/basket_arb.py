@@ -15,6 +15,7 @@ may hold at most PAPER_SHARE of the paper money, so other ideas still get practi
 import time
 
 from ..client import fee, price, ts
+from ..risk import too_late
 from .base import Leg, Signal, Strategy, fair_price_only_if_cancelled, plain_payouts
 from .ladder_arb import MIN_TIME_LEFT, yearly
 
@@ -110,6 +111,8 @@ class BasketArb(Strategy):
                 sig.closes_at = latest_close(markets)
                 sig.meta["first_close"] = first
                 if not plain:
+                    if too_late(sig.closes_at, ctx.cfg):
+                        continue   # money tied up as long as a locked-in trade may be, at most
                     # A cancelled game settles at a price Kalshi picks: not locked in. So it's
                     # a bet with $0 as its worst case, checked like one (flow guard, bet and
                     # exposure caps), and paper only, to learn how often these come and fill.
