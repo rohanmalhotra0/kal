@@ -813,21 +813,33 @@ FAMILIES = {
 }
 
 
-def settled_listing(c, s, since, max_pages=15):
-    """{event_ticker: (close ts, event)} of settled events of s that closed after `since`."""
-    out, pages, order = {}, 0, []
+def settled_listing(c, s, since, max_pages=15, max_lookups=90):
+    """{event_ticker: (close ts, event)} of settled events of s that closed after `since`.
+    Events listed without a strike_date get their close time from their markets."""
+    out, pages, order, undated = {}, 0, [], []
     try:
         for page in c.event_pages(series_ticker=s, status="settled"):
             pages += 1
             for ev in page:
                 t = iso(ev.get("strike_date"))
                 order.append(t)
-                if t and t >= since:
+                if t is None:
+                    undated.append(ev)
+                elif t >= since:
                     out[ev["event_ticker"]] = (t, ev)
             if pages >= max_pages:
                 break
     except KalshiError as e:
         print(f"   {s}: listing failed {e}")
+    looked = 0
+    for ev in undated[:max_lookups]:
+        ms = event_markets(c, ev["event_ticker"])
+        looked += 1
+        t = max(filter(None, (iso(m.get("close_time")) for m in ms)), default=None)
+        if t and t >= since:
+            out[ev["event_ticker"]] = (t, ev)
+    if undated:
+        print(f"   {s}: {len(undated)} events without a strike_date; looked up {looked}")
     first = [stamp(x) for x in order[:2]]
     return out, pages, first
 
