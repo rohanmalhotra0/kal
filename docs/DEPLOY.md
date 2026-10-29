@@ -274,6 +274,10 @@ sudo systemctl restart kal
 sudo kal report --push        # test it now
 ```
 
+Last, let the check-in read it. Open **github.com/settings/installations**, click
+**Configure** next to **Claude**, add `kal-status` under **Repository access**, and **Save**.
+(Without this, the check-in can't see the report and says the server isn't reporting.)
+
 The report never has keys, tokens, passwords or your alert topic.
 It does show your balance and profit, which is why the repo must be private.
 
