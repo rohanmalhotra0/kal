@@ -63,7 +63,7 @@ def main():
                   f"early={dict(collections.Counter(m.get('can_close_early') for m in ms))} "
                   f"rd={dict(collections.Counter((m.get('custom_strike') or {}).get('round_digits') for m in ms))}")
             for m in ms:
-                mk_keys.update(m)
+                mk_keys.update(list(m))
                 kind, lo, hi = strikes(m)
                 t1 = tmpl(m.get("rules_primary"))
                 r1[(kind, t1)] += 1
