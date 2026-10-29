@@ -65,36 +65,42 @@ _XRP = ("the market resolves based on a simple average of the cf benchmarks inde
         "cryptocurrencies with multiple versions, the exchange will specify which version or ticker is being "
         "tracked. the cf benchmarks real-time index provides continuous pricing data for major cryptocurrencies.")
 _SIXTY_SECONDS = "the simple average of the sixty seconds of cf benchmarks'"
-
-# Range series -> how both of its events read on the real markets (2026-10-29): the ladder
-# series; the index as the rules name it; "$" before the number or not; the tick (Kalshi's
-# round_digits); whether the strikes sit in custom_strike (DOGE, SHIB); the second paragraph.
-COINS = {
-    "KXBTC": dict(above="KXBTCD", index=f"{_SIXTY_SECONDS} bitcoin real-time index (brti)", dollar="",
-                  digits=2, custom=False, second=_SIXTY),
-    "KXETH": dict(above="KXETHD", index=f"{_SIXTY_SECONDS} ethereum real-time index (erti)", dollar="",
-                  digits=2, custom=False, second=_SIXTY),
-    "KXSOLE": dict(above="KXSOLD", index=f"{_SIXTY_SECONDS} solusd_rti", dollar="$",
-                   digits=4, custom=False, second=_SIXTY),
-    "KXXRP": dict(above="KXXRPD", index=f"{_SIXTY_SECONDS} ripple-dollar real time index (xrpusd_rti)", dollar="",
-                  digits=4, custom=False, second=_XRP),
-    "KXDOGE": dict(above="KXDOGED", index="there is a 60 second average of cf benchmarks' dogecoin real-time index "
-                                          "(dogeusd_rti)", dollar="", digits=7, custom=True, second=_NOT_ALL),
-    "KXBNB": dict(above="KXBNBD", index=f"{_SIXTY_SECONDS} bnbusd_rti", dollar="$",
-                  digits=2, custom=False, second=_SIXTY),
-    "KXHYPE": dict(above="KXHYPED", index=f"{_SIXTY_SECONDS} hypeusd_rti", dollar="$",
-                   digits=4, custom=False, second=_SIXTY),
-    "KXSHIBA": dict(above="KXSHIBAD", index="the simple average of the 60 seconds of cf benchmarks' shiba inu-dollar "
-                                            "spot rate (shibusd_rti)", dollar="", digits=9, custom=True, second=_SIXTY),
-}
 _N = r"\d+(?:\.\d+)?"
-for _coin in COINS.values():
-    _d = re.escape(_coin["dollar"])
-    _coin["first"] = re.compile(
-        rf"if {re.escape(_coin['index'])} before (?P<h>1[0-2]|[1-9]) (?P<ap>am|pm) (?P<tz>edt|est) is "
-        rf"(?:between {_d}(?P<a>{_N})-(?P<b>{_N})|above {_d}(?P<above>{_N})|below {_d}(?P<below>{_N})) "
+
+
+def _first(index, dollar):
+    """A coin's first paragraph, as Kalshi words it: only the strike and the time may differ."""
+    d = re.escape(dollar)
+    return re.compile(
+        rf"if {re.escape(index)} before (?P<h>1[0-2]|[1-9]) (?P<ap>am|pm) (?P<tz>edt|est) is "
+        rf"(?:between {d}(?P<a>{_N})-(?P<b>{_N})|above {d}(?P<above>{_N})|below {d}(?P<below>{_N})) "
         rf"at (?P=h) (?P=ap) (?P=tz) on (?P<mon>{'|'.join(MONTHS)}) (?P<day>[1-9]|[12]\d|3[01]), (?P<year>\d{{4}}), "
         r"then the market resolves to yes\.")
+
+
+# Range series -> how both of its events read on the real markets (2026-10-29): the ladder
+# series; the first paragraph (the index as the rules name it, "$" before the number or not);
+# the second, word for word; the tick (Kalshi's round_digits); whether the strikes sit in
+# custom_strike (DOGE, SHIB).
+COINS = {
+    "KXBTC": dict(above="KXBTCD", first=_first(f"{_SIXTY_SECONDS} bitcoin real-time index (brti)", ""),
+                  second=_SIXTY, digits=2, custom=False),
+    "KXETH": dict(above="KXETHD", first=_first(f"{_SIXTY_SECONDS} ethereum real-time index (erti)", ""),
+                  second=_SIXTY, digits=2, custom=False),
+    "KXSOLE": dict(above="KXSOLD", first=_first(f"{_SIXTY_SECONDS} solusd_rti", "$"),
+                   second=_SIXTY, digits=4, custom=False),
+    "KXXRP": dict(above="KXXRPD", first=_first(f"{_SIXTY_SECONDS} ripple-dollar real time index (xrpusd_rti)", ""),
+                  second=_XRP, digits=4, custom=False),
+    "KXDOGE": dict(above="KXDOGED", first=_first("there is a 60 second average of cf benchmarks' dogecoin real-time "
+                                                 "index (dogeusd_rti)", ""), second=_NOT_ALL, digits=7, custom=True),
+    "KXBNB": dict(above="KXBNBD", first=_first(f"{_SIXTY_SECONDS} bnbusd_rti", "$"),
+                  second=_SIXTY, digits=2, custom=False),
+    "KXHYPE": dict(above="KXHYPED", first=_first(f"{_SIXTY_SECONDS} hypeusd_rti", "$"),
+                   second=_SIXTY, digits=4, custom=False),
+    "KXSHIBA": dict(above="KXSHIBAD", first=_first("the simple average of the 60 seconds of cf benchmarks' shiba "
+                                                   "inu-dollar spot rate (shibusd_rti)", ""),
+                    second=_SIXTY, digits=9, custom=True),
+}
 _UTC_OFFSET = {"edt": 4, "est": 5}   # hours behind UTC, as the rules name them
 _TICKER = re.compile(rf"(?P<letter>[BT])(?P<label>{_N})")
 _SUBTITLE = {"between": re.compile(r"\$(?P<a>[\d,]+(?:\.\d+)?) to (?P<b>[\d,]+(?:\.\d+)?)"),
@@ -189,7 +195,7 @@ def _subtitle(m, kind, lo, hi):
     """'$71,700 to 71,799.99' for a bracket (its own numbers), '... or above' / '... or below'
     for the rest (their numbers follow no one grid, so only the words count)."""
     g = _SUBTITLE[kind].fullmatch(_plain(m.get("yes_sub_title")))
-    if not g or (kind == "between" and (Decimal(g["a"].replace(",", "")), Decimal(g["b"].replace(",", ""))) != (lo, hi)):
+    if not g or (kind == "between" and tuple(Decimal(g[k].replace(",", "")) for k in "ab") != (lo, hi)):
         raise _Skip(f"{m.get('ticker')}: subtitle doesn't fit")
 
 
@@ -457,7 +463,8 @@ class RangeLinkArb(Strategy):
                 continue   # too close to the bell to buy every leg
             every = links(pair)
             hot += [(s["pays"] - s["listed"], len(found), i) for i, s in enumerate(every)
-                    if s["listed"] is not None and s["listed"] < s["pays"] and all(tradeable(m, ctx) for m, _ in s["legs"])]
+                    if s["listed"] is not None and s["listed"] < s["pays"]
+                    and all(tradeable(m, ctx) for m, _ in s["legs"])]
             found.append((pair, every))
         # Order books only for the best few sets by listed price, so a scan reads few of them.
         books, quoted = {}, {}
@@ -473,8 +480,8 @@ class RangeLinkArb(Strategy):
             pair, every = found[f]
             rng, lad = pair["range"], pair["above"]
             pin = VERIFIED.get(rng["event"])
-            checked = (isinstance(pin, dict) and pin.get("above") == lad["event"] and pin.get("rules") == rules_key(pair)
-                       and not too_good(every, sets))
+            checked = (isinstance(pin, dict) and pin.get("above") == lad["event"]
+                       and pin.get("rules") == rules_key(pair) and not too_good(every, sets))
             for s, quotes in sets:
                 if not check(pair, s["legs"], s["pays"]):
                     continue   # never offer a set that could pay less than it says
