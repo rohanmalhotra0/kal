@@ -59,6 +59,9 @@ status: **testing** (add the PR link), **built**, or **rejected** (say why in on
 - Each idea's status, looks and rank are kept in the db too (it is backed up). A loser
   retired for losing money stays retired after a rebuild.
 - Daily research runs in its own process. Out of memory, only research is stopped.
+- Two series with the same words can still settle on different numbers: Kalshi settles
+  each series on its own, at its own time (AAA gas, Jul 13 2026, #20). A link across
+  series needs settled pairs that always agree, and even then keeps that risk.
 
 ## Ideas, best first
 
@@ -365,14 +368,38 @@ status: **testing** (add the PR link), **built**, or **rejected** (say why in on
   - Treasury yields: 0 gap hours. FX daily and weekly never close at the same time.
 - Probes: branches `probe/price-links` and `probe/range-link-dry` (never merged).
 
-**20. AAA gas daily vs weekly vs monthly** - untested
-- What: KXAAAGASD, KXAAAGASW and KXAAAGASM ask about the same AAA national average on the same
-  day, word for word ("strictly greater than $4.2600 on Oct 26, 2026 according to AAA").
-  YES on a lower strike in one + NO on a higher strike in another pays $1.
-- From #19's probe: 0 of 16 settled pairs broke. 85 gap hours in 100 days passed the bot's
-  rules, with real volume (daily vs weekly: 17, in 7 events).
-- Test: a person must read every market's rules in full (the probe couldn't parse "strictly
-  greater than"). Then count gaps over more settled weeks. Gold and silver at month end next.
+**20. AAA gas daily vs weekly vs monthly** - tested 2026-10-29: rejected. Kalshi settles each series on its own, and once they settled on different numbers
+- What: KXAAAGASD (daily), KXAAAGASW (Mondays) and KXAAAGASM (month end) ask "strictly
+  greater than $X on <date> according to AAA". When two name the same date, YES on a lower
+  strike in one + NO on a higher-or-equal strike in the other should pay $1.
+- The rules match word for word: one rulebook (AAAGAS), one source (gasprices.aaa.com). All
+  close at 11:59 PM ET the day before and expect to settle at 10 AM ET. A value exactly on a
+  strike settled No all 39 times.
+- But Kalshi settles each series on its own, at its own time. Lately: daily about 7:10 AM ET,
+  weekly 8:40-9:10, monthly about 9:15.
+- It broke once. Jul 13, 2026: the weekly settled at 7:59 AM on 3.876, the day before's
+  figure. The daily settled at 8:18 AM on 3.872. A set with both strikes from 3.872 up to
+  3.876 would have lost both legs; none existed only because the weekly's strikes were 3.86
+  and 3.88. The daily value moves 1.1c on a typical day, up to 9.2c.
+- Also: with no AAA data, each takes "the last available day's data" at its own deadline
+  (7 days for daily and weekly, 30 for monthly).
+- Settled: 42 same-date pairs (Sep 2024 - Oct 2026). 41 matched. 0 sets lost.
+- Gaps, if it were safe (hourly, after fees, passing the bot's rules): 234 hours on 34
+  dates, most with trades on both legs. Best: Mar 30, YES daily 3.98 at 81c + NO monthly
+  3.98 at 4c (+13.6c). But they have nearly closed: Mar-Aug 5-20c, Sep best 3.7c, Oct 1 hour.
+- Not built: no set is locked in, and little is left. Probe: branch `probe/aaa-gas` (never
+  merged).
+
+**21. Gold and silver, daily vs monthly at month end** - untested
+- What: like #19, KXGOLDD and KXGOLDMON (and silver) ask about one price at month end. YES
+  above a lower strike in one + NO above a higher one in the other pays $1, if both settle
+  on the same number.
+- From #19's probe: 0 of 2 settled pairs broke for each; gold had 35 gap hours (best Aug 31,
+  +5.5c, with 788 and 2,317 traded).
+- Test: read both rules in full; collect every settled month-end pair the API has; check
+  they always settled on the same number, and at what times (#20 shows identical words are
+  not enough). In some months only the monthly rules named a futures contract (copper,
+  Brent): any such difference means reject.
 
 ## Sources
 
