@@ -589,14 +589,46 @@ def math_isfinite(x):
     return x not in (INF, -INF)
 
 
+STRIKE_RX = re.compile(r"\b(above|below|between|at least|at most|greater than|less than)\s+\$?\s?-?[\d,]*\.?\d+"
+                       r"(?:\s*(?:-|–|and|to)\s*\$?\s?-?[\d,]*\.?\d+)?", re.I)
+
+
+def canon(text):
+    """Rules text with only the date and the strike taken out: what must match word for word."""
+    t = plain(text)
+    t = DATE_RX.sub("<DATE>", t)
+    t = ISO_RX.sub("<DATE>", t)
+    t = MONYEAR_RX.sub("<MONTH>", t)
+    t = WD_RX.sub("<WD>", t)
+    return STRIKE_RX.sub(lambda g: g.group(1) + " <K>", t)
+
+
 def rules_diff(a, b):
-    """How the two events' rules differ, wording by wording (templates)."""
+    """How the two events' rules differ (dates and strikes taken out)."""
     out = []
-    for field in ("r1", "r2"):
-        ta, tb = set(a[field]), set(b[field])
+    for field in ("rules_primary", "rules_secondary"):
+        ta = {canon(m.get(field)) for m in a["ms"]}
+        tb = {canon(m.get(field)) for m in b["ms"]}
         if ta != tb:
             out.append((field, sorted(ta - tb)[:2], sorted(tb - ta)[:2]))
     return out
+
+
+def sources(e):
+    ss = (e.get("ev") or {}).get("settlement_sources") or []
+    return [f"{x.get('name')} <{x.get('url')}>" for x in ss]
+
+
+def contracts(e):
+    out = collections.Counter()
+    for m in e["ms"]:
+        cs = m.get("custom_strike") if isinstance(m.get("custom_strike"), dict) else {}
+        out[cs.get("front_month_contract")] += 1
+    return dict(out)
+
+
+def decimals_of(e):
+    return sorted({len(v.split(".", 1)[1]) if "." in v else 0 for v in e["vals"]})
 
 
 def history(fams):
@@ -608,13 +640,30 @@ def history(fams):
         for s, evs in fam.items():
             print(f"\n== {s}: {len(evs)} events")
             rows = sorted(evs.values(), key=lambda e: e["strike_date"] or (e["close"] or [0])[-1])
+            # Runs of events that share a source, a contract and a rules wording.
+            runs, last = [], None
             for e in rows:
-                if not s.endswith(("MON", "M")) and len(rows) > 60:
-                    continue   # daily/weekly events are listed only in pairs below
+                key = (tuple(sources(e)), json.dumps(contracts(e)),
+                       tuple(sorted({canon(m.get("rules_primary")) for m in e["ms"]})),
+                       tuple(sorted({canon(m.get("rules_secondary")) for m in e["ms"]})))
+                if key != last:
+                    runs.append([key, e, e, 0])
+                    last = key
+                runs[-1][2] = e
+                runs[-1][3] += 1
+            print(f"   {s}: {len(runs)} runs of events with the same source, contract and rules:")
+            for key, first, lastev, n in runs:
+                print(f"   RUN {first['et']} .. {lastev['et']} ({n} events): sources {list(key[0])}; contracts {key[1]}; "
+                      f"R1 {[k[:200] for k in key[2]]}; R2 {[k[:160] for k in key[3]]}")
+            for e in rows:
+                odd = (decimals_of(e) not in ([2], [0, 2]) or not e["vals"] or len(e["vals"]) > 1 or
+                       set(e["res"]) - {"yes", "no"})
+                if len(rows) > 60 and not odd:
+                    continue
                 print(f"   {e['et']}: sd {et_stamp(e['strike_date'])} | close {[et_stamp(t) for t in e['close']]} | "
-                      f"exp {[et_stamp(t) for t in e['exp']]} | late {[stamp(t) for t in e['late']]} | rules date "
-                      f"{e['rdate']} | values {e['vals']} | settled {[et_stamp(t) for t in e['settled']]} | res "
-                      f"{dict(e['res'])} | status {dict(e['status'])} | n {len(e['ms'])}")
+                      f"late {[stamp(t) for t in e['late']]} | values {e['vals']} | settled "
+                      f"{[et_stamp(t) for t in e['settled']]} | res {dict(e['res'])} | status {dict(e['status'])} | "
+                      f"n {len(e['ms'])}{' | ODD' if odd else ''}")
         pairs = pairs_of(fam)
         print(f"\n===== {name}: event pairs naming the same moment: {len(pairs)}")
         tally = collections.Counter()
@@ -641,6 +690,14 @@ def history(fams):
             if r.get("settled"):
                 print(f"      2-leg sets {r['sets']}, lost {len(r['lost'])} {r['lost'][:4]}; bad results {r['bad'][:4]}; "
                       f"ties {r['ties'][:6]}")
+            sa, sb = sources(a), sources(b)
+            print(f"      sources {'SAME' if sa == sb else 'DIFFER'}: {sa} / {sb}; contracts {contracts(a)} / {contracts(b)}; "
+                  f"value decimals {decimals_of(a)} / {decimals_of(b)}")
+            if sa != sb:
+                tally[(key, "pairs whose event sources differ")] += 1
+            if not diff:
+                print(f"      RULES SAME: R1 {sorted({canon(m.get('rules_primary')) for m in a['ms']})[:1]} | R2 "
+                      f"{sorted({canon(m.get('rules_secondary')) for m in a['ms']})[:1]}")
             for field, xa, xb in diff:
                 print(f"      RULES DIFFER {field}:\n         A {xa}\n         B {xb}")
             sys.stdout.flush()
@@ -648,6 +705,67 @@ def history(fams):
         for k, v in sorted(tally.items()):
             print(f"   {k[0]} | {k[1]}: {v}")
     print(f"\nhistory done in {time.time() - t0:.0f}s")
+
+
+def event_markets(c, et):
+    ms = []
+    try:
+        ms = [dict(m, _src="live") for m in c.markets(event_ticker=et)]
+    except KalshiError:
+        ms = []
+    if not ms:
+        try:
+            ms = [dict(m, _src="historical") for m in
+                  c.paginate("/historical/markets", "markets", {"limit": 1000, "event_ticker": et})]
+        except KalshiError:
+            ms = []
+    return ms
+
+
+def event_meta(c, et):
+    try:
+        return (c.get(f"/events/{et}").get("event") or {})
+    except KalshiError:
+        return {}
+
+
+def hourly(pairs):
+    """For each monthly event, the hourly series' event at the same moment (same ticker suffix)."""
+    c = Kalshi()
+    for hs, mser in pairs:
+        print(f"\n\n######## HOURLY {hs} vs {mser}")
+        mevs = all_events(c, mser)
+        by = collections.defaultdict(list)
+        for m in all_markets(c, mser):
+            by[m.get("event_ticker")].append(m)
+        tally = collections.Counter()
+        for et_m in sorted(by):
+            et_h = f"{hs}-{et_m.split('-', 1)[1]}"
+            ms_h = event_markets(c, et_h)
+            if not ms_h:
+                print(f"   {et_m}: no {et_h}")
+                tally["no hourly event"] += 1
+                continue
+            a = summarize(et_h, ms_h, event_meta(c, et_h))
+            b = summarize(et_m, by[et_m], mevs.get(et_m))
+            key = f"{hs}~{mser}"
+            r = check_pair(a, b, tally, key)
+            diff = rules_diff(a, b)
+            print(f"\n   PAIR {et_h} ~ {et_m}: values {r['va']} vs {r['vb']} {'SAME' if r['same'] else 'DIFFERENT'}; "
+                  f"settled {r['settled']}; markets {len(a['ms'])}/{len(b['ms'])} strike types "
+                  f"{dict(collections.Counter(m.get('strike_type') for m in a['ms']))}")
+            print(f"      close {[et_stamp(t) for t in a['close']]} / {[et_stamp(t) for t in b['close']]}; settled at "
+                  f"{[et_stamp(t) for t in a['settled']]} / {[et_stamp(t) for t in b['settled']]}; sources {sources(a)} / "
+                  f"{sources(b)}")
+            if r.get("settled"):
+                print(f"      2-leg sets {r['sets']}, lost {len(r['lost'])} {r['lost'][:4]}; bad results {r['bad'][:4]}; "
+                      f"ties {r['ties'][:4]}")
+            if not diff:
+                print(f"      RULES SAME: R1 {sorted({canon(m.get('rules_primary')) for m in a['ms']})[:1]}")
+            for field, xa, xb in diff:
+                print(f"      RULES DIFFER {field}:\n         A {xa}\n         B {xb}")
+            sys.stdout.flush()
+        print(f"\n   {hs} summary: {json.dumps({str(k): v for k, v in tally.items()})}")
 
 
 # ======================= gaps =======================
@@ -852,7 +970,15 @@ def gaps(fams, since_days):
                         hours[(key, "passing, both legs traded that hour")].add((a["et"], t))
                     if best_pair is None or bo["edge"] > best_pair["edge"]:
                         best_pair = bo
-            print(f"   {a['et']} ~ {b['et']}: {len(sets)} safe sets; candles {len(ca)}/{len(cb)} markets; "
+            same_rules = not rules_diff(a, b)
+            same_src = sources(a) == sources(b)
+            tally[(key, f"pairs with rules {'same' if same_rules else 'different'}, sources "
+                        f"{'same' if same_src else 'different'}")] += 1
+            if pass_hours:
+                tally[(key, f"passing hours, rules {'same' if same_rules else 'different'}, sources "
+                            f"{'same' if same_src else 'different'}")] += len(pass_hours)
+            print(f"   {a['et']} ~ {b['et']}: rules {'same' if same_rules else 'DIFFERENT'}, sources "
+                  f"{'same' if same_src else 'DIFFERENT'}; {len(sets)} safe sets; candles {len(ca)}/{len(cb)} markets; "
                   f"{et_stamp(opened)}..{et_stamp(end)}; hours with prices {n_hours}; passing hours {len(pass_hours)}; "
                   f"best passing {json.dumps(best_pair) if best_pair else None} ({time.time() - t_pair:.0f}s)")
             sys.stdout.flush()
@@ -1051,6 +1177,8 @@ def main():
                  float(rest[2]) if len(rest) > 2 else 60)
         elif mode == "detail":
             detail(rest[0].split(","))
+        elif mode == "hourly":
+            hourly([tuple(p.split("~")) for p in rest[0].split(",")])
         else:
             print(f"unknown mode {mode}")
         sys.stdout.flush()
