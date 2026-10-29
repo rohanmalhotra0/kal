@@ -9,6 +9,9 @@
 #
 # Code: /opt/kal   Python: /opt/kal-venv   Data: /var/lib/kal   Settings: /etc/kal/kal.env
 set -euo pipefail
+# What it installs is never writable by anyone but root, whatever the caller's umask (a sudo
+# with umask 000 made the Python packages world-writable: any user could change the bot).
+umask 022
 
 APP="${APP:-/opt/kal}"
 VENV="${VENV:-/opt/kal-venv}"
@@ -175,6 +178,8 @@ say "Installing Python packages in $VENV"
 [ -x "$VENV/bin/python" ] || python3 -m venv "$VENV"
 "$VENV/bin/pip" install -q --upgrade pip
 "$VENV/bin/pip" install -q -r "$APP/requirements.txt"
+# The bot runs this code with your key: only root may change it. Also fixes an older install.
+chmod -R go-w "$APP" "$VENV"
 
 if [ ! -f "$ETC/kal.env" ]; then
   say "Writing $ETC/kal.env (your settings)"
@@ -235,8 +240,9 @@ install -m 644 "$APP/deploy/kal-watch.service" /etc/systemd/system/kal-watch.ser
 install -m 644 "$APP/deploy/kal-watch.timer" /etc/systemd/system/kal-watch.timer
 systemctl daemon-reload
 systemctl enable kal >/dev/null 2>&1
-systemctl enable --now kal-watch.timer >/dev/null 2>&1
 systemctl restart kal
+# The watchdog's first look can come at once, so the bot starts first.
+systemctl enable --now kal-watch.timer >/dev/null 2>&1
 
 say "Quick check of Kalshi's API (no key needed)"
 kal selftest || echo "(Some checks failed. Read the lines above.)"

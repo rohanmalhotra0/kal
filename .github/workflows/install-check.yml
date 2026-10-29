@@ -1,0 +1,32 @@
+name: install-check
+
+# Runs the real server install (deploy/install.sh) on a fresh Ubuntu 24.04 machine, the
+# same system as the server, then checks the bot came up the way the README says.
+# No key and no secrets: the bot stays off, and no alert leaves the machine.
+on:
+  pull_request:
+    paths: ["deploy/**", "kal/**", "requirements.txt", "tools/install_check.sh", ".github/workflows/install-check.yml"]
+  push:
+    branches: [main]
+    paths: ["deploy/**", "kal/**", "requirements.txt", "tools/install_check.sh", ".github/workflows/install-check.yml"]
+  schedule:
+    - cron: "41 7 * * 1"   # Mondays: catches Ubuntu or package changes under us
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: install-check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  install:
+    runs-on: ubuntu-24.04   # the server's system (docs/DEPLOY.md)
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false   # the code is copied to /opt/kal: no token with it
+      - name: Install and check
+        run: bash tools/install_check.sh

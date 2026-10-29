@@ -48,23 +48,33 @@ ntfy_server() {
 }
 
 # One alert per kind per day: remember the day we last sent each kind.
-once_a_day() {  # kind -> 0 if we may alert today, 1 if already sent
-  local marker="$DATA/watch_$1" today
-  today=$(date -u +%Y-%m-%d)
-  [ "$(cat "$marker" 2>/dev/null)" = "$today" ] && return 1
-  echo "$today" > "$marker" 2>/dev/null || true
-  return 0
+sent_today() {  # kind
+  [ "$(cat "$DATA/watch_$1" 2>/dev/null)" = "$(date -u +%Y-%m-%d)" ]
 }
 alert() {  # kind title message
-  once_a_day "$1" || { say "already alerted '$1' today"; return 0; }
+  sent_today "$1" && { say "already alerted '$1' today"; return 0; }
   local topic server
   topic=$(ntfy_topic); [ -n "$topic" ] || { say "no alert topic set"; return 0; }
   server=$(ntfy_server)
-  curl -s -m 10 -H "Priority: high" -H "Title: $2" -d "$3" "$server/$topic" >/dev/null || true
-  say "alerted: $3"
+  # Marked as sent only once it really went out: a failed send is tried again next time.
+  if curl -fsS -m 10 -H "Priority: high" -H "Title: $2" -d "$3" "$server/$topic" >/dev/null; then
+    date -u +%Y-%m-%d > "$DATA/watch_$1" 2>/dev/null || true
+    say "alerted: $3"
+  else
+    say "couldn't send the alert, trying again next time: $3"
+  fi
 }
 
-if ! systemctl is-active --quiet kal; then
+# A restart (an update, a re-install, a crash) leaves the bot down for a few seconds, and
+# a fresh start has no heartbeat for a few more. A false alarm would also use up that
+# day's alert. So a problem must still be there on a second look.
+twice() {  # cmd... : true if the command fails now, and again a little later
+  "$@" && return 1
+  sleep "${KAL_WATCH_PAUSE:-30}"
+  ! "$@"
+}
+
+if twice systemctl is-active --quiet kal; then
   alert down "kal is not running" "The bot is stopped. Start it: sudo systemctl start kal"
   exit 0
 fi
@@ -78,7 +88,7 @@ if [ "$nown" -gt "$prev" ] 2>/dev/null; then
   exit 0
 fi
 
-if ! runuser -u "$KAL_USER" -- env KAL_HOME="$DATA" "$VENV/bin/python" -m kal health --alive >/dev/null 2>&1; then
+if twice runuser -u "$KAL_USER" -- env KAL_HOME="$DATA" "$VENV/bin/python" -m kal health --alive >/dev/null 2>&1; then
   alert health "kal looks unhealthy" "The bot is running but not well. Look: sudo kal health"
   exit 0
 fi

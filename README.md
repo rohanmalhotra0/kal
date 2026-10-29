@@ -191,5 +191,7 @@ docs/DEPLOY.md says what each alert means and what to do.
 - Tests: `python -m unittest discover -s tests -t .`
 - CI runs the tests on every push. `market-check` runs `selftest`, `scan` and a
   quick research against the real Kalshi API every day (no keys, no orders).
+- `install-check` runs the real `deploy/install.sh` on a fresh Ubuntu 24.04 machine,
+  then checks the service, the dashboard, the `kal` command, alerts and the watchdog.
 - The old files at the top (`arb.py`, `bot.py`, `backtest.py`, `kalshi.py`) are
   the first prototype. The `kal` package replaces them.
