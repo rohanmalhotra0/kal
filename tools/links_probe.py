@@ -56,18 +56,18 @@ def close_of(m):
 
 
 def seasons(c, s):
-    """{event_ticker: [markets]} for open and settled events of a series."""
-    out = collections.defaultdict(list)
+    """({event: [markets]} open, {event: [markets]} settled) for a series."""
+    live, done = collections.defaultdict(list), collections.defaultdict(list)
     for ev in c.events(series_ticker=s, status="open", with_nested_markets="true"):
-        out[ev["event_ticker"]] += ev.get("markets") or []
+        live[ev["event_ticker"]] += ev.get("markets") or []
     for m in c.settled_markets(s, limit=600):
-        out[m.get("event_ticker")].append(m)
-    return out
+        done[m.get("event_ticker")].append(m)
+    return live, done
 
 
 def match(ea, eb):
-    """Pair each season of A with the season of B it nests in: B settles no later than A
-    (plus a day) and no more than 250 days before it."""
+    """Pair each settled season of A with the settled season of B it nests in: B settles no
+    later than A (plus a day) and no more than 250 days before it."""
     out = []
     for ka, ma in ea.items():
         ca = max(filter(None, (close_of(m) for m in ma)), default=None)
@@ -89,7 +89,7 @@ def main():
     now, t0 = time.time(), time.time()
     cache, rules_shown = {}, set()
     totals = collections.Counter()
-    gaps_now, gap_hours = [], []
+    gaps_now, gap_hours, near, near_now = [], [], [], []
     per_pair = collections.Counter()
     broken = []
     for a, b in PAIRS:
@@ -99,16 +99,17 @@ def main():
                     cache[s] = seasons(c, s)
                 except Exception as e:
                     print(f"{s}: failed: {e}")
-                    cache[s] = {}
-            if s not in rules_shown and cache[s]:
-                rules_shown.add(s)
-                m = next((m for ms in cache[s].values() for m in ms if m.get("rules_primary")), {})
-                print(f"RULES {s}: {(m.get('rules_primary') or '')[:420]!r}")
-        ea, eb = cache[a], cache[b]
-        if not ea or not eb:
-            print(f"pair {a} -> {b}: missing ({len(ea)} / {len(eb)} seasons)")
+                    cache[s] = ({}, {})
+        (la, ea), (lb, eb) = cache[a], cache[b]
+        if not (la or ea) or not (lb or eb):
+            print(f"pair {a} -> {b}: missing")
             continue
-        for ka, kb in match(ea, eb):
+        # Open seasons pair with open seasons (Kalshi gives open futures placeholder close
+        # times, years out), settled ones by when they settled.
+        both = [(ka, kb, la, lb) for ka in la for kb in lb] if len(la) == 1 and len(lb) == 1 else []
+        both += [(ka, kb, ea, eb) for ka, kb in match(ea, eb)]
+        totals["open season pairs"] += len(both) - len(match(ea, eb))
+        for ka, kb, ea, eb in both:
             ma = {m.get("yes_sub_title"): m for m in ea[ka] if m.get("yes_sub_title")}
             mb = {m.get("yes_sub_title"): m for m in eb[kb] if m.get("yes_sub_title")}
             teams = set(ma) & set(mb)
@@ -122,6 +123,8 @@ def main():
                 if x.get("status") in (None, "active", "open") and y.get("status") in (None, "active", "open"):
                     bid_a, ask_b = price(x, "yes_bid"), price(y, "yes_ask")
                     if bid_a and ask_b and 0 < bid_a < 1 and 0 < ask_b < 1:
+                        totals["team pairs priced now"] += 1
+                        near_now.append((round(bid_a - ask_b, 4), a, b, team, bid_a, ask_b))
                         cost = ask_b + (1 - bid_a) + fee(1, ask_b) + fee(1, round(1 - bid_a, 4))
                         if cost < 1:
                             gaps_now.append((round(1 - cost, 4), a, b, team, bid_a, ask_b, x.get("close_time")))
@@ -145,6 +148,13 @@ def main():
                     if not (0 < bid_a < 1 and 0 < ask_b < 1):
                         continue
                     totals["pair-hours"] += 1
+                    if bid_a > ask_b:
+                        totals["hours crossed before fees"] += 1
+                    near.append((round(bid_a - ask_b, 4), a, b, ka, team,
+                                 time.strftime("%Y-%m-%d %H:%M", time.gmtime(t)), bid_a, ask_b))
+                    if len(near) > 5000:
+                        near.sort(reverse=True)
+                        del near[200:]
                     cost = ask_b + (1 - bid_a) + fee(1, ask_b) + fee(1, round(1 - bid_a, 4))
                     if cost >= 1:
                         continue
@@ -158,6 +168,14 @@ def main():
                     gap_hours.append((round(1 - cost, 4), a, b, ka, team, time.strftime("%Y-%m-%d %H:%M", time.gmtime(t)),
                                       bid_a, ask_b, round(days, 1), round(apr, 2), good))
     print(f"\ntotals: {dict(totals)}")
+    near.sort(reverse=True)
+    near_now.sort(reverse=True)
+    print("closest hours (champion's YES bid minus the narrower YES ask, before fees; above 0 = crossed):")
+    for x in near[:10]:
+        print("  NEAR " + json.dumps(dict(zip(("bid_minus_ask", "A", "B", "season", "team", "hour", "A_yes_bid", "B_yes_ask"), x))))
+    print("closest open pairs now:")
+    for x in near_now[:10]:
+        print("  NEARNOW " + json.dumps(dict(zip(("bid_minus_ask", "A", "B", "team", "A_yes_bid", "B_yes_ask"), x))))
     print(f"settled results that break a link (A yes, B no): {len(broken)} {broken[:10]}")
     gaps_now.sort(reverse=True)
     print(f"\ngaps now (open markets, after fees): {len(gaps_now)}")
