@@ -50,6 +50,7 @@ DEFAULTS = {
         "fed_link_arb": {"mode": "paper"},
         "exact_link_arb": {"mode": "paper"},
         "range_link_arb": {"mode": "paper"},
+        "metal_link_arb": {"mode": "paper"},
         "bracket_arb": {"mode": "paper", "verified": False},
         "favorites": {"mode": "paper"},
         "mentions": {"mode": "paper"},
