@@ -476,13 +476,34 @@ def history():
     print(f"history done in {time.time() - t0:.0f}s")
 
 
-def candles_for(c, et, tickers, t0, t1):
+CUTOFF = ts("2026-08-30T00:00:00Z")   # Kalshi's historical cutoff (markets settled before it moved)
+
+
+def hist_candles(c, tk, t0, t1):
+    try:
+        d = c.get(f"/historical/markets/{tk}/candlesticks",
+                  {"start_ts": int(t0), "end_ts": int(t1), "period_interval": 60})
+    except KalshiError:
+        return []
+    return d.get("candlesticks") or []
+
+
+def candles_for(c, et, tickers, t0, t1, settled_ts=None):
     """{ticker: [(end_ts, bid, ask, volume)] sorted}. The event endpoint first, then each market
-    (live store, then historical)."""
+    (live store, then historical). Markets settled before the cutoff go straight to historical."""
     out = collections.defaultdict(dict)
     series = series_of(et)
+    t_in = time.time()
+    if settled_ts and settled_ts < CUTOFF:
+        for tk in tickers:
+            if time.time() - t_in > 90:
+                print(f"      (candle time cap in {et})")
+                break
+            for r in hist_candles(c, tk, t0, t1):
+                out[tk][r["end_period_ts"]] = r
+        tickers = []
     start, calls = int(t0), 0
-    while calls < 20:
+    while tickers and calls < 20:
         calls += 1
         try:
             d = c.get(f"/series/{series}/events/{et}/candlesticks",
@@ -499,6 +520,9 @@ def candles_for(c, et, tickers, t0, t1):
     for tk in tickers:
         if out.get(tk):
             continue
+        if time.time() - t_in > 90:
+            print(f"      (candle time cap in {et})")
+            break
         try:
             rows = c.candles(series_of(tk), tk, t0, t1, 60)
         except KalshiError:
@@ -621,8 +645,11 @@ def gaps(since_days, families):
                 if not opened or end <= opened:
                     tally[(key, "pairs never open together")] += 1
                     continue
-                ca = candles_for(c, ra[0]["et"], [r["tk"] for r in ra], opened, end)
-                cb = candles_for(c, rb[0]["et"], [r["tk"] for r in rb], opened, end)
+                t_pair = time.time()
+                sa_ = max(filter(None, (r["settled"] for r in ra)), default=None)
+                sb_ = max(filter(None, (r["settled"] for r in rb)), default=None)
+                ca = candles_for(c, ra[0]["et"], [r["tk"] for r in ra], opened, end, sa_)
+                cb = candles_for(c, rb[0]["et"], [r["tk"] for r in rb], opened, end, sb_)
                 if not ca or not cb:
                     tally[(key, "pairs without candles")] += 1
                     continue
@@ -675,6 +702,11 @@ def gaps(since_days, families):
                     runs.append(run)
                 for r_ in runs:
                     tally[(key, f"gap runs lasting {r_}h")] += 1
+                ph = sorted(t for (dd, t) in hours[(key, "passing")] if dd == d)
+                bp = max((r for r in passing[key] if r["date"] == d), key=lambda r: r["edge"], default=None)
+                print(f"   {d} {key}: candles {len(ca)}/{len(cb)} markets, {stamp(opened)}..{stamp(end)}; passing hours "
+                      f"{len(ph)} runs {runs}; best passing {json.dumps(bp) if bp else None} ({time.time() - t_pair:.0f}s)")
+                sys.stdout.flush()
     print("\n===== GAP SUMMARY")
     for k, v in sorted(tally.items()):
         print(f"   {k[0]} | {k[1]}: {v}")
@@ -696,10 +728,13 @@ def gaps(since_days, families):
     # Did trades really go through at gap prices? Check the top passing hours with volume.
     print("\n===== TRADES in the hour before the best passing snapshots")
     tops = sorted((r for rows in passing.values() for r in rows), key=lambda r: -r["edge"])
-    checked = 0
+    checked, seen_dates = 0, set()
     for r in tops:
-        if checked >= 12:
+        if checked >= 14:
             break
+        if (r["pair"], r["date"]) in seen_dates:
+            continue
+        seen_dates.add((r["pair"], r["date"]))
         checked += 1
         t1 = ts(r["t"].replace(" ", "T") + ":00Z")
         legs_out = []
