@@ -456,10 +456,19 @@ def check_results(name, rms, ams, ivs, tick, n, broken):
         n[(name, "event pairs with a result not yes/no")] += 1
         return
     n[(name, "settled event pairs checked")] += 1
-    vals = {str(m.get("expiration_value")) for m in rms + ams if m.get("expiration_value") not in (None, "")}
-    if len(vals) > 1:
-        n[(name, "pairs whose expiration values differ")] += 1
-        broken.append((name, "values differ", sorted(vals)[:4], rms[0].get("event_ticker")))
+    def fv(m):
+        try:
+            return round(float(str(m.get("expiration_value")).replace(",", "").replace("$", "")), 6)
+        except (TypeError, ValueError):
+            return None
+    va = {fv(m) for m in rms} - {None}
+    vb = {fv(m) for m in ams} - {None}
+    if va and vb and va != vb:
+        n[(name, "pairs whose two series settled on different values")] += 1
+        broken.append((name, "values differ", sorted(va)[:2], sorted(vb)[:2], rms[0].get("event_ticker")))
+    elif len(va | vb) > 1:
+        n[(name, "pairs with more than one value inside a series")] += 1
+        broken.append((name, "values differ inside a series", sorted(va | vb)[:4], rms[0].get("event_ticker")))
     for m in rms + ams:
         try:
             v = float(str(m.get("expiration_value")).replace(",", "").replace("$", ""))
@@ -500,6 +509,17 @@ def check_results(name, rms, ams, ivs, tick, n, broken):
                 if bad:
                     n[(name, f"{mode}: links broken")] += 1
                     broken.append((name, mode, bad, mx["ticker"], my["ticker"], mx.get("expiration_value")))
+
+
+def show_broken(broken):
+    groups = collections.defaultdict(list)
+    for b in broken:
+        groups[(b[0], b[1] if b[1] not in ("robust", "grid") else f"{b[1]}: {b[2]}")].append(b)
+    print(f"\n===== BROKEN LINKS / BAD RESULTS: {len(broken)} in {len(groups)} kinds")
+    for (name, kind), rows in sorted(groups.items()):
+        print(f"   {name} | {kind}: {len(rows)}")
+        for b in rows[:6]:
+            print("      BROKEN " + json.dumps(b))
 
 
 def candidate_events(now, since_days, hourly_per_day):
@@ -614,9 +634,7 @@ def history(pairs, budget_s, since_days):
         print(f"   {name}: {time.time() - t_pair:.0f}s; " + "; ".join(f"{k[1]}: {v}" for k, v in sorted(n.items()) if k[0] == name))
         tally.show([f"{name} 5pm events (hourly samples)", f"{name} hourly events (5-min samples)"])
         sys.stdout.flush()
-    print(f"\n===== BROKEN LINKS / BAD RESULTS: {len(broken)}")
-    for b in broken[:40]:
-        print("   BROKEN " + json.dumps(b))
+    show_broken(broken)
     print(f"\nhistory done in {time.time() - t_start:.0f}s")
 
 
@@ -922,6 +940,10 @@ def families(names, budget_s, since_days):
                 L = Linker([(m["ticker"], ivs[m["ticker"]]) for m in ma], [(m["ticker"], ivs[m["ticker"]]) for m in mb], tick)
                 if key + "rel" not in shown:
                     shown.add(key + "rel")
+                    print(f"   RULES {ea}: {plain(ma[len(ma) // 2].get('rules_primary'))[:300]}\n"
+                          f"   RULES {eb}: {plain(mb[len(mb) // 2].get('rules_primary'))[:300]}\n"
+                          f"   R2 {ea}: {plain(ma[0].get('rules_secondary'))[:300]}\n"
+                          f"   R2 {eb}: {plain(mb[0].get('rules_secondary'))[:300]}")
                     print(f"   relations {ea}~{eb} (tick {tick:g}): "
                           f"{json.dumps({f'{a}/{b}': v for (a, b), v in L.n_relations().items()})}; other {len(L.other)}")
                 times = list(range((int(start) // H + 1) * H, int(t_close), H))
@@ -932,9 +954,7 @@ def families(names, budget_s, since_days):
         print(f"   {fam}: {time.time() - t_fam:.0f}s; " + "; ".join(f"{k[0]} | {k[1]}: {v}" for k, v in sorted(n.items()) if k[0].startswith(fam)))
         tally.show(keys)
         sys.stdout.flush()
-    print(f"\n===== BROKEN LINKS / BAD RESULTS: {len(broken)}")
-    for b in broken[:40]:
-        print("   BROKEN " + json.dumps(b))
+    show_broken(broken)
     print(f"families done in {time.time() - t0:.0f}s")
 
 
