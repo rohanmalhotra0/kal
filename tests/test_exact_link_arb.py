@@ -56,6 +56,22 @@ LADDER = {
         "KXU3", "If the seasonally adjusted unemployment rate (U-3) reported by the Bureau of Labor Statistics in the "
                 "Employment Situation Report is above {x}% in {month} {year}, then the market resolves to Yes.", ""),
 }
+# The newer form (December's data on): what the rules call the number, and the definition.
+NEW = {"KXECONSTATCPI": ("the CPI month-over-month", ""),
+       "KXECONSTATCPICORE": ("the CPI core month-over-month",
+                             "\u201cCPI core\u201d means the seasonally adjusted one-month percent change in the "
+                             "CPI-U for all items less food and energy, as first reported by the Bureau of Labor "
+                             "Statistics and rounded to one decimal place. Subsequent revisions will not affect "
+                             "settlement."),
+       "KXECONSTATCPIYOY": ("the CPI year-over-year", ""),
+       "KXECONSTATCORECPIYOY": ("CPI core year-over-year",
+                                "\u201cCore CPI\u201d means the 12-month percent change in the CPI-U for all items "
+                                "less food and energy, as first reported by the Bureau of Labor Statistics and "
+                                "rounded to one decimal place. Subsequent revisions will not affect settlement.")}
+KXCPI_DEC = ("If the Consumer Price Index (CPI) increases by more than {x}% in {month} {year}, as reported to one "
+             "decimal place, then the market resolves to Yes.",
+             "Please note: the Expiration Value is the single-decimal value published at the Source Agency. "
+             + SHUTDOWN + ".")
 # How likely each value is: the fair prices both series quote, 1c each side.
 ODDS = {-1: .02, 0: .05, 1: .15, 2: .35, 3: .30, 4: .10, 5: .03}    # tenths -> chance
 STRIKES = range(-2, 11)                                              # the ladder: above -0.2% .. above 1.0%
@@ -104,8 +120,30 @@ def exact_event(series="KXECONSTATCPI", days=20, prices=None, values=tuple(ODDS)
             "mutually_exclusive": True, "markets": markets}
 
 
-def ladder_event(series="KXECONSTATCPI", days=20, prices=None, close_offset=-240):
+def new_exact_event(series="KXECONSTATCPI", days=20, prices=None, values=tuple(ODDS)):
+    """The newer form: the release day in the event ticker, "between" strikes, E0.2."""
+    day, close = release(days)
+    year, month = data_month(day)
+    et = f"{series}-{day.year % 100:02d}{SHORT[day.month - 1].upper()}{day.day:02d}"
+    name, means = NEW[series]
+    markets = []
+    for t in values:
+        bid, ask = (prices or {}).get(t) or quoted(ODDS.get(t, .01))
+        x = x_text(t)
+        markets.append({"ticker": f"{et}-E{x}", "event_ticker": et, "status": "active", "market_type": "binary",
+                        "strike_type": "between", "floor_strike": t / 10, "cap_strike": t / 10,
+                        "yes_sub_title": f"Exactly {x}%",
+                        "rules_primary": f"If {name} for {SHORT[month - 1]} {year} is exactly {x}%, then the market "
+                                         "resolves to Yes.",
+                        "rules_secondary": means, "can_close_early": True, "close_time": iso(close),
+                        "yes_bid_dollars": f"{bid:.4f}", "yes_ask_dollars": f"{ask:.4f}"})
+    return {"event_ticker": et, "series_ticker": series, "title": f"{name} (exact value)", "mutually_exclusive": True,
+            "markets": markets}
+
+
+def ladder_event(series="KXECONSTATCPI", days=20, prices=None, close_offset=-240, wording=None):
     ladder, first, second = LADDER[series]
+    first, second = wording or (first, second)
     day, close = release(days)
     year, month = data_month(day)
     et = f"{ladder}-{year % 100:02d}{SHORT[month - 1].upper()}"
@@ -135,7 +173,8 @@ def fake_for(events, size=40):
     for ev in events:
         for m in ev["markets"]:
             bid, ask = price(m, "yes_bid"), price(m, "yes_ask")
-            c.books[m["ticker"]] = {"yes": [(bid, size)] if bid else [], "no": [(round(1 - ask, 4), size)] if ask else []}
+            c.books[m["ticker"]] = {"yes": [(bid, size)] if bid else [],
+                                    "no": [(round(1 - ask, 4), size)] if ask else []}
     return c
 
 
@@ -145,7 +184,7 @@ def ctx(client, budget=100.0, held=()):
 
 def pays(ticker, side, v):
     """What one contract pays if the number comes out v (tenths): read from the ticker alone."""
-    x = round(float(ticker.rsplit("-T", 1)[1]) * 10)
+    x = round(float(re.search(r"-[TE](-?\d+\.\d)$", ticker)[1]) * 10)
     yes = v == x if ticker.startswith("KXECONSTAT") else v > x
     return 1.0 if yes == (side == "yes") else 0.0
 
@@ -179,6 +218,58 @@ class LinkTests(unittest.TestCase):
         self.assertEqual(got, [("-0.2no", "-0.2no"),                                       # NO above + NO exactly
                                ("0.0yes", "0.0yes", "-0.1no"), ("-0.1yes", "0.0no"), ("0.0no", "0.0no"),
                                ("1.0yes", "1.1no")])                                      # YES above 1.0 + NO 1.1
+
+
+class NewFormTests(unittest.TestCase):
+    """December's data on: the newer "exactly" form, and KXCPI's newer wording."""
+
+    def ladder(self, series):
+        return ladder_event(series, wording=KXCPI_DEC if series == "KXECONSTATCPI" else None)
+
+    def test_every_series_with_a_new_form_is_found(self):
+        events = [ev for s in NEW for ev in (new_exact_event(s), self.ladder(s))]
+        found = exact_link_arb.pairs(events)
+        self.assertEqual(sorted(p["series"] for p in found), sorted(NEW))
+        for p in found:
+            self.assertEqual(sorted(p["exact"]["values"]), sorted(ODDS))
+            for legs in exact_link_arb.links(p):
+                for v in range(-5, 16):
+                    self.assertGreaterEqual(sum(pays(m["ticker"], side, v) for m, side in legs), 1.0)
+
+    def test_the_old_ladder_wording_still_pairs_with_a_new_exact_event(self):
+        self.assertEqual(len(exact_link_arb.pairs([new_exact_event(), ladder_event()])), 1)
+
+    def assert_no_pair(self, change, series="KXECONSTATCPICORE"):
+        ex, lad = new_exact_event(series), self.ladder(series)
+        change(ex, lad)
+        self.assertEqual(exact_link_arb.pairs([ex, lad]), [])
+
+    def test_fails_closed(self):
+        self.assert_no_pair(lambda ex, lad: ex["markets"][2].update(cap_strike=0.3))             # 0.1 to 0.3
+        self.assert_no_pair(lambda ex, lad: ex["markets"][2].update(strike_type="custom"))
+        self.assert_no_pair(lambda ex, lad: ex["markets"][2].update(
+            ticker=ex["markets"][2]["ticker"].replace("-E", "-T")))
+        self.assert_no_pair(lambda ex, lad: ex["markets"][2].update(rules_secondary=""))         # its definition
+        self.assert_no_pair(lambda ex, lad: ex["markets"][2].update(
+            rules_secondary=ex["markets"][2]["rules_secondary"].replace("first reported", "last revised")))
+        def other_day(ex, lad):   # named for a day it doesn't close on, every ticker in step
+            et = ex["event_ticker"][:-2] + ("02" if ex["event_ticker"].endswith("01") else "01")
+            for m in ex["markets"]:
+                m.update(event_ticker=et, ticker=et + m["ticker"][len(ex["event_ticker"]):])
+            ex["event_ticker"] = et
+        self.assert_no_pair(other_day)
+        mixed = exact_event("KXECONSTATCPICORE")["markets"][0]
+        self.assert_no_pair(lambda ex, lad: ex["markets"].__setitem__(0, dict(mixed, event_ticker=ex["event_ticker"],
+                                                                           ticker=ex["event_ticker"] + "-T-0.1")))
+
+    def test_the_jobless_rate_has_no_new_form_yet(self):
+        ex = new_exact_event("KXECONSTATCPI")
+        ex["event_ticker"] = ex["event_ticker"].replace("KXECONSTATCPI", "KXECONSTATU3")
+        for m in ex["markets"]:
+            m.update(event_ticker=ex["event_ticker"], ticker=m["ticker"].replace("KXECONSTATCPI", "KXECONSTATU3"),
+                     rules_primary=m["rules_primary"].replace("the CPI month-over-month", "the Unemployment rate"))
+        ex["series_ticker"] = "KXECONSTATU3"
+        self.assertEqual(exact_link_arb.pairs([ex, ladder_event("KXECONSTATU3")]), [])
 
 
 class FailsClosedTests(unittest.TestCase):
@@ -224,9 +315,11 @@ class FailsClosedTests(unittest.TestCase):
         def next_month(ex, lad):   # the "exactly" event is about the month after the ladder's
             for m in ex["markets"]:
                 mon = m["rules_primary"].rsplit(" in ", 1)[1][:3]
-                m["rules_primary"] = m["rules_primary"].replace(f" in {mon} ", f" in {SHORT[(SHORT.index(mon) + 1) % 12]} ")
+                after = SHORT[(SHORT.index(mon) + 1) % 12]
+                m["rules_primary"] = m["rules_primary"].replace(f" in {mon} ", f" in {after} ")
         self.assert_no_pair(next_month)
-        self.assert_no_pair(lambda ex, lad: [m.update(close_time=iso(time.time() + 21 * 86400)) for m in lad["markets"]])
+        self.assert_no_pair(lambda ex, lad: [m.update(close_time=iso(time.time() + 21 * 86400))
+                                             for m in lad["markets"]])
         self.assert_no_pair(lambda ex, lad: lad["markets"][0].update(close_time=iso(time.time() + 86400)))
         self.assert_no_pair(lambda ex, lad: ex.update(mutually_exclusive=False))
         self.assert_no_pair(lambda ex, lad: lad.update(mutually_exclusive=True))

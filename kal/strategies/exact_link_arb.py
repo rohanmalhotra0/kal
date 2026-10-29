@@ -50,38 +50,58 @@ _SHUTDOWN = (r"in the case of a delay in data caused by a federal government shu
              r"release of the underlying or six months after the end of the government shutdown")
 SAME_RELEASE = 900   # seconds: both events close this close together (4 minutes apart, real)
 
-# "Exactly" series -> (its ladder, what the "exactly" rules call the number, the ladder's
-# rules_primary and rules_secondary). The wording on the real markets (2026-10-29): only the
-# number, the month and the release date may differ.
+# The wording on the real markets (2026-10-29): only the number, the month and the release
+# date may differ. Kalshi lists two forms. Events listed before mid-September 2026 say "is
+# exactly 0.2% in Oct 2026", carry the data month in the event ticker (KXECONSTATCPI-26OCT)
+# and are "custom" strikes (T0.2). Newer ones, from December's data on, say "for Dec 2026 is
+# exactly 0.2%", carry the release day (KXECONSTATCPI-27JAN13), are "between" strikes (E0.2),
+# and core CPI's add a definition. KXCPI's December ladder is worded anew too.
+_KXCPI_OCT = (rf"if the consumer price index \(cpi\) increases by more than {_X}% \(single-decimal\) in {_MONTH} "
+              rf"(?P<year>\d{{4}}), then the market resolves to yes\.",
+              rf"the market will always close at 8:29 am et on the scheduled day of the data release "
+              rf"\((?P<release>[a-z]+ \d{{1,2}}, \d{{4}})\)\. please note: the expiration value is the "
+              rf"single-decimal value published at the source agency\. {_SHUTDOWN}\.")
+_KXCPI_DEC = (rf"if the consumer price index \(cpi\) increases by more than {_X}% in {_MONTH} (?P<year>\d{{4}}), as "
+              rf"reported to one decimal place, then the market resolves to yes\.",
+              rf"please note: the expiration value is the single-decimal value published at the source agency\. "
+              rf"{_SHUTDOWN}\.")
+_MEANS = (r'"{0}" means the {1} percent change in the cpi-u for all items less food and energy, as first reported '
+          r"by the bureau of labor statistics and rounded to one decimal place\. subsequent revisions will not "
+          r"affect settlement\.")
+# "Exactly" series -> its ladder; what its rules call the number in the old and the new form
+# (None: no new form seen yet); the new form's rules_secondary; the ladder's (rules_primary,
+# rules_secondary) forms.
 SERIES = {
-    "KXECONSTATCPI": ("KXCPI", "cpi month-over-month",
-                      rf"if the consumer price index \(cpi\) increases by more than {_X}% \(single-decimal\) in "
-                      rf"{_MONTH} (?P<year>\d{{4}}), then the market resolves to yes\.",
-                      rf"the market will always close at 8:29 am et on the scheduled day of the data release "
-                      rf"\((?P<release>[a-z]+ \d{{1,2}}, \d{{4}})\)\. please note: the expiration value is the "
-                      rf"single-decimal value published at the source agency\. {_SHUTDOWN}\."),
-    "KXECONSTATCPICORE": ("KXCPICORE", "cpi core month-over-month",
-                          rf"if the seasonally adjusted consumer price index for all urban consumers: all items less "
-                          rf"food and energy for {_MONTH} (?P<year>\d{{4}}), as published by the bureau of labor "
-                          rf"statistics, increases by above {_X}%, then the market resolves to yes\.",
-                          rf"please note that the value of the underlying is the single-decimal value reported by "
-                          rf"the bls\. {_SHUTDOWN}\."),
-    "KXECONSTATCPIYOY": ("KXCPIYOY", "cpi year-over-year",
-                         rf"if the consumer price index \(cpi\) increases by more than {_X}% in the twelve months "
-                         rf"ending {_MONTH} (?P<year>\d{{4}}) \(as represented by the one-decimal place value reported "
-                         rf"by the bureau of labor statistics\), then the market resolves to yes\.",
-                         rf"{_SHUTDOWN}\.?"),
-    "KXECONSTATCORECPIYOY": ("KXCPICOREYOY", "cpi core year-over-year",
-                             rf"if the consumer price index \(cpi\) for all urban consumers: all items less food and "
-                             rf"energy increases by more than {_X}% in the twelve months ending {_MONTH} "
-                             rf"(?P<year>\d{{4}}) \(as represented by the one-decimal place value reported by the "
-                             rf"bureau of labor statistics\), then the market resolves to yes\.",
-                             rf"{_SHUTDOWN}\.?"),
-    "KXECONSTATU3": ("KXU3", "unemployment rate",
-                     rf"if the seasonally adjusted unemployment rate \(u-3\) reported by the bureau of labor "
-                     rf"statistics in the employment situation report is above {_X}% in {_MONTH} "
-                     rf"(?P<year>\d{{4}}), then the market resolves to yes\.",
-                     r""),
+    "KXECONSTATCPI": {
+        "ladder": "KXCPI", "old": "the cpi month-over-month", "new": "the cpi month-over-month", "means": "",
+        "forms": [_KXCPI_OCT, _KXCPI_DEC]},
+    "KXECONSTATCPICORE": {
+        "ladder": "KXCPICORE", "old": "the cpi core month-over-month", "new": "the cpi core month-over-month",
+        "means": _MEANS.format("cpi core", "seasonally adjusted one-month"),
+        "forms": [(rf"if the seasonally adjusted consumer price index for all urban consumers: all items less food "
+                   rf"and energy for {_MONTH} (?P<year>\d{{4}}), as published by the bureau of labor statistics, "
+                   rf"increases by above {_X}%, then the market resolves to yes\.",
+                   rf"please note that the value of the underlying is the single-decimal value reported by the "
+                   rf"bls\. {_SHUTDOWN}\.")]},
+    "KXECONSTATCPIYOY": {
+        "ladder": "KXCPIYOY", "old": "the cpi year-over-year", "new": "the cpi year-over-year", "means": "",
+        "forms": [(rf"if the consumer price index \(cpi\) increases by more than {_X}% in the twelve months ending "
+                   rf"{_MONTH} (?P<year>\d{{4}}) \(as represented by the one-decimal place value reported by the "
+                   rf"bureau of labor statistics\), then the market resolves to yes\.",
+                   rf"{_SHUTDOWN}\.?")]},
+    "KXECONSTATCORECPIYOY": {
+        "ladder": "KXCPICOREYOY", "old": "the cpi core year-over-year", "new": "cpi core year-over-year",
+        "means": _MEANS.format("core cpi", "12-month"),
+        "forms": [(rf"if the consumer price index \(cpi\) for all urban consumers: all items less food and energy "
+                   rf"increases by more than {_X}% in the twelve months ending {_MONTH} (?P<year>\d{{4}}) \(as "
+                   rf"represented by the one-decimal place value reported by the bureau of labor statistics\), then "
+                   rf"the market resolves to yes\.",
+                   rf"{_SHUTDOWN}\.")]},
+    "KXECONSTATU3": {
+        "ladder": "KXU3", "old": "the unemployment rate", "new": None, "means": "",
+        "forms": [(rf"if the seasonally adjusted unemployment rate \(u-3\) reported by the bureau of labor "
+                   rf"statistics in the employment situation report is above {_X}% in {_MONTH} "
+                   rf"(?P<year>\d{{4}}), then the market resolves to yes\.", r"")]},
 }
 
 # Real money only for these: "exactly" event ticker -> {"above": its ladder's event ticker,
@@ -123,32 +143,59 @@ def _markets(ev, exclusive):
     return markets
 
 
+def _suffix(day, with_day=False):
+    """The ticker part Kalshi gives a month or a day: Oct 2026 -> "26OCT", Jan 13, 2027 -> "27JAN13"."""
+    return f"{day.year % 100:02d}{MONTHS[day.month - 1].upper()}" + (f"{day.day:02d}" if with_day else "")
+
+
+def _exact_market(m, et, info):
+    """(form, value text, year, month) of one "exactly" market, or None if its wording, strike
+    or ticker is off. The old form: "is exactly 0.2% in Oct 2026", a custom strike, T0.2. The
+    new: "for Dec 2026 is exactly 0.2%", a between strike from 0.2 to 0.2, E0.2."""
+    rules, second = _plain(m.get("rules_primary")), _plain(m.get("rules_secondary"))
+    g = re.fullmatch(rf"if {re.escape(info['old'])} is exactly {_X}% in {_MON} (?P<year>\d{{4}}), then the market "
+                     r"resolves to yes\.", rules)
+    if g and not second and m.get("strike_type") == "custom" and m.get("custom_strike") == {"Value": g["x"]} \
+            and m.get("ticker") == f"{et}-T{g['x']}":
+        return "old", g["x"], int(g["year"]), MONTHS.index(g["mon"]) + 1
+    g = info["new"] and re.fullmatch(rf"if {re.escape(info['new'])} for {_MON} (?P<year>\d{{4}}) is exactly {_X}%, "
+                                     r"then the market resolves to yes\.", rules)
+    if not g or not re.fullmatch(info["means"], second) or m.get("strike_type") != "between":
+        return None
+    lo, hi = strike(m, "floor_strike"), strike(m, "cap_strike")
+    if lo is None or hi is None or abs(lo * 10 - _tenths(g["x"])) > 1e-9 or abs(hi * 10 - _tenths(g["x"])) > 1e-9:
+        return None   # from the value to the value: exactly it
+    if m.get("custom_strike") not in (None, {}) or m.get("ticker") != f"{et}-E{g['x']}":
+        return None
+    return "new", g["x"], int(g["year"]), MONTHS.index(g["mon"]) + 1
+
+
 def exact_event(ev, series):
     """What the links need from one "exactly" event: {value in tenths: market}, its month
-    and close. None if anything about it is off."""
+    and close. None if anything about it is off, or its markets mix the two forms."""
     et = str(ev.get("event_ticker") or "")
     markets = _markets(ev, True)
     if not markets or not et.startswith(series + "-") or ev.get("series_ticker") not in (None, series):
         return None
-    rules = re.compile(rf"if the {re.escape(SERIES[series][1])} is exactly {_X}% in {_MON} (?P<year>\d{{4}}), "
-                       r"then the market resolves to yes\.")
-    values, months = {}, set()
+    values, seen = {}, set()
     for m in markets:
-        g = rules.fullmatch(_plain(m.get("rules_primary")))
-        if not g or _plain(m.get("rules_secondary")) or m.get("event_ticker") not in (None, et):
+        got = _exact_market(m, et, SERIES[series])
+        if not got or m.get("event_ticker") not in (None, et) or _plain(m.get("yes_sub_title")) != f"exactly {got[1]}%":
             return None
-        x = g["x"]
-        if (m.get("strike_type") != "custom" or m.get("custom_strike") != {"Value": x}
-                or m.get("ticker") != f"{et}-T{x}" or _plain(m.get("yes_sub_title")) != f"exactly {x}%"):
-            return None
+        form, x, year, month = got
         if _tenths(x) in values:
             return None
         values[_tenths(x)] = m
-        months.add((int(g["year"]), MONTHS.index(g["mon"]) + 1))
+        seen.add((form, year, month))
     close = _one_close(markets)
-    if len(months) != 1 or close is None:
+    if len(seen) != 1 or close is None:
         return None
-    return {"event": et, "title": ev.get("title") or et, "values": values, "month": months.pop(), "close": close}
+    form, year, month = seen.pop()
+    # The old form's ticker names the data month; the new form's, the release day (its close).
+    want = _suffix(datetime.date(year, month, 1)) if form == "old" else _suffix(_utc_day(close), True)
+    if et != f"{series}-{want}":
+        return None
+    return {"event": et, "title": ev.get("title") or et, "values": values, "month": (year, month), "close": close}
 
 
 def above_event(ev, series):
@@ -158,12 +205,13 @@ def above_event(ev, series):
     markets = _markets(ev, False)
     if not markets or not et.startswith(series + "-") or ev.get("series_ticker") not in (None, series):
         return None
-    exact = next(s for s, v in SERIES.items() if v[0] == series)
-    first, second = (re.compile(p) for p in SERIES[exact][2:])
+    forms = [tuple(map(re.compile, f)) for f in next(v["forms"] for v in SERIES.values() if v["ladder"] == series)]
     strikes, months, releases = {}, set(), set()
     for m in markets:
-        g, g2 = first.fullmatch(_plain(m.get("rules_primary"))), second.fullmatch(_plain(m.get("rules_secondary")))
-        if not g or not g2 or m.get("event_ticker") not in (None, et):
+        rules, second = _plain(m.get("rules_primary")), _plain(m.get("rules_secondary"))
+        g, g2 = next(((a.fullmatch(rules), b.fullmatch(second)) for a, b in forms
+                      if a.fullmatch(rules) and b.fullmatch(second)), (None, None))
+        if not g or m.get("event_ticker") not in (None, et):
             return None
         x, k = g["x"], strike(m, "floor_strike")
         if m.get("strike_type") != "greater" or k is None or abs(k * 10 - _tenths(x)) > 1e-9:
@@ -182,7 +230,10 @@ def above_event(ev, series):
         return None
     if releases and _release_day(releases.pop()) != _utc_day(close):
         return None   # it closes on its release day
-    return {"event": et, "strikes": strikes, "month": months.pop(), "close": close}
+    year, month = months.pop()
+    if et != f"{series}-{_suffix(datetime.date(year, month, 1))}":
+        return None
+    return {"event": et, "strikes": strikes, "month": (year, month), "close": close}
 
 
 def _release_day(text):
@@ -208,8 +259,9 @@ def pairs(events):
         ex = exact_event(evs[0], series)
         if not ex:
             continue
-        ladder = by_ticker.get(f"{SERIES[series][0]}-{et.split('-', 1)[1]}") or []
-        ab = above_event(ladder[0], SERIES[series][0]) if len(ladder) == 1 else None
+        name = SERIES[series]["ladder"]
+        ladder = by_ticker.get(f"{name}-{_suffix(datetime.date(*ex['month'], 1))}") or []
+        ab = above_event(ladder[0], name) if len(ladder) == 1 else None
         if not ab or ab["month"] != ex["month"]:
             continue
         if abs(ab["close"] - ex["close"]) > SAME_RELEASE or _utc_day(ab["close"]) != _utc_day(ex["close"]):
