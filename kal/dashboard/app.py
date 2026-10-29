@@ -150,8 +150,9 @@ def _module(name):
 
 
 def _market_client():
-    """A client with no key. Market history is public, and with no key it can't trade."""
-    return Kalshi(env=config.load()["env"])
+    """A client with no key. Market history is public, and with no key it can't trade. It is
+    for the exchange this thread is pinned to (a running backtest's), else the one in use."""
+    return Kalshi(env=db.current_env())
 
 
 # ---------- the Home tab ----------
@@ -180,7 +181,12 @@ def account(cfg, now):
     midnight = _utc_midnight(now)
     if (start and latest and start.get("day") == datetime.fromtimestamp(now, timezone.utc).date().isoformat()
             and latest["ts"] >= midnight):
-        today["pnl"] = latest["equity"] - float(start.get("equity") or 0)
+        last = db.get("last_pnl") or {}
+        if start.get("pnl") is not None and (last.get("ts") or 0) >= midnight:
+            # Profit and loss, as the daily stop counts it: equity also moves when the budget does.
+            today["pnl"] = last["pnl"] - start["pnl"]
+        else:
+            today["pnl"] = latest["equity"] - float(start.get("equity") or 0)
     today["paper_pnl"] = db.query("SELECT COALESCE(SUM(pnl), 0) AS p FROM paper WHERE settled = 1 "
                                   "AND settled_ts >= ?", midnight)[0]["p"]
     positions = {"live": len(ledger.open_positions()),
@@ -380,14 +386,15 @@ def _paid(result, side):
         return None
 
 
-def _count(t, cost, result, side, pnl):
-    """Add one trade to a tally. `result` is set only once its market has settled."""
+def _count(t, cost, result, side, pnl, gone=0.0):
+    """Add one trade to a tally. `result` is set only once its market has settled. `gone` is
+    the share of it written off as lost: all gone can't be a win."""
     t["trades"] += 1
     t["cost"] += cost or 0.0
     paid = _paid(result, side)
     if paid is not None:
         t["settled"] += 1
-        t["wins"] += paid == 1
+        t["wins"] += paid == 1 and gone < 1
         t["pnl"] += pnl or 0.0
     else:
         t["open"] += 1
@@ -399,19 +406,20 @@ def _fill_cost(n, p):
     return n * p + fee(n, p) if n > 0 else 0.0
 
 
-def _live_pnl(filled, price, side, result):
-    """Profit of one filled live order once its market settled, else None."""
+def _live_pnl(filled, price, side, result, strategy=None, gone=0.0):
+    """Profit of one filled live order once its market settled, else None. As the books count
+    it: its share `gone` written off earns nothing, and a restored order's gain never counts."""
     paid = _paid(result, side)
     if paid is None or not filled > 0:
         return None
-    return filled * paid - _fill_cost(filled, price)
+    return ledger.settled_pnl(strategy, filled, price, paid, gone)
 
 
 def _settled_state(paid):
     return "won" if paid == 1 else "lost" if paid == 0 else "split"
 
 
-def _live_state(status, filled, result, side):
+def _live_state(status, filled, result, side, gone=0.0):
     status = str(status or "")
     if status in ("sending", "unknown"):
         return "checking"       # the reply was lost; the next run looks the order up on Kalshi
@@ -422,16 +430,18 @@ def _live_state(status, filled, result, side):
     if not filled > 0:
         return "no_fill"
     paid = _paid(result, side)
-    return "open" if paid is None else _settled_state(paid)
+    if paid is None:
+        return "open"
+    return "lost" if gone >= 1 else _settled_state(paid)   # all written off: it was paid nothing
 
 
-def _live_trade(r):
+def _live_trade(r, gone=0.0):
     n, p = float(r["filled"] or 0), float(r["price"] or 0)
     return {"kind": "live", "id": r["id"], "ts": r["ts"], "strategy": r["strategy"], "title": r["title"] or "",
             "event": r["event"] or "", "ticker": r["ticker"], "side": r["side"], "price": p,
             "count": _float(r["count"]), "filled": n, "status": r["status"],
-            "state": _live_state(r["status"], n, r["result"], r["side"]), "cost": _fill_cost(n, p),
-            "pnl": _live_pnl(n, p, r["side"], r["result"]), "error": str(r["error"] or "")[:200]}
+            "state": _live_state(r["status"], n, r["result"], r["side"], gone), "cost": _fill_cost(n, p),
+            "pnl": _live_pnl(n, p, r["side"], r["result"], r["strategy"], gone), "error": str(r["error"] or "")[:200]}
 
 
 def _paper_trade(r):
@@ -453,7 +463,8 @@ def trade_list(limit):
     pap = db.query("""SELECT p.id, p.ts, p.strategy, p.event, p.ticker, p.side, p.count, p.price, p.cost,
         p.settled, p.result, p.pnl, sg.title FROM paper p LEFT JOIN signals sg ON sg.id = p.signal_id
         ORDER BY p.ts DESC, p.id DESC LIMIT ?""", limit + 1)
-    rows = [_live_trade(r) for r in live] + [_paper_trade(r) for r in pap]
+    gone = ledger.written_off_share()
+    rows = [_live_trade(r, gone.get((r["ticker"], r["side"]), 0.0)) for r in live] + [_paper_trade(r) for r in pap]
     rows.sort(key=lambda t: (t["ts"] or 0, t["id"]), reverse=True)
     return rows[:limit], len(rows) > limit
 
@@ -462,11 +473,12 @@ def trade_totals():
     """Per strategy, real and practice kept apart. Counts every trade, not just those shown.
     Live fills are summed here, fee by fee, as the ledger does; paper rows (there can be
     many) are summed by SQLite, with the same rules as _count."""
-    live = collections.defaultdict(_tally)
-    for r in db.query("""SELECT o.strategy, o.side, o.filled, o.price, st.result FROM orders o
+    live, gone = collections.defaultdict(_tally), ledger.written_off_share()
+    for r in db.query("""SELECT o.strategy, o.ticker, o.side, o.filled, o.price, st.result FROM orders o
             LEFT JOIN settlements st ON st.ticker = o.ticker WHERE o.filled > 0"""):
+        share = gone.get((r["ticker"], r["side"]), 0.0)
         _count(live[r["strategy"] or "?"], _fill_cost(r["filled"], r["price"]), r["result"], r["side"],
-               _live_pnl(r["filled"], r["price"], r["side"], r["result"]))
+               _live_pnl(r["filled"], r["price"], r["side"], r["result"], r["strategy"], share), share)
     done = "settled = 1 AND pnl IS NOT NULL"   # booked: yes, no or a split; not "unknown"
     pap = {}
     for r in db.query(f"""SELECT COALESCE(strategy, '?') AS strategy, COUNT(*) AS trades,
@@ -512,13 +524,15 @@ def edge_results():
         if _paid(result, r["side"]) is not None:
             t["markets"].add(r["ticker"])
             t["events"].append({"event": r["event"] or r["ticker"], "ts": r["ts"], "meta": meta})
-    for r in db.query("""SELECT o.side, o.filled, o.price, st.result, s.meta FROM orders o
+    gone = ledger.written_off_share()
+    for r in db.query("""SELECT o.ticker, o.side, o.filled, o.price, st.result, s.meta FROM orders o
             JOIN signals s ON s.id = o.signal_id LEFT JOIN settlements st ON st.ticker = o.ticker
             WHERE o.strategy = ? AND o.filled > 0""", EDGE_STRATEGY):
         eid = _json(r["meta"]).get("edge")
         if eid:
+            share = gone.get((r["ticker"], r["side"]), 0.0)
             _count(out[str(eid)]["live"], _fill_cost(r["filled"], r["price"]), r["result"], r["side"],
-                   _live_pnl(r["filled"], r["price"], r["side"], r["result"]))
+                   _live_pnl(r["filled"], r["price"], r["side"], r["result"], EDGE_STRATEGY, share), share)
     for v in out.values():
         v["paper"]["markets"], v["paper"]["events"] = len(v["paper"]["markets"]), _groups(v["paper"]["events"])
     return out
@@ -631,8 +645,12 @@ class Backtests:
         try:
             bt = _module("research.backtest")
             cfg = config.load()
-            res = bt.run(job["series"], hours_before_close=job["hours_before_close"], client=client_factory(),
-                         max_markets=int(cfg.get("research_max_markets") or config.DEFAULTS["research_max_markets"]))
+            most = int(cfg.get("research_max_markets") or config.DEFAULTS["research_max_markets"])
+            # One exchange for the whole test, as research does: a switch meanwhile must not
+            # send this exchange's prices into the other's cache, or its record into the other's db.
+            with db.pinned(cfg["env"]):
+                res = bt.run(job["series"], hours_before_close=job["hours_before_close"], client=client_factory(),
+                             max_markets=most)
             end = {"ok": True, "observations": res.get("observations"), "edges": len(res.get("edges") or [])}
         except Exception as e:
             log.warning("backtest of %s failed", job["series"], exc_info=True)

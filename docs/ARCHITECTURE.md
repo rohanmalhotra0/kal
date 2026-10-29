@@ -101,8 +101,8 @@ tests/            unittest; tests/fakes.py has FakeKalshi, tests/helpers.py has 
 - No clear reply on a basket's 2nd+ leg -> trip at once. Each live run also checks for
   baskets an earlier run left part-bought (a lost reply, or a crash between legs) and
   trips once for each.
-- Each trade run keeps one exchange's books from start to end (`db.pinned`), even if
-  someone switches env part way.
+- Each trade run (and each research run or dashboard backtest) keeps one exchange's books
+  and files from start to end (`db.pinned`), even if someone switches env part way.
 - Kalshi shows more contracts than the books explain on a market the bot traded -> trip.
   Fewer, on a market still trading (someone sold them outside the bot) -> those are
   written off as lost, so the books never earn on contracts they don't hold.

@@ -10,8 +10,9 @@ from unittest import mock
 import requests
 
 import kal.__main__ as cli
-from kal import client, config, db, engine, gate, ledger, maintenance, paper, risk
+from kal import client, config, db, engine, gate, ledger, maintenance, paper, report, risk
 from kal.client import KalshiError
+from kal.dashboard import app as dash
 from kal.strategies import base, basket_arb
 from tests.fakes import FakeKalshi
 from tests.helpers import TempHome, orders_proven
@@ -1109,4 +1110,107 @@ class GateVersionTests(TempHome):
         self.assertFalse(gate.passed(c, "prod"))
         gate.record(c, "prod", True, "passed again")
         self.assertTrue(gate.passed(c, "prod"))
+
+
+# ---------- holes the round-3 audit found (2026-10-29) ----------
+
+class TodayIsProfitTests(TempHome):
+    """The report's and the dashboard's "today" is profit and loss, as the daily stop counts
+    it. Equity moves with the budget, so a raise or a cut must not show as a gain or a loss."""
+
+    def setUp(self):
+        super().setUp()
+        config.update({"enabled": True, "budget": 300, "strategies": _all_off()})
+        # 40 NO at $0.50 ($20.70 with the fee), marked at $0.50.
+        db.insert("orders", ticker="M-1", side="no", count=40, price=0.5, filled=40,
+                  status="executed", order_id="o1", client_order_id="c1")
+        self.c = FakeKalshi(balance=1000)
+        self.c.market_info["M-1"] = {"ticker": "M-1", "status": "active", "no_bid_dollars": "0.5000"}
+        self.c.position_list = [{"ticker": "M-1", "position": -40, "exposure": 20}]
+        engine.run_once(self.c)   # the UTC day starts here
+
+    def today(self):
+        """Today's number in the report, and on the dashboard."""
+        _, page, _, _ = dash.account(config.load(), time.time())
+        return report.build()["today"]["equity_change"], page["pnl"]
+
+    def test_a_budget_raise_is_not_profit(self):
+        config.update({"budget": 350})
+        self.c.market_info["M-1"] = {"ticker": "M-1", "status": "finalized", "result": "yes",
+                                     "settlement_value_dollars": "1.0000"}
+        self.c.position_list = []
+        engine.run_once(self.c)   # the bet lost: the $20 it was marked at is gone
+        self.assertEqual(config.load()["disabled_reason"], "")
+        rep, page = self.today()
+        self.assertAlmostEqual(rep, -20)    # not +$30: the $50 raise is not profit
+        self.assertAlmostEqual(page, -20)
+        self.assertIn("-20.00 with open bets", report.markdown(report.build()))
+
+    def test_a_budget_cut_is_not_a_loss(self):
+        config.update({"budget": 150})
+        engine.run_once(self.c)
+        rep, page = self.today()
+        self.assertAlmostEqual(rep, 0)      # not -$150
+        self.assertAlmostEqual(page, 0)
+
+
+class LivePnlAgreesWithTheBooksTests(TempHome):
+    """Each strategy's live P&L (report, Trades tab) and the morning summary count money as the
+    books do. Contracts written off (Kalshi showed them gone) earn nothing, so they never show
+    as won. A restored order's gain never counts."""
+
+    def setUp(self):
+        super().setUp()
+        config.update({"enabled": True, "budget": 300, "strategies": _all_off()})
+        db.insert("orders", strategy="favorites", ticker="F-1", side="yes", count=10, price=0.9, filled=10,
+                  status="executed", order_id="o1", client_order_id="c1")
+        self.cost = 9 + client.fee(10, 0.9)   # $9.07
+        self.c = FakeKalshi(balance=1000)
+        self.c.market_info["F-1"] = {"ticker": "F-1", "status": "active", "yes_bid_dollars": "0.9000"}
+
+    def _sold_then_won(self, left):
+        """Kalshi shows only `left` of the 10 (the rest are written off), then F-1 settles YES."""
+        self.c.position_list = [{"ticker": "F-1", "position": left, "exposure": 0.9 * left}] if left else []
+        engine.run_once(self.c)
+        self.c.market_info["F-1"] = {"ticker": "F-1", "status": "finalized", "result": "yes",
+                                     "settlement_value_dollars": "1.0000"}
+        self.c.position_list = []
+        engine.run_once(self.c)
+        self.assertEqual(config.load()["disabled_reason"], "")
+
+    def test_contracts_written_off_never_show_as_won(self):
+        self._sold_then_won(0)
+        self.assertAlmostEqual(ledger.realized(), -self.cost)
+        live = report._live_stats()["favorites"]
+        self.assertEqual((live["settled"], live["wins"], live["pnl"]), (1, 0, -9.07))   # not a +$0.93 win
+        tab = dash.trade_totals()["live"]["favorites"]
+        self.assertEqual(tab["wins"], 0)
+        self.assertAlmostEqual(tab["pnl"], ledger.realized())
+        row = dash.trade_list(10)[0][0]
+        self.assertEqual(row["state"], "lost")
+        self.assertAlmostEqual(row["pnl"], ledger.realized())
+        rep = report.build()
+        self.assertEqual(rep["today"]["live_settled_pnl"], -9.07)
+        self.assertIn("($9.07 written off)", report.markdown(rep))
+        title, text, _ = report.daily(now=time.time() + 86400)
+        self.assertEqual(title, "kal yesterday: -$9.07")   # not +$0.00
+        self.assertIn("Real money: -$9.07 from 1 settled bet and $9.07 written off\n", text)
+
+    def test_part_written_off_pays_only_what_was_left(self):
+        self._sold_then_won(6)   # 4 of the 10 sold outside the bot
+        self.assertAlmostEqual(ledger.realized(), 6 - self.cost)
+        live = report._live_stats()["favorites"]
+        self.assertEqual((live["wins"], live["pnl"]), (1, round(6 - self.cost, 2)))
+        self.assertAlmostEqual(dash.trade_totals()["live"]["favorites"]["pnl"], ledger.realized())
+
+    def test_a_restored_orders_gain_never_counts(self):
+        # Imported after a restore, so maybe the owner's own trade: its win isn't the bot's.
+        db.insert("orders", strategy="restored", ticker="OWN-1", side="yes", count=100, price=0.10, filled=100,
+                  status="imported", order_id="own1", client_order_id="")
+        self.c.market_info["OWN-1"] = {"ticker": "OWN-1", "status": "finalized", "result": "yes",
+                                       "settlement_value_dollars": "1.0000"}
+        ledger.settle(self.c)
+        self.assertAlmostEqual(ledger.realized(), 0)
+        self.assertEqual(report._live_stats()["restored"]["pnl"], 0)   # not +$89.37
+        self.assertAlmostEqual(dash.trade_totals()["live"]["restored"]["pnl"], 0)
 

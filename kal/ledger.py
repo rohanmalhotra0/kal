@@ -157,6 +157,29 @@ def payout_of(result, side):
     return paid if side == "yes" else 1 - paid
 
 
+def written_off_share():
+    """{(ticker, side): the share (0 to 1) of the bot's contracts there that were written off}.
+    Rounded, so float dust can't leave a sliver of a contract held."""
+    gone = db.query("SELECT ticker, side, SUM(count) AS n FROM writeoffs GROUP BY ticker, side")
+    if not gone:
+        return {}
+    bought = {(r["ticker"], r["side"]): r["n"] for r in db.query(
+        "SELECT ticker, side, SUM(filled) AS n FROM orders WHERE filled > 0 GROUP BY ticker, side")}
+    return {(r["ticker"], r["side"]): min(1.0, round(r["n"] / bought[(r["ticker"], r["side"])], 9))
+            for r in gone if bought.get((r["ticker"], r["side"]))}
+
+
+def settled_pnl(strategy, filled, price, paid, gone=0.0):
+    """One filled order's profit once its market settled, as settle() counts it, for reports.
+    `paid` is what one contract on its side paid. Its share `gone` written off earns nothing
+    (written_off_share), and a restored order's gain never counts (_restored_gain)."""
+    cost = filled * price + fee(filled, price)
+    pay = filled * (1 - gone) * paid
+    if strategy == "restored":
+        pay = max(0.0, pay - max(0.0, filled * paid - cost))
+    return pay - cost
+
+
 def capital(cfg):
     """What the bot has to work with: its starting budget plus (or minus) what it has made."""
     r = realized()

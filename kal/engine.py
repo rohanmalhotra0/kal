@@ -422,12 +422,16 @@ def _trade(client, cfg, summary):
             capital = ledger.capital(cfg)
         equity = ledger.equity(client, cfg)
         open_cost = ledger.open_cost()
+        # Profit so far: realized, plus open bets at their bids, less their cost. Unlike equity,
+        # it doesn't move with the budget. The daily stop and "today" (report, dashboard) use it.
+        pnl = equity - capital + ledger.realized()
         db.insert("equity", balance=balance, exposure=open_cost, equity=equity,
                   paper_equity=paper.equity(cfg))
+        db.put("last_pnl", {"ts": time.time(), "pnl": pnl})
         # The limits that scale with capital (daily stop, bets cap, bet size) use what the bot
         # could really lose, so a budget typed bigger than the account can't loosen them.
         at_risk = min(capital, balance + open_cost)
-        reason = risk.daily_loss(cfg, equity, at_risk, pnl=equity - capital + ledger.realized())
+        reason = risk.daily_loss(cfg, equity, at_risk, pnl=pnl)
         if not reason and cfg["budget"] > 0 and capital < 1:
             reason = f"the ${cfg['budget']:.2f} of capital is used up"
         if reason:
