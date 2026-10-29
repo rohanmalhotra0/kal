@@ -40,7 +40,7 @@ DECISION_TERMS = ("The outcomes are mutually exclusive: at most one can resolve 
 LABELS = {"C26": "Cut >25bps", "C25": "Cut 25bps", "H0": "Fed maintains rate", "H25": "Hike 25bps",
           "H26": "Hike >25bps"}
 # What each decision market's own rules say. On Kalshi the "Cut >25bps" market reads "Cut of 25bps"
-# (its ">" is lost). The hold market's wording wasn't seen: "Hike of 0bps" is a guess.
+# (its ">" is lost), and "Hike >25bps" reads "Hike of 25bps". The hold market reads "Hike of 0bps".
 WHAT = {"C26": "Cut of 25bps", "C25": "Cut of 25bps", "H0": "Hike of 0bps", "H25": "Hike of 25bps",
         "H26": "Hike of 25bps"}
 U = 4.00
@@ -391,6 +391,7 @@ class ScanTests(unittest.TestCase):
             edit(lambda evs: code_ticker(evs, "H0"), "rules_secondary", "\u201cFed maintains rate\u201d resolves",
                  "\u201cCut 25bps\u201d resolves"),
             edit(lambda evs: code_ticker(evs, "H0"), "yes_sub_title", "Fed maintains rate", "Hold"),
+            edit(lambda evs: code_ticker(evs, "H0"), "rules_primary", "Hike of 0bps", "Fed maintains rate"),
         ]
         for i, change in enumerate(cases):
             evs = gap_meeting()
@@ -401,14 +402,12 @@ class ScanTests(unittest.TestCase):
         self.assertEqual(self.scan(evs), [])
 
     def test_the_other_ways_kalshi_may_word_a_decision(self):
-        # The ">" back in ">25bps", other words for a hold, the typo fixed, curly quotes or
+        # The ">" back in ">25bps", a hold as a 0bps cut, the typo fixed, curly quotes or
         # straight, a doubled space: all still the same five outcomes.
         cases = [("C26", "rules_primary", "Cut of 25bps", "Cut of >25bps"),
                  ("C26", "rules_primary", "Cut of 25bps", "Cut of greater than 25bps"),
                  ("H26", "rules_primary", "Hike of 25bps", "Hike of >25bps"),
-                 ("H0", "rules_primary", "Hike of 0bps", "Fed maintains rate"),
-                 ("H0", "rules_primary", "Hike of 0bps", "Maintain"),
-                 ("H0", "rules_primary", "Hike of 0bps", "Hold"),
+                 ("H0", "rules_primary", "Hike of 0bps", "Cut of 0bps"),
                  ("H25", "rules_secondary", "\u201cHike 25 bps\u201d to Yes", "\u201cHike >25 bps\u201d to Yes"),
                  ("H25", "rules_secondary", "\u201cHike 25 bps\u201d to No", '"Hike 25 bps" to No'),
                  ("H25", "rules_secondary", "at most one", "at  most one")]

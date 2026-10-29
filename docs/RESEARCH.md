@@ -169,10 +169,13 @@ status: **testing** (add the PR link), **built**, or **rejected** (say why in on
     is cancelled or moved, "hold" resolves YES whatever the Fed does, so a rate change on the
     new date breaks NO "above U" + NO "hold" and 3 other shapes. And the
     decision rules have a typo: a 50bp hike resolves "Hike 25 bps" to Yes and "Hike 25 bps"
-    to No. The "Cut >25bps" market's own rules even say "Cut of 25bps" (the ">" is lost).
-    Real money needs a person to pin the meeting in `fed_link_arb.VERIFIED`. Even then, a
-    link that looks too good to be true (over 25% profit) keeps the meeting on paper.
-  - Probe: branch `probe/fed-crypto` (never merged).
+    to No. The "Cut >25bps" and "Hike >25bps" markets' own rules even say "Cut of 25bps" and
+    "Hike of 25bps" (the ">" is lost). Real money needs a person to pin the meeting in
+    `fed_link_arb.VERIFIED`. Even then, a link that looks too good to be true (over 25%
+    profit) keeps the meeting on paper.
+  - Live check (2026-10-29): the strategy reads the Dec meeting right (rate before 4.00%,
+    14 links, cheapest $1.01, so nothing to buy).
+  - Probes: branches `probe/fed-crypto` and `probe/fedlink-check` (never merged).
 - Crypto price links, tested 2026-10-29 on real data: rejected.
   - What: one-touch "how high (or low) this month or year" series nest in theory. A hit in a
     short window is a hit in the long one too.

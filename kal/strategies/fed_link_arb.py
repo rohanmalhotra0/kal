@@ -89,16 +89,15 @@ _DECISION_TERMS = re.compile(
     r'resolves "hike >?25 bps" to yes and "hike 25 bps" to no\. if the scheduled fomc meeting is canceled and '
     r'does not occur on its scheduled date, "fed maintains rate" resolves to yes and all other outcomes resolve '
     r'to no\.', re.I)
-# What each decision market's own rules may say it is. Kalshi loses the ">" of ">25bps": the
-# real "Cut >25bps" market reads "does a Cut of 25bps" (2026-10-29), so that's taken for C26 and
-# H26 too. The hold market's wording wasn't seen, so a few plain ways to say "hold" are taken.
+# What each decision market's own rules say it is, as on the real markets (2026-10-29). Kalshi
+# loses the ">" of ">25bps": "Cut >25bps" reads "does a Cut of 25bps" and "Hike >25bps" reads
+# "does a Hike of 25bps", so either is taken. The hold market reads "does a Hike of 0bps".
 # The links only need cut, hold or hike, which these keep apart.
 _MORE = r"(?:>|more than |greater than |over )?"
 _OUTCOMES = {
     "C26": rf"cut of {_MORE}25 ?bps",
     "C25": r"cut of 25 ?bps",
-    "H0": r"(?:hike|cut) of 0 ?bps|(?:fed )?maintains?(?: the)?(?: current)?(?: rates?)?|holds?(?: the)?(?: rates?)?"
-          r"|pause|no change",
+    "H0": r"(?:hike|cut) of 0 ?bps",
     "H25": r"hike of 25 ?bps",
     "H26": rf"hike of {_MORE}25 ?bps",
 }
