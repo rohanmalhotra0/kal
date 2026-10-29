@@ -94,23 +94,36 @@ code_differs() {  # rev rev: any change outside docs/? Can't tell (an error, no 
   git diff --quiet "$1" "$2" -- . ':(exclude)docs' 2>/dev/null
   [ $? -ne 0 ]
 }
+# A step that needs no check: it changes no code, and if it's a merge, it left out no code its
+# other sides brought (a merge that keeps its own older copy, like `pull -s ours`, would undo a
+# pull request the server already runs).
+step_ok() {  # rev
+  code_differs "$1^1" "$1" && return 1
+  local p b
+  for p in $(git rev-list --parents -n 1 "$1" | cut -s -d' ' -f3-); do
+    b=$(git merge-base "$1^1" "$p") || return 1
+    code_differs "$b" "$p" && return 1
+  done
+  return 0
+}
 # One exception: a check-in that pulls with a merge before it pushes the journal. Its merge is
 # fine if it brings in only what GitHub merged: its code is exactly the pulled side's, that side
-# changed code only in commits GitHub made (walked back like main, until it meets our side), and
-# our side changed no code since then.
+# changed code only in commits GitHub made or in other sessions' pulls like this one (walked back
+# like main, until it meets our side), and our side changed no code since then.
 pulled_in() {  # merge
   local m=$1 c
   c=$(git rev-parse -q --verify "$m^2") || return 1   # not a merge
+  git rev-parse -q --verify "$m^3" >/dev/null && return 1   # a pull merges two sides, no more
   code_differs "$c" "$m" && return 1                  # the merge has code of its own
   while ! git merge-base --is-ancestor "$c" "$m^1"; do
-    code_differs "$c^1" "$c" && ! by_github "$c" && return 1
+    step_ok "$c" || by_github "$c" || pulled_in "$c" || return 1
     c=$(git rev-parse -q --verify "$c^1") || return 1  # never met our side
   done
   ! code_differs "$c" "$m^1"                          # our side changed no code since
 }
 bad=""
 for sha in $(git rev-list --first-parent "$before..$after"); do
-  code_differs "$sha^1" "$sha" || continue
+  step_ok "$sha" && continue
   by_github "$sha" || pulled_in "$sha" || { bad=$sha; break; }
 done
 if [ -n "$bad" ]; then

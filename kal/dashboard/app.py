@@ -406,13 +406,13 @@ def _fill_cost(n, p):
     return n * p + fee(n, p) if n > 0 else 0.0
 
 
-def _live_pnl(filled, price, side, result, strategy=None, gone=0.0):
-    """Profit of one filled live order once its market settled, else None. As the books count
-    it: its share `gone` written off earns nothing, and a restored order's gain never counts."""
-    paid = _paid(result, side)
-    if paid is None or not filled > 0:
+def _live_pnl(r, pnls):
+    """Profit of one filled live order (a row with id, filled, side, result) once its market
+    settled, else None. As the books count it (ledger.settled_order_pnl): contracts written off
+    earn nothing, and a restored order's gain never counts."""
+    if _paid(r["result"], r["side"]) is None or not float(r["filled"] or 0) > 0:
         return None
-    return ledger.settled_pnl(strategy, filled, price, paid, gone)
+    return pnls.get(r["id"])
 
 
 def _settled_state(paid):
@@ -435,13 +435,13 @@ def _live_state(status, filled, result, side, gone=0.0):
     return "lost" if gone >= 1 else _settled_state(paid)   # all written off: it was paid nothing
 
 
-def _live_trade(r, gone=0.0):
+def _live_trade(r, gone=0.0, pnl=None):
     n, p = float(r["filled"] or 0), float(r["price"] or 0)
     return {"kind": "live", "id": r["id"], "ts": r["ts"], "strategy": r["strategy"], "title": r["title"] or "",
             "event": r["event"] or "", "ticker": r["ticker"], "side": r["side"], "price": p,
             "count": _float(r["count"]), "filled": n, "status": r["status"],
             "state": _live_state(r["status"], n, r["result"], r["side"], gone), "cost": _fill_cost(n, p),
-            "pnl": _live_pnl(n, p, r["side"], r["result"], r["strategy"], gone), "error": str(r["error"] or "")[:200]}
+            "pnl": pnl, "error": str(r["error"] or "")[:200]}
 
 
 def _paper_trade(r):
@@ -463,8 +463,9 @@ def trade_list(limit):
     pap = db.query("""SELECT p.id, p.ts, p.strategy, p.event, p.ticker, p.side, p.count, p.price, p.cost,
         p.settled, p.result, p.pnl, sg.title FROM paper p LEFT JOIN signals sg ON sg.id = p.signal_id
         ORDER BY p.ts DESC, p.id DESC LIMIT ?""", limit + 1)
-    gone = ledger.written_off_share()
-    rows = [_live_trade(r, gone.get((r["ticker"], r["side"]), 0.0)) for r in live] + [_paper_trade(r) for r in pap]
+    gone = ledger.written_off_shares()
+    pnls = ledger.settled_order_pnl(gone)
+    rows = [_live_trade(r, gone.get(r["id"], 0.0), _live_pnl(r, pnls)) for r in live] + [_paper_trade(r) for r in pap]
     rows.sort(key=lambda t: (t["ts"] or 0, t["id"]), reverse=True)
     return rows[:limit], len(rows) > limit
 
@@ -473,12 +474,12 @@ def trade_totals():
     """Per strategy, real and practice kept apart. Counts every trade, not just those shown.
     Live fills are summed here, fee by fee, as the ledger does; paper rows (there can be
     many) are summed by SQLite, with the same rules as _count."""
-    live, gone = collections.defaultdict(_tally), ledger.written_off_share()
-    for r in db.query("""SELECT o.strategy, o.ticker, o.side, o.filled, o.price, st.result FROM orders o
+    live, gone = collections.defaultdict(_tally), ledger.written_off_shares()
+    pnls = ledger.settled_order_pnl(gone)
+    for r in db.query("""SELECT o.id, o.strategy, o.ticker, o.side, o.filled, o.price, st.result FROM orders o
             LEFT JOIN settlements st ON st.ticker = o.ticker WHERE o.filled > 0"""):
-        share = gone.get((r["ticker"], r["side"]), 0.0)
         _count(live[r["strategy"] or "?"], _fill_cost(r["filled"], r["price"]), r["result"], r["side"],
-               _live_pnl(r["filled"], r["price"], r["side"], r["result"], r["strategy"], share), share)
+               _live_pnl(r, pnls), gone.get(r["id"], 0.0))
     done = "settled = 1 AND pnl IS NOT NULL"   # booked: yes, no or a split; not "unknown"
     pap = {}
     for r in db.query(f"""SELECT COALESCE(strategy, '?') AS strategy, COUNT(*) AS trades,
@@ -524,15 +525,15 @@ def edge_results():
         if _paid(result, r["side"]) is not None:
             t["markets"].add(r["ticker"])
             t["events"].append({"event": r["event"] or r["ticker"], "ts": r["ts"], "meta": meta})
-    gone = ledger.written_off_share()
-    for r in db.query("""SELECT o.ticker, o.side, o.filled, o.price, st.result, s.meta FROM orders o
+    gone = ledger.written_off_shares()
+    pnls = ledger.settled_order_pnl(gone)
+    for r in db.query("""SELECT o.id, o.ticker, o.side, o.filled, o.price, st.result, s.meta FROM orders o
             JOIN signals s ON s.id = o.signal_id LEFT JOIN settlements st ON st.ticker = o.ticker
             WHERE o.strategy = ? AND o.filled > 0""", EDGE_STRATEGY):
         eid = _json(r["meta"]).get("edge")
         if eid:
-            share = gone.get((r["ticker"], r["side"]), 0.0)
             _count(out[str(eid)]["live"], _fill_cost(r["filled"], r["price"]), r["result"], r["side"],
-                   _live_pnl(r["filled"], r["price"], r["side"], r["result"], EDGE_STRATEGY, share), share)
+                   _live_pnl(r, pnls), gone.get(r["id"], 0.0))
     for v in out.values():
         v["paper"]["markets"], v["paper"]["events"] = len(v["paper"]["markets"]), _groups(v["paper"]["events"])
     return out

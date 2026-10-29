@@ -417,7 +417,8 @@ Each morning (about 09:30 UTC) it fetches `main` and then, to stay safe:
 
 - **Docs-only changes** (like the check-in's journal) fast-forward with no restart.
 - **Code must have come through a pull request.** Code pushed straight to `main` is
-  refused, and your phone gets "kal update refused" naming the commit.
+  refused, and your phone gets "kal update refused" naming the commit. So is a merge
+  that would put older code back.
 - It **builds the new code and runs every test in a throwaway copy**, as a locked-down
   user that can't read your key, topic or books. Only if the tests pass does it swap the
   new code into `/opt/kal`. If a test fails, it stays put and sends "kal update failed

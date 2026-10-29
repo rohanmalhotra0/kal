@@ -726,6 +726,13 @@ class AutoPromoteOffMidRunTests(TempHome):
                 f.write("{half a file")
         self.run_with(break_the_file)
 
+    def test_practice_on_demo_meanwhile_promotes_nothing_on_prod(self):
+        # Prod's owner said no. Switching to demo mid-run and turning auto_promote on there
+        # to practice must not promote prod's edge (critic, round 3).
+        config.update({"auto_promote": False})
+        self.run_with(lambda: (config.switch({"env": "demo"}), config.update({"auto_promote": True})))
+        self.assertIs(config.switch({"env": "prod"})["auto_promote"], False)
+
 
 # ---------- 5. no filter on volume known only after settling ----------
 

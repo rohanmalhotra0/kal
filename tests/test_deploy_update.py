@@ -281,6 +281,105 @@ exit 0
         self._git(checkin, "push", "-q", "origin", "main")
         self._refused(before)
 
+    def _runs_new_code(self):
+        self._push_code()
+        self.assertEqual(self._run().returncode, 0)   # the server runs x = 2
+        self.assertEqual(_read(os.path.join(self.app, "kal", "x.py")), "x = 2\n")
+        return self._head()
+
+    def test_a_pull_that_keeps_its_own_old_code_is_refused(self):
+        # `pull -s ours` (meant: -X ours, for a journal conflict) keeps the check-in's older
+        # copy of the code. It would undo the pull request the server runs (critic, round 3).
+        checkin = self._checkin()
+        before = self._runs_new_code()
+        self._journal(checkin)
+        self._git(checkin, "pull", "-q", "--no-rebase", "--no-edit", "-s", "ours", "origin", "main", **CHECKIN)
+        self._git(checkin, "push", "-q", "origin", "main")
+        self._refused(before)
+        self.assertEqual(_read(os.path.join(self.app, "kal", "x.py")), "x = 2\n")
+
+    def test_the_same_merge_made_from_the_other_side_is_refused(self):
+        # Old code back, with the stale branch as the first parent this time.
+        checkin = self._checkin()
+        before = self._runs_new_code()
+        self._git(checkin, "checkout", "-q", "-b", "notes")
+        _write(os.path.join(checkin, "docs", "NOTES.md"), "notes\n")
+        self._git(checkin, "add", "-A")
+        self._git(checkin, "commit", "-q", "-m", "notes", **CHECKIN)
+        self._git(checkin, "fetch", "-q", "origin")
+        self._git(checkin, "merge", "-q", "--no-commit", "origin/main", **CHECKIN)
+        self._git(checkin, "checkout", "notes", "--", "kal/x.py")
+        self._git(checkin, "commit", "-q", "--no-edit", **CHECKIN)
+        self._git(checkin, "push", "-q", "origin", "HEAD:main")
+        self._refused(before)
+
+    def test_a_merge_of_three_that_drops_one_is_refused(self):
+        # One merge of the journal, a docs branch and main that keeps the old code: the docs
+        # branch brought no code, but main did, and it would be undone.
+        checkin = self._checkin()
+        before = self._runs_new_code()
+        self._git(checkin, "checkout", "-q", "-b", "notes")
+        _write(os.path.join(checkin, "docs", "NOTES.md"), "notes\n")
+        self._git(checkin, "add", "-A")
+        self._git(checkin, "commit", "-q", "-m", "notes", **CHECKIN)
+        self._git(checkin, "checkout", "-q", "main")
+        self._journal(checkin)
+        self._git(checkin, "fetch", "-q", "origin")
+        self._git(checkin, "merge", "-q", "--no-edit", "-s", "ours", "notes", "origin/main", **CHECKIN)
+        self.assertEqual(len(self._git(checkin, "rev-list", "--parents", "-n", "1", "HEAD").split()), 4)
+        self._git(checkin, "push", "-q", "origin", "main")
+        self._refused(before)
+        self.assertEqual(_read(os.path.join(self.app, "kal", "x.py")), "x = 2\n")
+
+    def _session_pushes_journal(self, repo, name, sneak=False):
+        """Another session: its journal, a pull with a merge, a push."""
+        _write(os.path.join(repo, "docs", name), name + "\n")
+        self._git(repo, "add", "-A")
+        self._git(repo, "commit", "-q", "-m", "journal " + name, **CHECKIN)
+        if sneak:   # a conflict "fixed" with new code in the merge
+            self._git(repo, "pull", "-q", "--no-rebase", "--no-commit", "origin", "main", **CHECKIN)
+            _write(os.path.join(repo, "kal", "sneak.py"), "s = 1\n")
+            self._git(repo, "add", "-A")
+            self._git(repo, "commit", "-q", "--no-edit", **CHECKIN)
+        else:
+            self._git(repo, "pull", "-q", "--no-rebase", "--no-edit", "origin", "main", **CHECKIN)
+        self._git(repo, "push", "-q", "origin", "main")
+
+    def _sessions(self, *names):
+        out = []
+        for n in names:
+            path = os.path.join(self.d, n)
+            self._git(self.d, "clone", "-q", "-b", "main", self.origin, path)
+            out.append(path)
+        return out
+
+    def test_two_sessions_pulling_in_turn_still_update(self):
+        # Session B's pull brings in session A's pull merge. Both bring in only what GitHub
+        # merged, so this updates. Refusing it blocked every later update (critic, round 3).
+        self._active()
+        before = self._head()
+        a, b, c = self._sessions("a", "b", "c")
+        self._push_code()
+        self._session_pushes_journal(a, "A.md")
+        self._session_pushes_journal(b, "B.md")
+        r = self._run()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertNotEqual(self._head(), before)
+        self.assertEqual(_read(os.path.join(self.app, "kal", "x.py")), "x = 2\n")
+        self._session_pushes_journal(c, "C.md")   # the server already runs the code: docs only
+        r = self._run()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("docs only", r.stdout)
+
+    def test_code_hidden_in_an_earlier_sessions_pull_is_refused(self):
+        self._active()
+        before = self._head()
+        a, b = self._sessions("a", "b")
+        self._push_code()
+        self._session_pushes_journal(a, "A.md", sneak=True)
+        self._session_pushes_journal(b, "B.md")
+        self._refused(before)
+
     def test_pull_request_code_passes_tests_then_restarts(self):
         self._active()
         before = self._head()

@@ -19,11 +19,13 @@ log = logging.getLogger(__name__)
 
 
 def _promote_settings(cfg):
-    """cfg with auto_promote as it is now, not when research started (maybe hours ago): the
-    owner may have turned it off since. Settings that can't be read count as off. The run's
-    exchange stays as it was."""
+    """cfg with auto_promote on only if it was on when research started (maybe hours ago) and
+    still is: the owner may have turned it off since. A value read now can only turn it off.
+    It may be another exchange's (the owner switched to demo meanwhile and practiced there),
+    and that must never promote this run's real money. Settings that can't be read count as
+    off. The run's exchange stays as it was."""
     try:
-        on = config.load().get("auto_promote") is True
+        on = cfg.get("auto_promote") is True and config.load().get("auto_promote") is True
     except Exception as e:
         log.warning("research: can't read the settings, so nothing is promoted this run: %s", e)
         on = False

@@ -157,27 +157,69 @@ def payout_of(result, side):
     return paid if side == "yes" else 1 - paid
 
 
-def written_off_share():
-    """{(ticker, side): the share (0 to 1) of the bot's contracts there that were written off}.
+def written_off_shares():
+    """{order id: the share (0 to 1) of its contracts written off}, for reports. Kalshi can't
+    say whose contracts went, so a write-off falls on the orders on its market and side bought
+    before it, in proportion to what each still held (a re-buy after a sale keeps its own).
     Rounded, so float dust can't leave a sliver of a contract held."""
-    gone = db.query("SELECT ticker, side, SUM(count) AS n FROM writeoffs GROUP BY ticker, side")
-    if not gone:
+    offs = db.query("SELECT ticker, side, count, ts FROM writeoffs ORDER BY ts, id")
+    if not offs:
         return {}
-    bought = {(r["ticker"], r["side"]): r["n"] for r in db.query(
-        "SELECT ticker, side, SUM(filled) AS n FROM orders WHERE filled > 0 GROUP BY ticker, side")}
-    return {(r["ticker"], r["side"]): min(1.0, round(r["n"] / bought[(r["ticker"], r["side"])], 9))
-            for r in gone if bought.get((r["ticker"], r["side"]))}
+    keys = {(w["ticker"], w["side"]) for w in offs}
+    orders = {}
+    for o in db.query("SELECT id, ticker, side, filled, ts FROM orders WHERE filled > 0 ORDER BY ts, id"):
+        if (o["ticker"], o["side"]) in keys:
+            orders.setdefault((o["ticker"], o["side"]), []).append(o)
+    gone = {}
+    for w in offs:
+        mine, left = orders.get((w["ticker"], w["side"]), []), w["count"] or 0.0
+        when = w["ts"] if w["ts"] is not None else float("inf")
+        # The orders bought before it first; anything left (clocks) on the rest.
+        for group in ([o for o in mine if (o["ts"] or 0) <= when], mine):
+            held = {o["id"]: max(0.0, o["filled"] - gone.get(o["id"], 0.0)) for o in group}
+            total = sum(held.values())
+            if left <= 0 or total <= 0:
+                continue
+            take = min(left, total)
+            for o in group:
+                gone[o["id"]] = gone.get(o["id"], 0.0) + take * held[o["id"]] / total
+            left -= take
+    filled = {o["id"]: o["filled"] for group in orders.values() for o in group}
+    return {oid: min(1.0, round(n / filled[oid], 9)) for oid, n in gone.items() if n > 0}
 
 
-def settled_pnl(strategy, filled, price, paid, gone=0.0):
-    """One filled order's profit once its market settled, as settle() counts it, for reports.
-    `paid` is what one contract on its side paid. Its share `gone` written off earns nothing
-    (written_off_share), and a restored order's gain never counts (_restored_gain)."""
-    cost = filled * price + fee(filled, price)
-    pay = filled * (1 - gone) * paid
-    if strategy == "restored":
-        pay = max(0.0, pay - max(0.0, filled * paid - cost))
-    return pay - cost
+def settled_order_pnl(shares=None):
+    """{order id: profit} for each filled order whose market settled, as the books count it,
+    for reports. Per market it adds up to what settle() booked less the write-offs, so the
+    strategies add up to realized(). Contracts written off earn nothing (written_off_shares).
+    A restored order's gain never counts: settle() took it off the market's pay, so restored
+    orders get only what it kept beyond the other orders' pay."""
+    shares = written_off_shares() if shares is None else shares
+    markets = {}
+    for r in db.query("""SELECT o.id, o.strategy, o.side, o.filled, o.price, s.ticker, s.result, s.revenue
+            FROM orders o JOIN settlements s ON s.ticker = o.ticker WHERE o.filled > 0"""):
+        markets.setdefault(r["ticker"], []).append(r)
+    out = {}
+    for rows in markets.values():
+        try:
+            paid = {r["id"]: payout_of(r["result"], r["side"]) for r in rows}
+        except (TypeError, ValueError):
+            continue   # not a payout: nothing to report
+        cost = {r["id"]: r["filled"] * r["price"] + fee(r["filled"], r["price"]) for r in rows}
+        pay = {r["id"]: r["filled"] * (1 - shares.get(r["id"], 0.0)) * paid[r["id"]] for r in rows}
+        restored = [r for r in rows if r["strategy"] == "restored"]
+        if restored:
+            booked = rows[0]["revenue"]
+            if booked is None:   # as settle() works it out
+                gain = sum(max(0.0, r["filled"] * paid[r["id"]] - cost[r["id"]]) for r in restored)
+                booked = max(0.0, sum(pay.values()) - gain)
+            others = sum(pay[r["id"]] for r in rows if r["strategy"] != "restored")
+            n = sum(r["filled"] for r in restored)
+            for r in restored:
+                pay[r["id"]] = (booked - others) * r["filled"] / n
+        for r in rows:
+            out[r["id"]] = pay[r["id"]] - cost[r["id"]]
+    return out
 
 
 def capital(cfg):

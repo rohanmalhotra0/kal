@@ -236,6 +236,25 @@ class LiveBasketTests(TempHome):
         self.assertEqual({abs(n) for n in c.held.values()}, {9.5})
         self.assertEqual(config.load()["disabled_reason"], "")
 
+    def test_a_part_fill_read_from_what_was_left_matches_every_leg(self):
+        # A reply with only initial and remaining counts: 10.00 - 1.13 is 8.870000000000001 in
+        # floats. The later legs must ask for the 8.87 they send, not read 8.87 as short (critic).
+        c = fake_with_arb()
+        real_buy = c.buy
+
+        def buy(ticker, side, count, price, client_order_id=None):
+            r = real_buy(ticker, side, count, price, client_order_id)
+            if len(c.orders) == 1:
+                c.held[ticker] += 1.13 if c.held[ticker] < 0 else -1.13   # 1.13 never filled
+                return {"order_id": "o1", "status": "canceled", "initial_count_fp": f"{count:.2f}",
+                        "remaining_count_fp": "1.13"}
+            return r
+        c.buy = buy
+        engine.run_once(c)
+        self.assertEqual(config.load()["disabled_reason"], "")
+        self.assertEqual([o[2] for o in c.orders], [10, 8.87, 8.87, 8.87])
+        self.assertEqual([r["filled"] for r in db.query("SELECT filled FROM orders ORDER BY id")], [8.87] * 4)
+
     def test_env_switch_mid_run_keeps_one_runs_orders_in_one_books(self):
         c = fake_with_arb()
         real_buy = c.buy
@@ -1213,4 +1232,54 @@ class LivePnlAgreesWithTheBooksTests(TempHome):
         self.assertAlmostEqual(ledger.realized(), 0)
         self.assertEqual(report._live_stats()["restored"]["pnl"], 0)   # not +$89.37
         self.assertAlmostEqual(dash.trade_totals()["live"]["restored"]["pnl"], 0)
+
+    def _settle_t1(self):
+        self.c.market_info["T-1"] = {"ticker": "T-1", "status": "finalized", "result": "yes",
+                                     "settlement_value_dollars": "1.0000"}
+        ledger.settle(self.c)
+        tab = dash.trade_totals()["live"]
+        rows = {t["strategy"]: t for t in dash.trade_list(20)[0] if t["ticker"] == "T-1"}
+        return report._live_stats(), tab, rows
+
+    def _order(self, strategy, price, ts):
+        db.insert("orders", ts=ts, strategy=strategy, ticker="T-1", side="yes", count=10, price=price,
+                  filled=10, status="executed", order_id=f"{strategy}-1", client_order_id="")
+
+    def test_a_rebuy_after_a_sale_keeps_its_own_contracts(self):
+        # favorites' 10 were sold outside the bot and written off. Then another strategy bought
+        # 10 again, and only those won. Each keeps its own result (critic, round 3).
+        self._order("favorites", 0.5, time.time() - 60)
+        ledger.write_off("T-1", "yes", 10, "sold outside the bot")
+        self._order("longshot_fade", 0.6, time.time() + 1)
+        live, tab, rows = self._settle_t1()
+        self.assertAlmostEqual(ledger.realized(), -1.35)
+        self.assertEqual((live["favorites"]["wins"], live["favorites"]["pnl"]), (0, -5.18))
+        self.assertEqual((live["longshot_fade"]["wins"], live["longshot_fade"]["pnl"]), (1, 3.83))
+        self.assertEqual((tab["favorites"]["wins"], tab["longshot_fade"]["wins"]), (0, 1))
+        self.assertAlmostEqual(tab["favorites"]["pnl"] + tab["longshot_fade"]["pnl"], ledger.realized())
+        self.assertEqual((rows["favorites"]["state"], rows["longshot_fade"]["state"]), ("lost", "won"))
+        self.assertAlmostEqual(rows["longshot_fade"]["pnl"], 3.83)
+
+    def test_a_restored_order_with_a_write_off_still_adds_up_to_the_books(self):
+        # settle() takes a restored order's gain off its whole market. When part of that market
+        # was written off, the reports must not show more than the books (critic, round 3).
+        self._order("favorites", 0.5, time.time() - 60)
+        self._order("restored", 0.3, time.time() - 30)
+        ledger.write_off("T-1", "yes", 10, "sold outside the bot")
+        live, tab, rows = self._settle_t1()
+        self.assertAlmostEqual(ledger.realized(), -5.18)
+        self.assertAlmostEqual(live["favorites"]["pnl"] + live["restored"]["pnl"], -5.18)   # not -3.33
+        self.assertAlmostEqual(tab["favorites"]["pnl"] + tab["restored"]["pnl"], ledger.realized())
+        self.assertAlmostEqual(rows["favorites"]["pnl"] + rows["restored"]["pnl"], ledger.realized())
+        self.assertEqual(live["favorites"]["pnl"], -0.18)   # its own half: $5 back on $5.18
+        self.assertLessEqual(live["restored"]["pnl"], 0)    # a restored order never shows a gain
+
+    def test_a_restored_order_part_written_off_alone_matches_the_books(self):
+        self._order("restored", 0.4, time.time() - 60)
+        ledger.write_off("T-1", "yes", 5, "sold outside the bot")
+        live, tab, rows = self._settle_t1()
+        self.assertAlmostEqual(ledger.realized(), -4.17)
+        self.assertAlmostEqual(live["restored"]["pnl"], -4.17)
+        self.assertAlmostEqual(tab["restored"]["pnl"], -4.17)
+        self.assertAlmostEqual(rows["restored"]["pnl"], -4.17)
 

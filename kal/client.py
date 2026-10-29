@@ -391,7 +391,9 @@ def filled(order, requested):
         n = num(order, "initial_count") - num(order, "remaining_count")
     else:
         n = requested if order.get("status") == "executed" else 0
-    return max(0.0, min(float(requested), n))
+    # Kalshi counts have 2 decimals. Without rounding, 10.00 - 1.13 is 8.870000000000001: a
+    # basket's later legs would ask for that, get the 8.87 sent, and read as short.
+    return max(0.0, min(float(requested), round(n, 2)))
 
 
 def fill_known(order):

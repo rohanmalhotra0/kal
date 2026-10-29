@@ -101,9 +101,10 @@ def _today(now):
 def _live_stats():
     """Per strategy, from our own fills: what was bought, and how the settled part did, as the
     books count it (contracts written off earn nothing)."""
-    rows = db.query("""SELECT o.strategy, o.ticker, o.side, o.filled, o.price, s.result
+    rows = db.query("""SELECT o.id, o.strategy, o.ticker, o.side, o.filled, o.price, s.result
         FROM orders o LEFT JOIN settlements s ON s.ticker = o.ticker WHERE o.filled > 0""")
-    gone = ledger.written_off_share()
+    gone = ledger.written_off_shares()
+    pnl = ledger.settled_order_pnl(gone)
     out = {}
     for r in rows:
         st = out.setdefault(r["strategy"] or "?", {"fills": 0, "spent": 0.0, "settled": 0, "wins": 0, "pnl": 0.0})
@@ -112,10 +113,9 @@ def _live_stats():
         st["spent"] += cost
         if r["result"] not in (None, ""):
             paid = ledger.payout_of(r["result"], r["side"])  # 1, 0, or a split (a called-off market)
-            share = gone.get((r["ticker"], r["side"]), 0.0)
             st["settled"] += 1
-            st["wins"] += paid == 1 and share < 1   # all written off: nothing was won
-            st["pnl"] += ledger.settled_pnl(r["strategy"], r["filled"], r["price"], paid, share)
+            st["wins"] += paid == 1 and gone.get(r["id"], 0.0) < 1   # all written off: nothing was won
+            st["pnl"] += pnl.get(r["id"], 0.0)
     for st in out.values():
         st["spent"], st["pnl"] = round(st["spent"], 2), round(st["pnl"], 2)
     return out
