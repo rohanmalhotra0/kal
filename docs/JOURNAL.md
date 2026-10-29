@@ -2,6 +2,20 @@
 
 Newest first. Each 2-hour check-in adds one entry: what it checked, what it found, links.
 
+## 2026-10-29 22:50 UTC — check-in: AAA gas rejected; gold and silver built on paper
+
+- Merged [PR #37](https://github.com/rohanmalhotra0/kal/pull/37): idea #20 (AAA gas daily vs
+  weekly vs monthly) rejected. Same words, but Kalshi settles each series on its own: on Jul 13
+  the weekly took the day before's figure (3.876), the daily 3.872. The lesson is now in
+  RESEARCH.md: the same words aren't enough for a link across series.
+- Idea #21 on real data: gold and silver month ends with the same words matched 10 of 10;
+  copper broke on Aug 31 (6.69 vs 6.58) and natural gas twice, so those are out. Built as
+  `metal_link_arb`, paper only, on branch `metal-link-arb` (46 tests); an independent review
+  runs before its PR. No real money planned: the two series settle hours apart and Kalshi
+  moves the price source outside the words.
+- Checked: CI green on main 50e9347; market-check green today. No status report yet:
+  `kal-status` doesn't exist or isn't shared with Claude.
+
 ## 2026-10-29 20:50 UTC — check-in: crypto range links merged; a faster pace finds nothing more
 
 - Merged [PR #35](https://github.com/rohanmalhotra0/kal/pull/35): `range_link_arb` (crypto
