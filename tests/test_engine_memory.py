@@ -314,9 +314,9 @@ class SameTradesTests(TempHome):
 
     def test_the_filter_changes_no_accepted_trade(self):
         from kal.strategies import (basket_arb, bracket_arb, date_ladder_arb, exact_link_arb, fed_link_arb, ladder_arb,
-                                    range_link_arb)
+                                    metal_link_arb, range_link_arb)
         from tests import test_arb_strategies as arb, test_date_ladder as dl, test_exact_link_arb as ex
-        from tests import test_fed_link_arb as fed, test_range_link_arb as rl
+        from tests import test_fed_link_arb as fed, test_metal_link_arb as ml, test_range_link_arb as rl
         cfg = dict(config.DEFAULTS)
         cut = engine.horizon_days(cfg)
         traded = 0
@@ -333,9 +333,12 @@ class SameTradesTests(TempHome):
                      (fed_link_arb, fed.fake_for(fed.gap_meeting(days))),
                      (exact_link_arb, ex.fake_for([ex.exact_event(days=days, prices=ex.GAP),
                                                    ex.ladder_event(days=days)])),
-                     (range_link_arb, rl.fake_for(rl.gap_pair(days=days).events()))]
+                     (range_link_arb, rl.fake_for(rl.gap_pair(days=days).events())),
+                     (metal_link_arb, ml.fake_for(ml.gap_pair(days=days).events()))]
             for mod, c in cases:
                 cut_off = self.accepted(mod.STRATEGY, c, cut, cfg)
                 self.assertEqual(cut_off, self.accepted(mod.STRATEGY, c, float("inf"), cfg), (mod.__name__, days))
                 traded += bool(cut_off)
+                if mod is metal_link_arb and days == 2:
+                    self.assertTrue(cut_off)   # its money is back 8 days after the close: near enough
         self.assertGreater(traded, 5)   # the fixtures do trade when they're near

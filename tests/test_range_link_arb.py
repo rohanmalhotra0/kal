@@ -874,13 +874,18 @@ class ScanTests(TempHome):
         self.assertTrue(sigs[0].meta["paper_only"])
 
     def test_too_good_in_the_order_book_alone_keeps_the_pair_on_paper(self):
-        p = gap_pair()                     # sell3 listed at $1.87
+        # The sell3 is listed at $1.87, but its book says $1.55: too good to be true. It isn't
+        # booked, not even on paper, and the pair's real disjoint gap trades on paper only.
+        p = gap_pair()
+        p.prices.update(disjoint_gap(p))
         evs = p.events()
         self.pin(evs)
         c = fake_for(evs)
-        c.books[p.bracket(5)] = {"yes": [(.72, 40)], "no": [(.58, 40)]}   # NO at 28c in the book: $1.55
+        c.books[p.bracket(5)] = {"yes": [(.72, 40)], "no": [(.58, 40)]}   # NO at 28c in the book
         sigs = STRATEGY.scan(ctx(c))
         self.assertTrue(sigs and all(s.meta["paper_only"] for s in sigs))
+        self.assertFalse([s for s in sigs if p.bracket(5) in {leg.ticker for leg in s.legs}])
+        self.assertIn("disjoint", [s.meta["set"] for s in sigs])
 
     def test_the_scan_plays_out_every_set_even_one_links_got_wrong(self):
         p = Pair()

@@ -73,6 +73,7 @@ can't fill, to prove Kalshi accepts its orders. Want to practice with fake money
 | `exact_link_arb` | "CPI exactly 0.3%" and "CPI above 0.2%" ask about one number. They must agree. Buys a set that must pay $1 when it costs less. | Low, once checked. A report that never comes out breaks it. | Paper. Real money only for releases a person has checked |
 | `range_link_arb` | "BTC between $71,700 and $71,799.99 at 2 PM" and "BTC above $71,699.99 at 2 PM" ask about one price. They must agree. Buys a set that must pay when it costs less. 8 coins. | Low, once checked. Gaps are rare and small. | Paper. Real money only for pairs a person has checked |
 | `bracket_arb` | Ranges that cover every result: one must win. Buys all when they cost less than $1. | Low, once checked. | Paper, until a person checks it |
+| `metal_link_arb` | At month end, the monthly series and the daily (or Friday's weekly) one both ask "gold above $X at 5 PM?". They should agree. Buys a pair that must pay $1 when it costs less. Gold and silver. | Medium. The two settle apart, and Kalshi can change the price source. | Paper only, always |
 | `favorites` | Buys price ranges that won more often than their price in past markets. | Medium. A bet, not a sure thing. | Paper |
 | `mentions` | "Will X say Y?" markets. Uses how often each word was said before. | Higher. | Paper |
 | `longshot_fade` | Buys NO on cheap YES bets, only where cheap YES lost more often than its price in past markets. | High. One longshot that hits wipes out about 19 wins. | Paper |

@@ -59,6 +59,15 @@ class ClientTests(unittest.TestCase):
         self.assertEqual(client.price({}, "close"), 0.0)
         self.assertEqual(client.candle_close({"yes_ask": {"close": "0.8000", "high": "1.0000"}}, "yes_ask"), 0.8)
 
+    def test_absurd_prices_read_as_no_price(self):
+        # Too big for a float, or not a number at all: no price, never a crash or a price of inf.
+        for d, field in (({"yes_bid": 10 ** 400}, "yes_bid"), ({"yes_bid_dollars": 10 ** 400}, "yes_bid"),
+                         ({"yes_bid_dollars": "1e400"}, "yes_bid"), ({"yes_bid_dollars": "nan"}, "yes_bid"),
+                         ({"yes_bid": "inf"}, "yes_bid"), ({"yes_bid": float("nan")}, "yes_bid"),
+                         ({"close": "-1e999"}, "close")):
+            self.assertEqual(client.price(d, field), 0.0, d)
+        self.assertEqual(client.to_dollars(10 ** 400), 0.0)
+
     def test_markets_by_ticker_falls_back_to_one_by_one(self):
         k = client.Kalshi()
         k.markets = lambda limit=None, **p: []  # the batch filter came back empty on the real API
