@@ -2,6 +2,19 @@
 
 Newest first. Each 2-hour check-in adds one entry: what it checked, what it found, links.
 
+## 2026-10-29 08:50 UTC — check-in: all green; idea #6 sports links tested, rejected
+
+- Checked: CI green on main fa4853a. Latest market-check is the clean daily run of
+  2026-10-28 18:53 UTC. No status report yet: the server is still being set up.
+- Research is back on (the usage limit reset at 09:00 UTC). Idea #6, other links: sports
+  title chains, where YES on one series means YES on another (champion, then conference
+  champion, then playoffs; conference champion, then title game). 45 pairs picked by hand,
+  65 seasons, 1,397 team pairs. 105,974 hours of history: never under $1 after fees, never
+  crossed even before fees. Today: 0 gaps in 434 open pairs. Rejected. Probe on branch
+  `probe/links`; notes in [PR #25](https://github.com/rohanmalhotra0/kal/pull/25).
+  Fed and crypto links are still untested.
+- Waiting on the owner's `sudo kal doctor` output.
+
 ## 2026-10-29 06:50 UTC — check-in: all green, nothing new
 
 - Checked: CI green on main bf7f34e. Latest market-check is the clean daily run of
