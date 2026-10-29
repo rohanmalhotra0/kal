@@ -110,7 +110,7 @@ status: **testing** (add the PR link), **built**, or **rejected** (say why in on
   row has even a lower bound above 0. Best: NO 95c+ with tight spreads at 24 h, +0.1% (worst
   -1.6%). The verdict stands: no taker edge.
 
-**6. Related markets that must agree** - date ladders built, paper until checked (`date_ladder_arb`); sports title chains rejected 2026-10-29; Fed and crypto links untested
+**6. Related markets that must agree** - date ladders built, paper until checked (`date_ladder_arb`); Fed rate vs decision built, paper only (`fed_link_arb`); sports title chains and crypto price links rejected 2026-10-29
 - What: linked prices must fit. E.g. "Fed cuts in Dec" vs "rate below X in Jan".
 - Evidence: medium. Saguillo et al. found this on Polymarket. Finding the links is the hard part.
 - Risk: medium-high. If the rules differ (source, time, rounding), both legs can lose.
@@ -151,9 +151,39 @@ status: **testing** (add the PR link), **built**, or **rejected** (say why in on
     prices, which fees turn into a loss.
   - 0 settled results broke a link.
   - Not built. The probe is on branch `probe/links` (never merged).
-- Still untested: Fed decision vs rate level for the same meeting, and a crypto price at a
-  set time vs that month's high. They are among Kalshi's most traded markets, so gaps are
-  even less likely.
+- Fed decision vs rate level, tested 2026-10-29 on real data: built as `fed_link_arb`, paper only.
+  - What: for one meeting, KXFED asks "above 4.00% after it?" and KXFEDDECISION asks what the
+    Fed does (cut >25bps, cut 25bps, hold, hike 25bps, hike >25bps). Call the rate before the
+    meeting U (the last meeting's KXFED result). "Above U" is YES only on a hike. "Above
+    U - 0.25" is NO only on a cut. So some sets pay $1 if the rate moves only at that meeting,
+    like NO "above U" + NO "hold".
+  - 14 settled meetings (Dec 2024 - Oct 2026): the decision matched U and the rate after it
+    every time. 0 broken links.
+  - 2026's meetings: 17 hours had a gap after fees that passes the bot's rules (pays within
+    30 days, 20%+ a year, 1%+ return), with real volume. Best: Aug 24, NO "above 3.75%" (Sep)
+    at 56c + NO "hold" at 33c, with 6,736 and 3,686 contracts traded that hour. Also Oct 7
+    (78c + 17c) and Feb 23 (YES "above 3.50%" at 91c + NO "hold" at 6c).
+  - Today (Dec meeting, U 4.00%): nothing under $1.
+  - It uses only "above U" and "above U - 0.25". Those hold however a 50bp move is counted.
+  - Why paper: a rate move between meetings (an emergency cut) makes U wrong. If a meeting
+    is cancelled or moved, "hold" resolves YES whatever the Fed does, so a rate change on the
+    new date breaks NO "above U" + NO "hold" and 3 other shapes. And the
+    decision rules have a typo: a 50bp hike resolves "Hike 25 bps" to Yes and "Hike 25 bps"
+    to No. The "Cut >25bps" and "Hike >25bps" markets' own rules even say "Cut of 25bps" and
+    "Hike of 25bps" (the ">" is lost). Real money needs a person to pin the meeting in
+    `fed_link_arb.VERIFIED`. Even then, a link that looks too good to be true (over 25%
+    profit) keeps the meeting on paper.
+  - Live check (2026-10-29): the strategy reads the Dec meeting right (rate before 4.00%,
+    14 links, cheapest $1.01, so nothing to buy).
+  - Probes: branches `probe/fed-crypto` and `probe/fedlink-check` (never merged).
+- Crypto price links, tested 2026-10-29 on real data: rejected.
+  - What: one-touch "how high (or low) this month or year" series nest in theory. A hit in a
+    short window is a hit in the long one too.
+  - But their rules differ: some count only weekday 8 AM-7 PM prices, some use a simple
+    average, and one ticker's strike disagrees with its rules.
+  - 2 settled 2024 BTC pairs broke the link: BTCMAXY-24DEC31-75000 YES while -70000 NO, and
+    BTCMAXM-24MAY-69999.99 YES while BTCMAXY-24DEC31-70000 NO.
+  - 1,498 nested pairs, 31 passing hours, none safe. Not built. Probe: branch `probe/fed-crypto`.
 
 **7. Scheduled data releases (weather, CPI, jobs)** - weather tested 2026-10-25: rejected
 - What: compare the price with a public forecast before the report comes out.
