@@ -7,6 +7,7 @@ out. Print each pair's rules, settlement sources, strike grids and boundary word
 settled values look (rounded or not), and whether event-level candlesticks work.
 """
 import collections
+import itertools
 import json
 import os
 import re
@@ -474,8 +475,9 @@ def check_results(name, rms, ams, ivs, tick, n, broken):
                 n[(name, "markets whose result disagrees with the value")] += 1
                 broken.append((name, "result vs value", m["ticker"], res(m), m.get("expiration_value"), repr(iv)))
                 break
-    yes_r = sum(1 for m in rms if res(m) == "yes")
-    n[(name, f"range events with {yes_r} YES")] += 1
+    if any(m.get("strike_type") == "between" for m in rms):
+        yes_r = sum(1 for m in rms if res(m) == "yes")
+        n[(name, f"range events with {yes_r} YES")] += 1
     for mx in rms:
         x = ivs.get(mx["ticker"])
         if not x:
@@ -790,6 +792,140 @@ def docs():
             print(f"   early_close {plain(m.get('early_close_condition'))[:300]} | can_close_early {m.get('can_close_early')}")
 
 
+FAMILIES = {
+    "SPX": ["KXINX", "KXINXU", "KXINXY", "KXINXDIRY"],
+    "NDX": ["KXNASDAQ100", "KXNASDAQ100U", "KXNASDAQ100Y", "KXNDQDIRY"],
+    "WTI": ["KXWTI", "KXWTIW", "KXWTIH"],
+    "Gold": ["KXGOLDD", "KXGOLDH", "KXGOLDW", "KXGOLDMON"],
+    "Silver": ["KXSILVERD", "KXSILVERH", "KXSILVERW", "KXSILVERMON"],
+    "Copper": ["KXCOPPERD", "KXCOPPERW", "KXCOPPERMON"],
+    "NatGas": ["KXNATGASD", "KXNATGASW", "KXNATGASMON"],
+    "Brent": ["KXBRENTD", "KXBRENTW", "KXBRENTMON"],
+    "UST2": ["KXUST2A", "KXUST2AD", "KXUST2AM"], "UST5": ["KXUST5A", "KXUST5AD", "KXUST5AM"],
+    "UST7": ["KXUST7A", "KXUST7AD", "KXUST7AM"], "UST10": ["KXUST10A", "KXUST10AD", "KXUST10AM"],
+    "UST30": ["KXUST30A", "KXUST30AD", "KXUST30AM"],
+    "EURUSD": ["KXEURUSD", "KXEURUSDAD", "KXEURUSDAW"], "USDJPY": ["KXUSDJPY", "KXUSDJPYAD", "KXUSDJPYAW"],
+    "GBPUSD": ["KXGBPUSD", "KXGBPUSDAD", "KXGBPUSDAW"], "AUDUSD": ["KXAUDUSD", "KXAUDUSDAD", "KXAUDUSDAW"],
+    "USDCAD": ["KXUSDCADAD", "KXUSDCADAW"], "USDCHF": ["KXUSDCHFAD", "KXUSDCHFAW"],
+    "USDMXN": ["KXUSDMXNAD", "KXUSDMXNAW"], "USDINR": ["KXUSDINRAD", "KXUSDINRAW"],
+    "USDNOK": ["KXUSDNOKAD", "KXUSDNOKAW"], "USDBRL": ["KXUSDBRLAD", "KXUSDBRLAW"],
+    "NZDUSD": ["KXNZDUSD", "KXNZDUSDAD"],
+}
+
+
+def settled_listing(c, s, since, max_pages=15):
+    """{event_ticker: (close ts, event)} of settled events of s that closed after `since`."""
+    out, pages, order = {}, 0, []
+    try:
+        for page in c.event_pages(series_ticker=s, status="settled"):
+            pages += 1
+            for ev in page:
+                t = iso(ev.get("strike_date"))
+                order.append(t)
+                if t and t >= since:
+                    out[ev["event_ticker"]] = (t, ev)
+            if pages >= max_pages:
+                break
+    except KalshiError as e:
+        print(f"   {s}: listing failed {e}")
+    first = [stamp(x) for x in order[:2]]
+    return out, pages, first
+
+
+def families(names, budget_s, since_days):
+    cfg = config.load()
+    c = Kalshi()
+    t0, now = time.time(), time.time()
+    tally, n, broken = Tally(cfg), collections.Counter(), []
+    for fam in names:
+        t_fam = time.time()
+        members = FAMILIES[fam]
+        listings = {}
+        for s in members:
+            lst, pages, first = settled_listing(c, s, now - since_days * DAY)
+            listings[s] = lst
+            print(f"{fam}: {s}: {len(lst)} settled events in range ({pages} pages; first listed {first})")
+        by_close = collections.defaultdict(list)
+        for s, lst in listings.items():
+            for et, (t, ev) in lst.items():
+                by_close[t].append((s, et))
+        groups = sorted(((t, g) for t, g in by_close.items() if len({s for s, _ in g}) > 1), key=lambda x: -x[0])
+        print(f"== {fam}: close times shared by 2+ series: {len(groups)}")
+        shown = set()
+        for t_close, g in groups:
+            if time.time() - t_fam > budget_s:
+                n[(fam, "close times left out (time)")] += 1
+                continue
+            mk = {}
+            for s, et in g:
+                mk[(s, et)] = event_markets(c, et)
+            for (sa, ea), (sb, eb) in itertools.combinations(sorted(g), 2):
+                ma, mb = mk[(sa, ea)], mk[(sb, eb)]
+                if not ma or not mb or sa == sb:
+                    continue
+                # R = the side with ranges, if any
+                if not any(m.get("strike_type") == "between" for m in ma) and any(m.get("strike_type") == "between" for m in mb):
+                    (sa, ea, ma), (sb, eb, mb) = (sb, eb, mb), (sa, ea, ma)
+                key = f"{fam} {sa}~{sb}"
+                ta = collections.Counter(template(m.get("rules_primary")) for m in ma)
+                tb = collections.Counter(template(m.get("rules_primary")) for m in mb)
+                if set(ta) != set(tb):
+                    n[(key, "event pairs whose rules read differently")] += 1
+                    if key not in shown:
+                        shown.add(key)
+                        print(f"   RULES DIFFER {ea} vs {eb}:\n      A {plain(ma[0].get('rules_primary'))[:260]}\n"
+                              f"      B {plain(mb[0].get('rules_primary'))[:260]}")
+                    continue
+                r2a = {plain(m.get("rules_secondary")) for m in ma}
+                r2b = {plain(m.get("rules_secondary")) for m in mb}
+                if r2a != r2b:
+                    n[(key, "event pairs with different secondary rules (priced anyway)")] += 1
+                    if key + "r2" not in shown:
+                        shown.add(key + "r2")
+                        print(f"   R2 DIFFER {ea} vs {eb}:\n      A {sorted(r2a)[0][:400]}\n      B {sorted(r2b)[0][:400]}")
+                tick = tick_of(ma + mb)
+                ivs = {}
+                for m in ma + mb:
+                    v, fl = ivs_of(m)
+                    ivs[m["ticker"]] = v
+                    for f in fl:
+                        n[(key, f"markets: {f}")] += 1
+                check_results(key, ma, mb, ivs, tick, n, broken)
+                opened = max(min(filter(None, (iso(m.get("open_time")) for m in ma)), default=0),
+                             min(filter(None, (iso(m.get("open_time")) for m in mb)), default=0))
+                closes = {iso(m.get("close_time")) for m in ma + mb}
+                if len(closes) != 1:
+                    n[(key, "event pairs whose markets close at different times")] += 1
+                    continue
+                if not opened:
+                    continue
+                settle = max(filter(None, (iso(m.get("expected_expiration_time")) or t_close for m in ma + mb)))
+                start = max(opened, t_close - 8 * DAY)
+                ca = event_candles(c, sa, ea, start, t_close, 60)
+                cb = event_candles(c, sb, eb, start, t_close, 60)
+                if not ca or not cb:
+                    n[(key, "event pairs without candles")] += 1
+                    continue
+                n[(key, "event pairs priced (hourly samples, last 8 days at most)")] += 1
+                L = Linker([(m["ticker"], ivs[m["ticker"]]) for m in ma], [(m["ticker"], ivs[m["ticker"]]) for m in mb], tick)
+                if key + "rel" not in shown:
+                    shown.add(key + "rel")
+                    print(f"   relations {ea}~{eb} (tick {tick:g}): "
+                          f"{json.dumps({f'{a}/{b}': v for (a, b), v in L.n_relations().items()})}; other {len(L.other)}")
+                times = list(range((int(start) // H + 1) * H, int(t_close), H))
+                for t, q, vol in snapshots({**ca, **cb}, times, 2 * H, H):
+                    for f_, mode, pay, legs in L.sets(q):
+                        tally.add(key, f_, mode, pay, legs, t, settle, ea, vol, ivs, tick)
+        keys = sorted({k for (k, *_) in tally.n if k.startswith(fam + " ")})
+        print(f"   {fam}: {time.time() - t_fam:.0f}s; " + "; ".join(f"{k[0]} | {k[1]}: {v}" for k, v in sorted(n.items()) if k[0].startswith(fam)))
+        tally.show(keys)
+        sys.stdout.flush()
+    print(f"\n===== BROKEN LINKS / BAD RESULTS: {len(broken)}")
+    for b in broken[:40]:
+        print("   BROKEN " + json.dumps(b))
+    print(f"families done in {time.time() - t0:.0f}s")
+
+
 def main():
     mode = sys.argv[1] if len(sys.argv) > 1 else "discover"
     if mode == "discover":
@@ -801,6 +937,11 @@ def main():
         budget = float(sys.argv[3]) if len(sys.argv) > 3 else 150
         days = float(sys.argv[4]) if len(sys.argv) > 4 else 60
         history([p for p in CRYPTO + OTHER if p[0] in names], budget, days)
+    elif mode == "families":
+        names = sys.argv[2].split(",") if len(sys.argv) > 2 else list(FAMILIES)
+        budget = float(sys.argv[3]) if len(sys.argv) > 3 else 60
+        days = float(sys.argv[4]) if len(sys.argv) > 4 else 60
+        families(names, budget, days)
     elif mode == "live":
         rounds = int(sys.argv[2]) if len(sys.argv) > 2 else 5
         gap = float(sys.argv[3]) if len(sys.argv) > 3 else 60
