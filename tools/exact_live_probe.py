@@ -30,3 +30,19 @@ for ev in evs:
 print("\nscan:", [(s.event, round(s.cost, 2), s.payout_min, s.meta["paper_only"]) for s in
                   x.STRATEGY.scan(__import__("kal.strategies.base", fromlist=["Context"]).Context(
                       c, __import__("kal.config", fromlist=["DEFAULTS"]).DEFAULTS, "paper", 100, 100, set(), {}, {}))])
+
+import json  # noqa: E402
+print("\n---- the events it couldn't read, in full")
+want = {"KXECONSTATCPIYOY-27JAN13", "KXECONSTATCPICORE-27JAN13", "KXECONSTATCPI-27JAN13",
+        "KXECONSTATCORECPIYOY-27JAN13", "KXCPI-26DEC", "KXCPICORE-26DEC"}
+for ev in evs:
+    if ev.get("event_ticker") in want:
+        e = {k: v for k, v in ev.items() if k != "markets"}
+        print("\nEVENT " + json.dumps(e))
+        ms = sorted(ev.get("markets") or [], key=lambda m: m.get("ticker"))
+        for m in ms[:2]:
+            print("MARKET " + json.dumps(m))
+        for m in ms[2:]:
+            print("  m", m.get("ticker"), m.get("strike_type"), m.get("floor_strike"), m.get("cap_strike"),
+                  json.dumps(m.get("custom_strike")), repr(m.get("yes_sub_title")), m.get("close_time"),
+                  " | " + " ".join(str(m.get("rules_primary")).split())[:160])
