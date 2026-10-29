@@ -78,6 +78,8 @@ say "1. The code in $APP, owned by root (the README's git clone)"
 # No alert may leave this machine: ntfy.sh goes nowhere, and the checks below use a
 # stand-in server instead.
 echo "127.0.0.1 ntfy.sh" | sudo tee -a /etc/hosts >/dev/null
+# The server has no swap (DigitalOcean's default), so memory past the cap stops a process.
+sudo swapoff -a
 sudo rm -rf "$APP"
 sudo mkdir -p "$APP"
 sudo cp -a "$SRC/." "$APP/"
@@ -231,7 +233,29 @@ same "doctor: still only the missing key" "$(grep '^FAIL' <<<"$LAST")" \
   "FAIL  key: no Kalshi key yet. Run: sudo kal setup"
 sudo rm -f "$DATA/kalshi.pem"
 
-say "12. The bot's own log"
+say "12. On, on paper (no key, \$0 budget): a trade run and research fit the memory cap"
+cg=/sys/fs/cgroup/system.slice/kal.service
+events() { sudo awk -v k="$1" '$1 == k {print $2}' "$cg/memory.events"; }
+last_trade() { sudo kal health 2>/dev/null | sed -n 's/^Last trade run: //p'; }
+restarts=$(prop NRestarts)
+kal_run 0 on --budget 0
+api() { curl -s -o /dev/null -w '%{http_code}' -u "kal:$PW" -H 'Content-Type: application/json' -d "$1" "$URL/api/run"; }
+started() { case "$1" in 200|409) return 0 ;; *) return 1 ;; esac; }   # 409: it already runs
+check "research starts" started "$(api '{"kind": "research"}')"
+check "a trade run starts" started "$(api '{"kind": "trade"}')"
+check "the trade run finishes" within 300 sh -c "sudo kal health 2>/dev/null | grep -q '^Last trade run: .* ago'"
+echo "      last trade run: $(last_trade)"
+check "the trade run worked" sh -c "sudo kal health 2>/dev/null | grep -q '^Last trade run: .* ago, ok'"
+sleep 30   # research keeps going: give its big first step time to finish
+same "nothing was stopped for memory" "$(events oom_kill)" 0
+same "it never ran out of memory" "$(events oom)" 0
+same "no restarts" "$(prop NRestarts)" "$restarts"
+peak=$(($(sudo cat "$cg/memory.peak") / 1048576))
+echo "      memory peak: $peak MB of 400 (hit the cap $(events max) times)"
+[ "$peak" -lt 300 ] || echo "::warning::kal's memory peak was $peak MB, close to its 400 MB cap."
+kal_run 0 off
+
+say "13. The bot's own log"
 sudo journalctl -u kal --no-pager -o cat > "$OUT/journal.txt"
 refuse "no Python errors in the service log" grep -q Traceback "$OUT/journal.txt"
 refuse "no Python errors in kal's log files" sudo grep -rqs Traceback "$DATA/logs"
