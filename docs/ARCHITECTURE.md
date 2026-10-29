@@ -41,6 +41,12 @@ tests/            unittest; tests/fakes.py has FakeKalshi, tests/helpers.py has 
 - Every money limit is enforced in `risk.Limits.refuse` and `ledger`, never only in a
   strategy: budget left, max_per_trade, max_per_arb, max_per_event (across runs),
   max_exposure (directional bets), and the half-built basket loss (`partial_loss`).
+- Every strategy reads one list per run: `ctx.client.events(status="open",
+  with_nested_markets="true")`, spelled exactly so (a test checks). All of Kalshi's open
+  events are over 700 MB in Python, so `engine.RunCache` keeps only events with a market
+  due within `horizon_days` (max_arb_days + 1, or a research result's hours before close),
+  plus any the bot holds or can't read, and drops the fields in `engine.UNREAD`. A trade
+  past max_arb_days is never offered (`risk.too_late`), so `kal scan` no longer lists them.
 - Research writes JSON to `$KAL_HOME/research/` (`edges.json` is a list of edges;
   `words.json` holds mention-word history). The engine loads each file into
   `ctx.research[<file stem>]` every run. Demo uses `research-demo/` and `cache-demo/`,

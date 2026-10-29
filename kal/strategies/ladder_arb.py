@@ -25,7 +25,7 @@ import re
 import time
 
 from ..client import fee, price, ts
-from ..risk import yearly_return
+from ..risk import too_late, yearly_return
 from .base import Leg, Signal, Strategy, plain_payouts
 
 MIN_PROFIT = 0.05      # dollars per signal, after fees
@@ -178,7 +178,10 @@ def allocate(ctx, candidates):
     for quotes, make in candidates:
         basket = locked_basket(quotes, min(cap, left), partial)
         if basket:
-            ranked.append((yearly(make(basket)), quotes, make))
+            sig = make(basket)
+            if too_late(sig.closes_at, ctx.cfg):
+                continue   # Limits.refuse turns it down: it mustn't take budget from the rest first
+            ranked.append((yearly(sig), quotes, make))
     for _, quotes, make in sorted(ranked, key=lambda r: -r[0]):
         tickers = {q[0] for q in quotes}
         basket = locked_basket(quotes, min(cap, left), partial)  # resized to what's left

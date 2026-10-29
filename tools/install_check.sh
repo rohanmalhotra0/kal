@@ -25,10 +25,12 @@ bad()    { echo "FAIL  $*"; echo "::error::$*"; fails=$((fails + 1)); }
 check()  { local n=$1; shift; if "$@" >/dev/null 2>&1; then ok "$n"; else bad "$n"; fi; }   # passes if it works
 refuse() { local n=$1; shift; if "$@" >/dev/null 2>&1; then bad "$n"; else ok "$n"; fi; }   # passes if it fails
 same()   { if [ "$2" = "$3" ]; then ok "$1"; else bad "$1: got '$2', want '$3'"; fi; }
-within() {  # seconds cmd... : wait until the command works
-  local n=$1 i; shift
-  for i in $(seq 1 "$n"); do "$@" >/dev/null 2>&1 && return 0; sleep 1; done
-  return 1
+within() {  # seconds cmd... : wait until the command works, trying at least once
+  local end=$((SECONDS + $1)); shift
+  until "$@" >/dev/null 2>&1; do
+    [ "$SECONDS" -lt "$end" ] || return 1
+    sleep 1
+  done
 }
 owner()  { sudo stat -c '%U:%G %a' "$1" 2>/dev/null || echo missing; }
 code()   { curl -s -o /dev/null -w '%{http_code}' "$@"; }
@@ -78,6 +80,8 @@ say "1. The code in $APP, owned by root (the README's git clone)"
 # No alert may leave this machine: ntfy.sh goes nowhere, and the checks below use a
 # stand-in server instead.
 echo "127.0.0.1 ntfy.sh" | sudo tee -a /etc/hosts >/dev/null
+# The server has no swap (DigitalOcean's default), so memory past the cap stops a process.
+sudo swapoff -a
 sudo rm -rf "$APP"
 sudo mkdir -p "$APP"
 sudo cp -a "$SRC/." "$APP/"
@@ -99,7 +103,9 @@ check "kal is running" within 30 up
 sleep 20   # a crash at start would show as a restart by now (RestartSec=5)
 same "no restarts since it started" "$(prop NRestarts)" 0
 same "it runs as the kal user" "$(prop User)" kal
-same "memory cap" "$(prop MemoryMax)" 419430400
+phys=$(python3 -c "import os; print(os.sysconf('SC_PHYS_PAGES') * os.sysconf('SC_PAGE_SIZE'))")
+check "memory cap: 60% of the RAM" python3 -c \
+  "import sys; c, p = map(int, sys.argv[1:]); sys.exit(abs(c - 0.6 * p) > 0.01 * p)" "$(prop MemoryMax)" "$phys"
 same "it starts on boot" "$(systemctl is-enabled kal 2>&1)" enabled
 same "the watchdog timer is on" "$(systemctl is-enabled kal-watch.timer 2>&1)" enabled
 check "the watchdog timer is running" systemctl is-active --quiet kal-watch.timer
@@ -231,10 +237,47 @@ same "doctor: still only the missing key" "$(grep '^FAIL' <<<"$LAST")" \
   "FAIL  key: no Kalshi key yet. Run: sudo kal setup"
 sudo rm -f "$DATA/kalshi.pem"
 
-say "12. The bot's own log"
+say "12. On, on paper (no key, \$0 budget): a trade run and research fit a 2 GB server's cap"
+# This machine is bigger, so give kal a 2 GB server's cap: 60% of its RAM. No swap (step 1).
+sudo mkdir -p /etc/systemd/system/kal.service.d
+printf '[Service]\nMemoryMax=1150M\n' | sudo tee /etc/systemd/system/kal.service.d/2gb.conf >/dev/null
+sudo systemctl daemon-reload
+sudo systemctl restart kal
+check "kal is back, with a 2 GB server's cap" within 30 up
+same "the cap" "$(prop MemoryMax)" $((1150 * 1048576))
+cg=/sys/fs/cgroup/system.slice/kal.service
+last_trade() { sudo kal health 2>/dev/null | sed -n 's/^Last trade run: //p'; }
+t12=$(date +%s) restarts=$(prop NRestarts)
+kal_run 0 on --budget 0
+check "the dashboard answers" within 30 curl -s -o /dev/null "$URL/"
+api() { curl -s -o /dev/null -w '%{http_code}' -u "kal:$PW" -H 'Content-Type: application/json' -d "$1" "$URL/api/run"; }
+started() { case "$1" in 200|409) return 0 ;; *) return 1 ;; esac; }   # 409: it already runs
+running() { curl -s -u "kal:$PW" "$URL/api/state" | json "scheduler.$1.running"; }
+got=$(api '{"kind": "research"}'); check "research starts (HTTP $got)" started "$got"
+got=$(api '{"kind": "trade"}'); check "a trade run starts (HTTP $got)" started "$got"
+same "research is running" "$(running research)" true
+check "the trade run finishes" within 600 sh -c "sudo kal health 2>/dev/null | grep -q '^Last trade run: .* ago'"
+echo "      research still running when it finished: $(running research)"
+trade=$(last_trade)
+echo "      last trade run: $trade"
+case "$trade" in
+  *", ok") ok "the trade run worked" ;;
+  *Connection*|*Timeout*|*"timed out"*|*" 50"[0-9]*) echo "::warning::the trade run failed, Kalshi may be down: $trade" ;;
+  *) bad "the trade run worked: $trade" ;;
+esac
+sleep 60   # research goes on: give its big first steps time
+same "nothing was stopped for memory" \
+  "$(sudo journalctl -u kal --since "@$t12" -o cat --no-pager | grep -c 'killed by the OOM killer')" 0
+same "no restarts" "$(prop NRestarts)" "$restarts"
+peak=$(($(sudo cat "$cg/memory.peak") / 1048576))
+echo "      memory peak: $peak MB of 1150"
+[ "$peak" -lt 900 ] || echo "::warning::kal's memory peak was $peak MB, close to a 2 GB server's 1150 MB cap."
+kal_run 0 off
+
+say "13. The bot's own log"
 sudo journalctl -u kal --no-pager -o cat > "$OUT/journal.txt"
 refuse "no Python errors in the service log" grep -q Traceback "$OUT/journal.txt"
 refuse "no Python errors in kal's log files" sudo grep -rqs Traceback "$DATA/logs"
-prop MemoryCurrent | awk '{printf "      memory now: %d MB (cap 400 MB)\n", $1 / 1048576}'
+prop MemoryCurrent | awk -v cap="$(($(prop MemoryMax) / 1048576))" '{printf "      memory now: %d MB (cap %d MB)\n", $1 / 1048576, cap}'
 
 finish

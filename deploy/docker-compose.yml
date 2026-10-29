@@ -14,7 +14,7 @@ services:
       - "127.0.0.1:8787:8787"   # only this server. Use an SSH tunnel to see it.
     restart: unless-stopped
     stop_grace_period: 330s     # let a trade run finish its basket before stopping
-    mem_limit: 400m             # a 1 GB server: never starve SSH
+    mem_limit: 1200m            # 60% of a 2 GB server: never starve SSH (kal.service has why)
     healthcheck:
       # Is the timer still ticking, and is there disk space? (Local only: no network.)
       test: ["CMD", "python", "-m", "kal", "health", "--alive"]
