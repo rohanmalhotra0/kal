@@ -69,6 +69,7 @@ can't fill, to prove Kalshi accepts its orders. Want to practice with fake money
 | `basket_arb` | Only one outcome can win, so NO on several outcomes pays a known amount. Buys when that costs less. | Very low. Profit is locked in. | Live |
 | `ladder_arb` | "Above 60" can't win unless "above 50" wins. Buys when that pair costs less than $1. | Very low. Profit is locked in. | Paper |
 | `date_ladder_arb` | "Before Aug 1" can't win unless "before Sep 1" wins. Buys when that pair costs less than $1. | Low, once checked. | Paper. Real money only for events whose rules a person has read |
+| `fed_link_arb` | If the Fed holds, the rate stays the same. So the Fed's decision and the rate after the meeting must agree. Buys a set that must pay $1 when it costs less. | Low, once checked. A rate move between meetings breaks it. | Paper. Real money only for meetings a person has checked |
 | `bracket_arb` | Ranges that cover every result: one must win. Buys all when they cost less than $1. | Low, once checked. | Paper, until a person checks it |
 | `favorites` | Buys price ranges that won more often than their price in past markets. | Medium. A bet, not a sure thing. | Paper |
 | `mentions` | "Will X say Y?" markets. Uses how often each word was said before. | Higher. | Paper |
