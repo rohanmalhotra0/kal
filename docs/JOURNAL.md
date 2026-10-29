@@ -2,6 +2,31 @@
 
 Newest first. Each 2-hour check-in adds one entry: what it checked, what it found, links.
 
+## 2026-10-29 16:37 UTC — memory fix, real install test, exact-value links on paper
+
+- Merged [PR #30](https://github.com/rohanmalhotra0/kal/pull/30): idea #16, known results,
+  rejected. A result that is already known is already priced at $1.
+- Merged [PR #31](https://github.com/rohanmalhotra0/kal/pull/31): `install-check` runs the
+  real install on a fresh Ubuntu 24.04 machine on every code change and every Monday. It
+  found the Python packages world-writable (any user could change the code the bot runs
+  with the key) and watchdog false alarms. Both fixed.
+- Merged [PR #32](https://github.com/rohanmalhotra0/kal/pull/32): memory. Each trade run
+  held all 15,601 open events (733 MB) under a 400 MB cap with no swap, so once on, every
+  trade run would have been killed. Now it keeps only events due within `max_arb_days` + 1
+  (156 MB). In the real service, a trade run and research together peaked at 497 MB; a
+  trade run takes 17 s. The cap is 60% of RAM, and the docs say 2 GB server. A test runs
+  every arbitrage strategy 2 to 400 days out: same accepted trades with and without it.
+- Merged [PR #33](https://github.com/rohanmalhotra0/kal/pull/33): idea #17, `exact_link_arb`,
+  paper only. CPI and jobs "exactly X%" vs "above X%": 533 settled sets all paid $1, and 84
+  had gaps that pass the rules. Paper only: if a report never comes out, a set can pay $0.
+- Started idea #19: one price at one moment, asked two ways (e.g. Bitcoin "between" vs
+  "above" at 5 PM).
+- Checked (also the 14:58 check-in): CI green on main b6a3bf3. Market-check with the new
+  code on the real API: self-test, scan and research pass. No status report yet: the
+  private status repo `kal-status` doesn't exist or isn't shared with Claude.
+- Owner: update the server with `cd /opt/kal && sudo git pull && sudo bash deploy/install.sh`.
+  Still waiting on the owner's `sudo kal doctor` output.
+
 ## 2026-10-29 14:40 UTC — Fed links built on paper; CPI and jobs rejected; new ideas
 
 - Merged [PR #28](https://github.com/rohanmalhotra0/kal/pull/28): `fed_link_arb`, paper only.
