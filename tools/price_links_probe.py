@@ -542,7 +542,7 @@ def candidate_events(now, since_days, hourly_per_day):
     return out
 
 
-def history(pairs, budget_s, since_days):
+def history(pairs, budget_s, since_days, hourly_per_day=None, hourly_only=False):
     cfg = config.load()
     c = Kalshi()
     t_start = time.time()
@@ -557,7 +557,10 @@ def history(pairs, budget_s, since_days):
                       f"-> {fee_problem(info.get('fee_type'), info.get('fee_multiplier')) or 'the bot can price it'}")
             except Exception as e:
                 print(f"{s}: series info failed: {e}")
-        cand = candidate_events(now, since_days, 0 if name in DAILY_ONLY else HOURLY_PER_DAY)
+        per_day = HOURLY_PER_DAY if hourly_per_day is None else hourly_per_day
+        cand = candidate_events(now, since_days, 0 if name in DAILY_ONLY else per_day)
+        if hourly_only:
+            cand = [x for x in cand if x[0] == "hourly"]
         # Newest first, one 5pm event then two hourly ones, so the time budget covers both kinds.
         fives, hours = [x for x in cand if x[0] == "5pm"], [x for x in cand if x[0] == "hourly"]
         order = []
@@ -828,6 +831,7 @@ FAMILIES = {
     "USDMXN": ["KXUSDMXNAD", "KXUSDMXNAW"], "USDINR": ["KXUSDINRAD", "KXUSDINRAW"],
     "USDNOK": ["KXUSDNOKAD", "KXUSDNOKAW"], "USDBRL": ["KXUSDBRLAD", "KXUSDBRLAW"],
     "NZDUSD": ["KXNZDUSD", "KXNZDUSDAD"],
+    "AAAGas": ["KXAAAGASD", "KXAAAGASW", "KXAAAGASM"],
 }
 
 
@@ -968,7 +972,9 @@ def main():
         names = sys.argv[2].split(",") if len(sys.argv) > 2 else [p[0] for p in CRYPTO]
         budget = float(sys.argv[3]) if len(sys.argv) > 3 else 150
         days = float(sys.argv[4]) if len(sys.argv) > 4 else 60
-        history([p for p in CRYPTO + OTHER if p[0] in names], budget, days)
+        per_day = int(sys.argv[5]) if len(sys.argv) > 5 else None
+        history([p for p in CRYPTO + OTHER if p[0] in names], budget, days, per_day,
+                len(sys.argv) > 6 and sys.argv[6] == "hourly")
     elif mode == "families":
         names = sys.argv[2].split(",") if len(sys.argv) > 2 else list(FAMILIES)
         budget = float(sys.argv[3]) if len(sys.argv) > 3 else 60
