@@ -155,7 +155,8 @@ status: **testing** (add the PR link), **built**, or **rejected** (say why in on
   - What: for one meeting, KXFED asks "above 4.00% after it?" and KXFEDDECISION asks what the
     Fed does (cut >25bps, cut 25bps, hold, hike 25bps, hike >25bps). Call the rate before the
     meeting U (the last meeting's KXFED result). "Above U" is YES only on a hike. "Above
-    U - 0.25" is NO only on a cut. So some sets always pay $1, like NO "above U" + NO "hold".
+    U - 0.25" is NO only on a cut. So some sets pay $1 if the rate moves only at that meeting,
+    like NO "above U" + NO "hold".
   - 14 settled meetings (Dec 2024 - Oct 2026): the decision matched U and the rate after it
     every time. 0 broken links.
   - 2026's meetings: 17 hours had a gap after fees that passes the bot's rules (pays within
@@ -164,10 +165,13 @@ status: **testing** (add the PR link), **built**, or **rejected** (say why in on
     (78c + 17c) and Feb 23 (YES "above 3.50%" at 91c + NO "hold" at 6c).
   - Today (Dec meeting, U 4.00%): nothing under $1.
   - It uses only "above U" and "above U - 0.25". Those hold however a 50bp move is counted.
-  - Why paper: a rate move between meetings (an emergency cut) makes U wrong. And the
+  - Why paper: a rate move between meetings (an emergency cut) makes U wrong. If a meeting
+    is cancelled or moved, "hold" resolves YES whatever the Fed does, so a rate change on the
+    new date breaks NO "above U" + NO "hold" and 3 other shapes. And the
     decision rules have a typo: a 50bp hike resolves "Hike 25 bps" to Yes and "Hike 25 bps"
     to No. The "Cut >25bps" market's own rules even say "Cut of 25bps" (the ">" is lost).
-    Real money needs a person to pin the meeting in `fed_link_arb.VERIFIED`.
+    Real money needs a person to pin the meeting in `fed_link_arb.VERIFIED`. Even then, a
+    link that looks too good to be true (over 25% profit) keeps the meeting on paper.
   - Probe: branch `probe/fed-crypto` (never merged).
 - Crypto price links, tested 2026-10-29 on real data: rejected.
   - What: one-touch "how high (or low) this month or year" series nest in theory. A hit in a

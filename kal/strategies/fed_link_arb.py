@@ -8,7 +8,7 @@ Call the rate before the meeting U (the last meeting's KXFED result). A hold kee
 at U, any hike lifts it above U, any cut takes it to U - 0.25 or lower. So:
   - "above U" is YES exactly when the Fed hikes;
   - "above U - 0.25" is YES exactly when it doesn't cut.
-That gives sets where exactly one contract pays $1, whatever the Fed does:
+That gives sets where exactly one contract pays $1, if the rate moves only at this meeting:
   YES "above U" + YES C26, C25, H0;      NO "above U" + YES H25, H26;
   YES "above U - 0.25" + YES C25, C26;   NO "above U - 0.25" + YES H0, H25, H26.
 And pairs that pay at least $1: YES "above K" + NO on a decision that puts the rate above K,
@@ -20,9 +20,13 @@ would need that, so they are never used. It assumes each move is a multiple of 2
 Real Kalshi data (docs/RESEARCH.md, idea #6, 2026-10-29): 14 settled meetings, 0 broken
 links. In 2026's meetings, 17 hours had a gap after fees that passes the bot's rules.
 
-Paper only. U comes from the last meeting, so a rate move between meetings (an emergency
-cut) breaks every link, and the decision rules have a typo. Real money only ever goes to a
-meeting a person pinned in VERIFIED, with its U and its rules word for word. It is empty.
+Paper only. The links need the rate to move only at this meeting, on its date. An emergency
+move between meetings makes U wrong, and the settled history can't show it. If the meeting is
+cancelled or moved, "Fed maintains rate" resolves YES whatever the Fed does, so a rate change
+on the new date breaks four of the shapes (NO "above U" + NO hold among them). And the
+decision rules have a typo. Real money only ever goes to a meeting a person pinned in
+VERIFIED, with its U and its rules word for word, and even then never while a link looks too
+good to be true (too_good: the sign U is wrong). It is empty.
 
 It fails closed. It looks at the next meeting only, and trades it only if:
   - no other Fed event comes first, and the last meeting settled cleanly (one clear rate)
@@ -37,6 +41,7 @@ import datetime
 import re
 import time
 
+from .. import risk
 from ..client import price, settled_result
 from .base import Leg, Signal, Strategy, plain_payouts
 from .ladder_arb import (MIN_TIME_LEFT, allocate, close_ts, locked_basket, quote, strike, thinnest_first,
@@ -54,8 +59,9 @@ SAME_MEETING = 3600   # seconds: both events close within this of each other (4 
 DAY = 86400
 
 # Real money only for these: rate event ticker -> {"rate_before": U, "rules": rules_key(...)}.
-# Add one only after reading every market's rules in full, by pull request. Empty: every
-# meeting trades on paper.
+# Add one only after reading every market's rules in full, by pull request. A pin covers its
+# meeting only while it's held on its date with the rate at the pinned U: take it out if the
+# Fed moves between meetings or the date moves. Empty: every meeting trades on paper.
 VERIFIED = {}
 UNVERIFIED = "no Fed meeting checked by hand yet (fed_link_arb.VERIFIED is empty)"
 
@@ -283,7 +289,8 @@ def rate_before(settled, meet):
 
 def links(meet, u):
     """Every set and pair at K = U and K = U - 0.25, each [(market, side)]: one contract of
-    each pays at least $1 whatever the Fed does. [] if either strike is missing."""
+    each pays at least $1, if the rate moves only at this meeting. [] if either strike is
+    missing."""
     out, dec = [], meet["decisions"]
     for off, above in ABOVE.items():
         f = meet["strikes"].get(u + off)
@@ -307,6 +314,18 @@ def _listed(legs):
             return 2.0
         total += p
     return total
+
+
+def too_good(all_links, quoted):
+    """True if any link costs less than 1 / (1 + risk.MAX_ARB_ROI), by listed prices or by
+    its order book: too good to be true. The likeliest reason is a wrong U (the Fed moved
+    between meetings, which the settled history can't show). Then even a pinned meeting
+    trades on paper only."""
+    floor = 1 / (1 + risk.MAX_ARB_ROI)
+    if any(_listed(legs) < floor for legs in all_links):
+        return True
+    return any(all(q[2] is not None for q in quotes) and sum(q[2] for q in quotes) < floor
+               for _, quotes in quoted)
 
 
 def rules_key(meet, u):
@@ -365,11 +384,13 @@ class FedLinkArb(Strategy):
             for m, _ in legs:
                 if m["ticker"] not in books:
                     books[m["ticker"]] = ctx.client.orderbook(m["ticker"])
+        quoted = [(legs, [(m["ticker"], side, *quote(books[m["ticker"]], side)) for m, side in legs])
+                  for legs in hot]
         pin = VERIFIED.get(meet["rate_event"])
-        checked = isinstance(pin, dict) and pin.get("rate_before") == u / 4 and pin.get("rules") == rules_key(meet, u)
+        checked = (isinstance(pin, dict) and pin.get("rate_before") == u / 4
+                   and pin.get("rules") == rules_key(meet, u) and not too_good(links(meet, u), quoted))
         candidates = []
-        for legs in hot:
-            quotes = [(m["ticker"], side, *quote(books[m["ticker"]], side)) for m, side in legs]
+        for legs, quotes in quoted:
             meta = {"rate_event": meet["rate_event"], "decision_event": meet["decision_event"],
                     "meeting": meet["day"].isoformat(), "rate_before": u / 4,
                     "strike": strike(legs[0][0], "floor_strike"),

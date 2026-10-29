@@ -505,6 +505,12 @@ class ScanTests(unittest.TestCase):
         off = {rate_ticker(evs, 4.25), rate_ticker(evs, 3.50)}
         self.assertFalse({leg.ticker for leg in sigs[0].legs} & off)
 
+    def test_too_good_to_be_true_prices_are_spotted(self):
+        normal = fed_link_arb.meeting(*meeting())
+        self.assertFalse(fed_link_arb.too_good(fed_link_arb.links(normal, 16), []))
+        cheap = fed_link_arb.meeting(*meeting(rates={3.75: (.04, .06)}, decisions={"C25": (.24, .26)}))
+        self.assertTrue(fed_link_arb.too_good(fed_link_arb.links(cheap, 16), []))   # a 3-leg set at 34c
+
     def test_signals_stay_on_paper(self):
         sigs = self.scan(gap_meeting())
         self.assertTrue(sigs and all(s.meta["paper_only"] for s in sigs))
@@ -649,6 +655,20 @@ class EngineTests(TempHome):
         self.assertEqual({(o[0], o[1]) for o in c.orders},
                          {(rate_ticker(evs, 4.00), "no"), (code_ticker(evs, "H0"), "no")})
         self.assertEqual(c.orders[0][2], c.orders[1][2])
+
+    def test_a_pinned_meeting_that_looks_too_good_stays_on_paper(self):
+        # An emergency cut 4.00 -> 3.75 that the settled history can't show: the market now
+        # prices a hold at 3.75. Some links look far too good, the sign U is wrong, so even a
+        # pinned meeting buys nothing real (critic, round 3).
+        config.update({"strategies": {"fed_link_arb": {"mode": "live"}}})
+        rates = {3.50: (.74, .76), 3.75: (.04, .06), 4.00: (.01, .02), 4.25: (.01, .02)}
+        decisions = {"C26": (.01, .02), "C25": (.24, .26), "H0": (.69, .71), "H25": (.04, .06), "H26": (.01, .02)}
+        evs = meeting(20, rates=rates, decisions=decisions)
+        self.pin(evs)
+        c = fake_for(evs)
+        s = engine.run_once(c)
+        self.assertTrue(s["ok"], s)
+        self.assertEqual((s["live_trades"], c.orders), (0, []))
 
     def test_a_meeting_too_far_off_is_refused(self):
         config.update({"strategies": {"fed_link_arb": {"mode": "paper"}}})
