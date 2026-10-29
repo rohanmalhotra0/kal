@@ -275,15 +275,28 @@ status: **testing** (add the PR link), **built**, or **rejected** (say why in on
   - These markets stop trading by 4-7 PM local time, and game markets close when the game
     ends (their close_time). Rejected. Probe: branch `probe/known-result` (never merged).
 
-**17. The same question in two series (not crypto)** - untested
-- What: two series asking one thing in different words. Their prices must add up. Example:
-  "Number of Fed cuts in 2026: exactly 0" vs cut or no cut at the Dec meeting. On
-  2026-10-29, YES "exactly 0" + YES both Dec cut markets cost 98.4c for a $1 set. It pays
-  on Dec 31, so that's about 10% a year before fees: under the bot's 20%.
-- Evidence: weak. Crypto's look-alikes broke (their rules differ). Sports chains never gapped.
-- Risk: medium-high. Small rule differences (dates, sources, emergency moves) break the link.
-- Test: pick pairs by hand from the series list, read both rules in full, then count hourly
-  gaps after fees as in idea #6.
+**17. The same question in two series (not crypto)** - tested 2026-10-29: built as `exact_link_arb` (paper only)
+- What: two series asking one thing in different words. Their prices must add up.
+- Found: "Is CPI exactly X%?" (KXECONSTATCPI, and its core, 12-month and jobless twins) vs
+  "Is CPI above X%?" (KXCPI, KXCPICORE, KXCPIYOY, KXCPICOREYOY, KXU3). The number comes out
+  to one decimal, so YES "exactly X" + YES "above X" + NO "above X - 0.1" always pays $1.
+  Two 2-leg pairs pay at least $1 too.
+- Data (real API, all months listed in both series, Dec 2025 to Dec 2026):
+  - 533 sets settled. Every one paid exactly $1.
+  - Hourly prices in the 10 days before each release: 1,714 basket-hours had a gap after
+    fees, and 1,032 hours in 84 sets passed the bot's rules. The biggest gaps were 10-17c.
+  - Candles show no depth. The "exactly" markets are thin.
+- The trap: a report that never comes out. The two series follow different rules then.
+  An "exactly" market expires at most 3 months after the planned release, and with no value
+  Kalshi sets the payouts. An "above" market waits up to 6 months after a shutdown. For
+  October 2025 (never published), Kalshi settled the "above" markets on values it chose
+  (CPI 12-month 3.3%, jobless 4.4%). Then the first set can pay $0.
+- Built paper-only, failing closed on any wording change. Real money only for a release a
+  person pins in `VERIFIED` after checking no shutdown threatens it.
+- Live check (2026-10-29): it reads 12 release pairs (Oct, Nov and Dec 2026), in both of
+  Kalshi's forms (the newer "exactly" events carry the release day, E0.2 tickers). Nothing
+  passes the rules today; the closest sets were 97-98c listed, before fees.
+- Probes: branches `probe/dupes`, `probe/exact-rules`, `probe/exact-live` (never merged).
 
 **18. Paper results vs backtests** - untested (needs 4+ weeks of paper trading on the server)
 - What: compare each paper strategy's real results with what its backtest promised. For

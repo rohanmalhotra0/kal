@@ -48,6 +48,7 @@ DEFAULTS = {
         "ladder_arb": {"mode": "paper"},
         "date_ladder_arb": {"mode": "paper"},
         "fed_link_arb": {"mode": "paper"},
+        "exact_link_arb": {"mode": "paper"},
         "bracket_arb": {"mode": "paper", "verified": False},
         "favorites": {"mode": "paper"},
         "mentions": {"mode": "paper"},
