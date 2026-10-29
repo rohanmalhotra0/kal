@@ -19,9 +19,10 @@ CPI and jobs reports), the two series follow different rules. An "exactly" marke
 at most three months after the planned release, and if no value comes, Kalshi sets the
 payouts. An "above" market waits up to six months after the shutdown, and Kalshi settled
 October 2025's on values it chose. Then the first set can pay $0. Real money only goes to a
-release a person pinned in VERIFIED, with every market's rules word for word, after checking
-that no shutdown threatens it, and even then never while a link looks too good to be true
-(too_good). It is empty.
+release a person pinned in VERIFIED, with every market's rules word for word and its dates
+(a moved release is back on paper), after checking that no shutdown threatens it, and even
+then never while a link looks too good to be true (too_good, at scan and again just before
+buying). It is empty.
 
 It fails closed. A pair of events trades only if:
   - every market reads exactly as Kalshi words them now, with only the number and the
@@ -249,26 +250,35 @@ def pairs(events):
     month, closing together. Each "exactly" event once; anything doubtful is left out."""
     by_ticker = {}
     for ev in events if isinstance(events, list) else []:
-        if isinstance(ev, dict) and ev.get("event_ticker"):
+        if isinstance(ev, dict) and isinstance(ev.get("event_ticker"), str) and ev["event_ticker"]:
             by_ticker.setdefault(ev["event_ticker"], []).append(ev)
     out = []
     for et, evs in by_ticker.items():
-        series = et.split("-", 1)[0]
-        if series not in SERIES or len(evs) != 1:
-            continue
-        ex = exact_event(evs[0], series)
-        if not ex:
-            continue
-        name = SERIES[series]["ladder"]
-        ladder = by_ticker.get(f"{name}-{_suffix(datetime.date(*ex['month'], 1))}") or []
-        ab = above_event(ladder[0], name) if len(ladder) == 1 else None
-        if not ab or ab["month"] != ex["month"]:
-            continue
-        if abs(ab["close"] - ex["close"]) > SAME_RELEASE or _utc_day(ab["close"]) != _utc_day(ex["close"]):
-            continue
-        out.append({"exact": ex, "above": ab, "series": series, "first_close": min(ab["close"], ex["close"]),
-                    "last_close": max(ab["close"], ex["close"])})
+        try:
+            pair = _pair(et, evs, by_ticker)
+        except (ArithmeticError, AttributeError, LookupError, TypeError, ValueError):
+            pair = None   # odd data (a year 0, a date out of range): one event mustn't hide the rest
+        if pair:
+            out.append(pair)
     return out
+
+
+def _pair(et, evs, by_ticker):
+    series = et.split("-", 1)[0]
+    if series not in SERIES or len(evs) != 1:
+        return None
+    ex = exact_event(evs[0], series)
+    if not ex:
+        return None
+    name = SERIES[series]["ladder"]
+    ladder = by_ticker.get(f"{name}-{_suffix(datetime.date(*ex['month'], 1))}") or []
+    ab = above_event(ladder[0], name) if len(ladder) == 1 else None
+    if not ab or ab["month"] != ex["month"]:
+        return None
+    if abs(ab["close"] - ex["close"]) > SAME_RELEASE or _utc_day(ab["close"]) != _utc_day(ex["close"]):
+        return None
+    return {"exact": ex, "above": ab, "series": series, "first_close": min(ab["close"], ex["close"]),
+            "last_close": max(ab["close"], ex["close"])}
 
 
 def links(pair):
@@ -309,9 +319,11 @@ def too_good(all_links, quoted):
 
 
 def rules_key(pair):
-    """The rules VERIFIED pins: every market of both events, word for word (spacing aside)."""
+    """The rules VERIFIED pins: every market of both events, word for word (spacing aside),
+    and its dates, so a release that moves (a shutdown) goes back to paper."""
     markets = list(pair["exact"]["values"].values()) + list(pair["above"]["strikes"].values())
-    return "\n".join(f"{m['ticker']}: {' '.join(str(m.get('rules_primary') or '').split())} | "
+    return "\n".join(f"{m['ticker']} {m.get('close_time')} {m.get('expected_expiration_time')}: "
+                     f"{' '.join(str(m.get('rules_primary') or '').split())} | "
                      f"{' '.join(str(m.get('rules_secondary') or '').split())}"
                      for m in sorted(markets, key=lambda m: m["ticker"]))
 
@@ -368,6 +380,8 @@ class ExactLinkArb(Strategy):
             checked = (isinstance(pin, dict) and pin.get("above") == ab["event"] and pin.get("rules") == rules_key(pair)
                        and not too_good(every, quoted))
             for legs, quotes in quoted:
+                if not checked and any(m["ticker"] in ctx.held_paper for m, _ in legs):
+                    continue   # paper only, and already open on paper: the engine would skip it
                 meta = {"exact_event": ex["event"], "above_event": ab["event"], "month": _month(ex["month"]),
                         "link": " + ".join(f"{side.upper()} {m['ticker']}" for m, side in legs),
                         "paper_only": not checked, "first_close": pair["first_close"]}
@@ -382,6 +396,8 @@ class ExactLinkArb(Strategy):
         if any(leg.ticker in ctx.held for leg in sig.legs):
             return None   # bought by an earlier signal this run
         quotes = [(leg.ticker, leg.side, *quote(ctx.client.orderbook(leg.ticker), leg.side)) for leg in sig.legs]
+        if any(q[2] is None for q in quotes) or sum(q[2] for q in quotes) < 1 / (1 + risk.MAX_ARB_ROI):
+            return None   # too good to be true now: scan would keep the release on paper
         basket = locked_basket(quotes, self._budget(ctx), float(ctx.cfg["max_per_trade"]))
         if not basket:
             return None

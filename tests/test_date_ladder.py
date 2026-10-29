@@ -482,6 +482,16 @@ class DateLadderTests(unittest.TestCase):
         ev["markets"][0]["status"] = "closed"
         self.assertEqual(self.scan(ev), [])
 
+    def test_a_paper_pair_leaves_what_is_already_open_on_paper(self):
+        # A live scan (another event pinned): an unpinned pair that reuses a paper holding
+        # would take its tickers from the next best pair, then the engine would skip it.
+        ev = date_event()
+        held = frozenset({ev["markets"][0]["ticker"]})
+        live = Context(fake_for(ev), dict(config.DEFAULTS, max_per_arb=30.0), "live", 100.0, 100.0, set(), {}, {},
+                       held_paper=held)
+        self.assertFalse([leg.ticker for s in date_ladder_arb.STRATEGY.scan(live) for leg in s.legs
+                          if leg.ticker in held])
+
     def test_budget_and_arb_cap_hold(self):
         sig = self.scan(date_event(), max_per_arb=5.0)[0]
         self.assertLessEqual(sig.cost, 5.0 + 1e-9)

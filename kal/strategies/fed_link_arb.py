@@ -25,8 +25,9 @@ move between meetings makes U wrong, and the settled history can't show it. If t
 cancelled or moved, "Fed maintains rate" resolves YES whatever the Fed does, so a rate change
 on the new date breaks four of the shapes (NO "above U" + NO hold among them). And the
 decision rules have a typo. Real money only ever goes to a meeting a person pinned in
-VERIFIED, with its U and its rules word for word, and even then never while a link looks too
-good to be true (too_good: the sign U is wrong). It is empty.
+VERIFIED, with its U, its rules word for word and its dates (a moved meeting is back on
+paper), and even then never while a link looks too good to be true (too_good, at scan and
+again just before buying: the sign U is wrong). It is empty.
 
 It fails closed. It looks at the next meeting only, and trades it only if:
   - no other Fed event comes first, and the last meeting settled cleanly (one clear rate)
@@ -61,7 +62,8 @@ DAY = 86400
 # Real money only for these: rate event ticker -> {"rate_before": U, "rules": rules_key(...)}.
 # Add one only after reading every market's rules in full, by pull request. A pin covers its
 # meeting only while it's held on its date with the rate at the pinned U: take it out if the
-# Fed moves between meetings or the date moves. Empty: every meeting trades on paper.
+# Fed moves between meetings. A moved date changes rules_key, so that pin stops by itself.
+# Empty: every meeting trades on paper.
 VERIFIED = {}
 UNVERIFIED = "no Fed meeting checked by hand yet (fed_link_arb.VERIFIED is empty)"
 
@@ -329,9 +331,10 @@ def too_good(all_links, quoted):
 
 def rules_key(meet, u):
     """The rules VERIFIED pins for a meeting: every market the links at U can trade, word
-    for word (spacing aside)."""
+    for word (spacing aside), and its dates, so a meeting that moves goes back to paper."""
     markets = [meet["strikes"][u], meet["strikes"][u - 1]] + [meet["decisions"][c] for c in CODES]
-    return "\n".join(f"{m['ticker']}: {' '.join(str(m.get('rules_primary') or '').split())} | "
+    return "\n".join(f"{m['ticker']} {m.get('close_time')} {m.get('expected_expiration_time')}: "
+                     f"{' '.join(str(m.get('rules_primary') or '').split())} | "
                      f"{' '.join(str(m.get('rules_secondary') or '').split())}" for m in markets)
 
 
@@ -390,6 +393,8 @@ class FedLinkArb(Strategy):
                    and pin.get("rules") == rules_key(meet, u) and not too_good(links(meet, u), quoted))
         candidates = []
         for legs, quotes in quoted:
+            if not checked and any(m["ticker"] in ctx.held_paper for m, _ in legs):
+                continue   # paper only, and already open on paper: the engine would skip it
             meta = {"rate_event": meet["rate_event"], "decision_event": meet["decision_event"],
                     "meeting": meet["day"].isoformat(), "rate_before": u / 4,
                     "strike": strike(legs[0][0], "floor_strike"),
@@ -407,6 +412,8 @@ class FedLinkArb(Strategy):
             return None   # bought by an earlier signal this run
         quotes = [(leg.ticker, leg.side, *quote(ctx.client.orderbook(leg.ticker), leg.side))
                   for leg in sig.legs]
+        if any(q[2] is None for q in quotes) or sum(q[2] for q in quotes) < 1 / (1 + risk.MAX_ARB_ROI):
+            return None   # too good to be true now: scan would keep the meeting on paper
         basket = locked_basket(quotes, self._budget(ctx), float(ctx.cfg["max_per_trade"]))
         if not basket:
             return None

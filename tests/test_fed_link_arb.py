@@ -589,6 +589,27 @@ class RecheckTests(unittest.TestCase):
             self.assertIsNone(STRATEGY.recheck(cx, sig))         # too close to the bell
 
 
+    def test_recheck_drops_a_price_too_good_to_be_true(self):
+        # Scan saw 56c + 33c. If "hold" crashes just before buying, the set costs 76c before
+        # fees: too good to be true (scan would keep the meeting on paper), so no real buy.
+        evs = gap_meeting()
+        c = fake_for(evs)
+        cx = ctx(c)
+        sig = STRATEGY.scan(cx)[0]
+        hold = code_ticker(evs, "H0")
+        set_book(c, hold, .70, .72)                              # 56c + 30c: believable
+        self.assertIsNotNone(STRATEGY.recheck(cx, sig))
+        set_book(c, hold, .80, .82)                              # 56c + 20c
+        self.assertIsNone(STRATEGY.recheck(cx, sig))
+
+    def test_a_paper_link_leaves_what_is_already_open_on_paper(self):
+        evs = gap_meeting()
+        held = frozenset({code_ticker(evs, "H0")})
+        live = Context(fake_for(evs), dict(config.DEFAULTS, max_per_arb=30.0), "live", 100.0, 100.0, set(), {}, {},
+                       held_paper=held)
+        self.assertFalse([leg.ticker for s in STRATEGY.scan(live) for leg in s.legs if leg.ticker in held])
+
+
 class EngineTests(TempHome):
     def setUp(self):
         super().setUp()
@@ -669,6 +690,19 @@ class EngineTests(TempHome):
         s = engine.run_once(c)
         self.assertTrue(s["ok"], s)
         self.assertEqual((s["live_trades"], c.orders), (0, []))
+
+    def test_a_moved_meeting_goes_back_to_paper(self):
+        # A meeting that moves (even a few hours) breaks some links: the pin holds the dates.
+        config.update({"strategies": {"fed_link_arb": {"mode": "live"}}})
+        evs = gap_meeting()
+        self.pin(evs)
+        for ev in evs:
+            for m in ev["markets"]:
+                m["close_time"] = iso(ts(m["close_time"]) + 3 * 3600)
+        c = fake_for(evs)
+        s = engine.run_once(c)
+        self.assertTrue(s["ok"], s)
+        self.assertEqual((s["live_trades"], s["paper_trades"], c.orders), (0, 1, []))
 
     def test_a_meeting_too_far_off_is_refused(self):
         # 40 days off: past the run's events horizon (max_arb_days + 1), so never even seen.
