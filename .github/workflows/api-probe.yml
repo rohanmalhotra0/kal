@@ -13,11 +13,16 @@ permissions:
 jobs:
   probe:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
-      - run: pip install requests
-      - run: python tools/api_probe.py
+      - run: pip install -r requirements.txt
+      - name: The run's events, the new way
+        run: KAL_HOME=$(mktemp -d) python tools/mem_probe.py lean
+      - name: kal scan (what a trade run reads)
+        run: KAL_HOME=$(mktemp -d) python tools/mem_probe.py run python -m kal scan
+      - name: kal research --quick
+        run: KAL_HOME=$(mktemp -d) python tools/mem_probe.py run python -m kal research --quick
