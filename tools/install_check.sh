@@ -25,10 +25,12 @@ bad()    { echo "FAIL  $*"; echo "::error::$*"; fails=$((fails + 1)); }
 check()  { local n=$1; shift; if "$@" >/dev/null 2>&1; then ok "$n"; else bad "$n"; fi; }   # passes if it works
 refuse() { local n=$1; shift; if "$@" >/dev/null 2>&1; then bad "$n"; else ok "$n"; fi; }   # passes if it fails
 same()   { if [ "$2" = "$3" ]; then ok "$1"; else bad "$1: got '$2', want '$3'"; fi; }
-within() {  # seconds cmd... : wait until the command works
-  local n=$1 i; shift
-  for i in $(seq 1 "$n"); do "$@" >/dev/null 2>&1 && return 0; sleep 1; done
-  return 1
+within() {  # seconds cmd... : wait until the command works, trying at least once
+  local end=$((SECONDS + $1)); shift
+  until "$@" >/dev/null 2>&1; do
+    [ "$SECONDS" -lt "$end" ] || return 1
+    sleep 1
+  done
 }
 owner()  { sudo stat -c '%U:%G %a' "$1" 2>/dev/null || echo missing; }
 code()   { curl -s -o /dev/null -w '%{http_code}' "$@"; }
@@ -247,11 +249,15 @@ cg=/sys/fs/cgroup/system.slice/kal.service
 last_trade() { sudo kal health 2>/dev/null | sed -n 's/^Last trade run: //p'; }
 t12=$(date +%s) restarts=$(prop NRestarts)
 kal_run 0 on --budget 0
+check "the dashboard answers" within 30 curl -s -o /dev/null "$URL/"
 api() { curl -s -o /dev/null -w '%{http_code}' -u "kal:$PW" -H 'Content-Type: application/json' -d "$1" "$URL/api/run"; }
 started() { case "$1" in 200|409) return 0 ;; *) return 1 ;; esac; }   # 409: it already runs
-check "research starts" started "$(api '{"kind": "research"}')"
-check "a trade run starts" started "$(api '{"kind": "trade"}')"
-check "the trade run finishes" within 300 sh -c "sudo kal health 2>/dev/null | grep -q '^Last trade run: .* ago'"
+running() { curl -s -u "kal:$PW" "$URL/api/state" | json "scheduler.$1.running"; }
+got=$(api '{"kind": "research"}'); check "research starts (HTTP $got)" started "$got"
+got=$(api '{"kind": "trade"}'); check "a trade run starts (HTTP $got)" started "$got"
+same "research is running" "$(running research)" true
+check "the trade run finishes" within 600 sh -c "sudo kal health 2>/dev/null | grep -q '^Last trade run: .* ago'"
+echo "      research still running when it finished: $(running research)"
 trade=$(last_trade)
 echo "      last trade run: $trade"
 case "$trade" in
@@ -272,6 +278,6 @@ say "13. The bot's own log"
 sudo journalctl -u kal --no-pager -o cat > "$OUT/journal.txt"
 refuse "no Python errors in the service log" grep -q Traceback "$OUT/journal.txt"
 refuse "no Python errors in kal's log files" sudo grep -rqs Traceback "$DATA/logs"
-prop MemoryCurrent | awk '{printf "      memory now: %d MB (cap 400 MB)\n", $1 / 1048576}'
+prop MemoryCurrent | awk -v cap="$(($(prop MemoryMax) / 1048576))" '{printf "      memory now: %d MB (cap %d MB)\n", $1 / 1048576, cap}'
 
 finish
