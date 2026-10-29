@@ -270,8 +270,8 @@ status: **testing** (add the PR link), **built**, or **rejected** (say why in on
 **17. The same question in two series (not crypto)** - untested
 - What: two series asking one thing in different words. Their prices must add up. Example:
   "Number of Fed cuts in 2026: exactly 0" vs cut or no cut at the Dec meeting. On
-  2026-10-29, YES "exactly 0" + YES both Dec cut markets cost 98.4c for a $1 set (before
-  fees, about 11% a year: under the bot's 20%).
+  2026-10-29, YES "exactly 0" + YES both Dec cut markets cost 98.4c for a $1 set. It pays
+  on Dec 31, so that's about 10% a year before fees: under the bot's 20%.
 - Evidence: weak. Crypto's look-alikes broke (their rules differ). Sports chains never gapped.
 - Risk: medium-high. Small rule differences (dates, sources, emergency moves) break the link.
 - Test: pick pairs by hand from the series list, read both rules in full, then count hourly
