@@ -27,7 +27,9 @@ Real money is not planned (VERIFIED is empty), because:
     monthly weeks behind the daily). A move outside the words can come at any time.
   - The terms use a correction issued "within twenty-four (24) hours" of the first number. One
     can land after the daily settles and before the monthly does.
-Two numbers can make both legs lose (copper, Aug 31 2026: the monthly read a futures contract,
+  - Even the metadata differs: the daily's custom_strike says round_digits "2", the monthly's
+    says nothing (both rules say 2 decimals, so that's allowed here).
+Two different numbers can make both legs lose (copper, Aug 31 2026: the monthly read a futures contract,
 the daily an index, 6.58 vs 6.69). A pin in VERIFIED would let a pair trade for real; even
 then never while a pair looks too good to be true (too_good, at scan and again just before
 buying).

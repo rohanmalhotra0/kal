@@ -84,8 +84,8 @@ class Pair:
     """A monthly event and its daily or weekly twin, built like the real ones. spec[ticker] = the
     market's strike, in the fixture's own numbers: what it means, for the payout oracle."""
 
-    def __init__(self, metal="gold", twin="daily", days=1.0, close=None, prices=None):
-        self.info, self.metal, self.twin = METALS[metal], metal, twin
+    def __init__(self, metal="gold", twin="daily", days=1.0, close=None, prices=None, **info):
+        self.info, self.metal, self.twin = dict(METALS[metal], **info), metal, twin
         self.close = close_at(days) if close is None else close
         local = datetime.datetime.fromtimestamp(self.close, ET)
         self.tz = local.tzname()   # EDT or EST
@@ -676,6 +676,23 @@ class ScanTests(TempHome):
                 self.assertIn(f"5:00 PM {p.tz}", sig.note)
                 self.assertGreaterEqual(worst(p, [(leg.ticker, leg.side) for leg in sig.legs]), 1)
                 self.assertLessEqual(sig.partial_loss, config.DEFAULTS["max_per_trade"] + 1e-9)
+
+    def test_the_real_aug_31_gap(self):
+        # The best gap with trades in the history: NO daily "above 4452" at 41c + YES monthly
+        # "above 4451.99" at 50c, at 4 PM ET on Aug 31 2026 (the same quotes a day before the close).
+        close = ts("2026-08-31T21:00:00Z")
+        p = Pair("gold", "daily", close=close, center=D("4452"),
+                 grid={"monthly": (D("4451.99"), D("40")), "daily": (D("4452"), D("10"))})
+        p.prices.update({p.other(): (.59, .61), p.monthly(): (.48, .50)})
+        self.assertEqual((p.monthly(), p.other()), ("KXGOLDMON-26AUG3117-T4451.99", "KXGOLDD-26AUG3117-T4452"))
+        with mock.patch.object(metal_link_arb.time, "time", return_value=close - 86400):
+            sigs = STRATEGY.scan(ctx(fake_for(p.events())))
+        self.assertEqual(len(sigs), 1)
+        legs = sorted((leg.ticker, leg.side, leg.price) for leg in sigs[0].legs)
+        self.assertEqual(legs, sorted([(p.monthly(), "yes", .50), (p.other(), "no", .41)]))
+        self.assertGreaterEqual(worst(p, [(t, side) for t, side, _ in legs]), 1)
+        # It settled on 4448.11: the NO paid.
+        self.assertEqual(sum(pays(p.spec, t, side, D("4448.11")) for t, side, _ in legs), 1)
 
     def test_the_money_counts_as_tied_up_until_both_settle(self):
         # Both legs close at 5 PM, but the monthly settles hours or days later: up to 8 days by
