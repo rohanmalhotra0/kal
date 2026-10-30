@@ -124,7 +124,9 @@ tests/            unittest; tests/fakes.py has FakeKalshi, tests/helpers.py has 
   written off as lost, so the books never earn on contracts they don't hold.
 - Account lists (positions, orders, fills) missing their key -> error, not "empty".
 - After `kal restore`, the next live run adds the buys Kalshi shows since the backup's
-  day before it trades (`ledger.catch_up`). A fill it can't read -> trip. Then any
+  day before it trades (`ledger.catch_up`). It puts back the bot's own marked orders
+  first (`ledger.recover`), so a sale outside the bot is never read as the bot's buy of
+  the other side, whatever the fills' times say. A fill it can't read -> trip. Then any
   Kalshi position the books still don't know -> one trip (the owner's own? Reset).
   The marker that asks for this is written into a copy of the backup, and only that copy
   is swapped in, so restored books never come back without it.
