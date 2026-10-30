@@ -45,8 +45,12 @@ tests/            unittest; tests/fakes.py has FakeKalshi, tests/helpers.py has 
   with_nested_markets="true")`, spelled exactly so (a test checks). All of Kalshi's open
   events are over 700 MB in Python, so `engine.RunCache` keeps only events with a market
   due within `horizon_days` (max_arb_days + 1, or a research result's hours before close),
-  plus any the bot holds or can't read, and drops the fields in `engine.UNREAD`. A trade
-  past max_arb_days is never offered (`risk.too_late`), so `kal scan` no longer lists them.
+  plus any the bot holds or can't read, and drops the fields in `engine.UNREAD` (each market
+  is copied into a dict just big enough for the rest). A trade past max_arb_days is never
+  offered (`risk.too_late`), so `kal scan` no longer lists them.
+- After every job the scheduler hands freed memory back (`scheduler.give_back_memory`,
+  glibc's `malloc_trim`). Without it the process sat near a run's peak all day (560 MB on
+  2026-10-30); with it, about 185 MB between runs and 320 MB at a run's peak.
 - Research writes JSON to `$KAL_HOME/research/` (`edges.json` is a list of edges;
   `words.json` holds mention-word history). The engine loads each file into
   `ctx.research[<file stem>]` every run. Demo uses `research-demo/` and `cache-demo/`,
