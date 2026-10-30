@@ -2,6 +2,23 @@
 
 Newest first. Each 2-hour check-in adds one entry: what it checked, what it found, links.
 
+## 2026-10-30 00:50 UTC — check-in: gold and silver links merged; paper books a set together
+
+- Merged [PR #38](https://github.com/rohanmalhotra0/kal/pull/38): `metal_link_arb` (gold and
+  silver month ends), paper only for good. An independent review found no set that pays less
+  than it says if both series settle on one number, and 4 gaps, all fixed with tests: a YES now
+  sits at least a cent under its NO; it can never use real money (no pin list); a set too good
+  to be true in its order book isn't booked on paper (here and in `range_link_arb`); a price too
+  big for a float now reads as no price instead of crashing.
+- Merged [PR #39](https://github.com/rohanmalhotra0/kal/pull/39): paper books all legs of a set
+  in the same run, once each has a result. Before, one leg's gain showed days before the other
+  leg's loss: a false equity peak that made every paper bet smaller. 1028 tests.
+- Checked: CI and market-check green on main 8af43c8 (all 11 strategies ran, 0 trades found;
+  `metal_link_arb` ran clean). No status report yet: `kal-status` doesn't exist or isn't shared
+  with Claude.
+- Research: no idea can be built now. Only #18 is left, and it needs 4+ weeks of paper results
+  from the server.
+
 ## 2026-10-29 22:50 UTC — check-in: AAA gas rejected; gold and silver built on paper
 
 - Merged [PR #37](https://github.com/rohanmalhotra0/kal/pull/37): idea #20 (AAA gas daily vs
