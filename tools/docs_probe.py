@@ -1,4 +1,4 @@
-"""Prints what Kalshi's public docs say about order ids and order history (probe only)."""
+"""Prints what Kalshi's docs and API say about the historical tier (probe only)."""
 import json
 import re
 
@@ -6,6 +6,7 @@ import requests
 import yaml
 
 BASE = "https://docs.kalshi.com"
+API = "https://api.elections.kalshi.com/trade-api/v2"
 S = requests.Session()
 S.headers["User-Agent"] = "kal-docs-probe"
 
@@ -20,68 +21,69 @@ def get(url):
         return ""
 
 
-def show(text, pat, ctx=300, most=12):
-    n = 0
-    for m in re.finditer(pat, text, re.I):
-        a, b = max(0, m.start() - ctx), min(len(text), m.end() + ctx)
-        print("   ...", text[a:b].replace("\n", " "), "...")
-        n += 1
-        if n >= most:
-            break
-    print(f"   [{n} shown for {pat!r}]")
+def page(path, keep=None, limit=9000):
+    """A docs page as markdown, without its OpenAPI block unless keep matches a line."""
+    t = get(f"{BASE}{path}.md")
+    body = t.split("## OpenAPI")[0]
+    print(body[:limit])
+    if keep:
+        for line in t.splitlines():
+            if re.search(keep, line, re.I):
+                print("   >>", line.strip()[:400])
+    print("-" * 80)
 
 
-idx = get(f"{BASE}/llms.txt")
-print("\n== llms.txt lines about orders, fills, history, changelog ==")
-for line in idx.splitlines():
-    if re.search(r"order|fill|histor|changelog|client|rate limit|settlement", line, re.I):
-        print("  ", line[:220])
+print("\n===== live API: historical cutoff (public?) =====")
+for path in ("/historical/cutoff",):
+    try:
+        r = S.get(API + path, timeout=30)
+        print(path, r.status_code, r.text[:1500])
+    except Exception as e:
+        print(path, e)
 
-spec = None
-for path in ("/openapi.yaml", "/openapi.json", "/api-reference/openapi.yaml", "/api-reference/openapi.json"):
-    t = get(BASE + path)
-    if t:
-        try:
-            spec = yaml.safe_load(t)
-            print(f"spec from {path}: {len(spec.get('paths', {}))} paths")
-            break
-        except Exception as e:
-            print(f"   not yaml/json: {e}")
+for p in ("/getting_started/historical_data",
+          "/api-reference/historical/get-historical-cutoff-timestamps",
+          "/api-reference/historical/get-historical-orders",
+          "/api-reference/historical/get-historical-fills",
+          "/api-reference/historical/get-historical-positions",
+          "/api-reference/portfolio/get-fills",
+          "/api-reference/portfolio/get-settlements"):
+    print(f"\n===== {p} =====")
+    page(p, keep=r"cutoff|archiv|histor|min_ts|max_ts|cursor|client_order_id|subaccount")
 
-if spec:
-    print("\n== paths with orders, fills or historical ==")
-    for p, ops in spec.get("paths", {}).items():
-        if re.search(r"order|fill|histor", p):
-            for verb, op in ops.items():
-                if isinstance(op, dict):
-                    print(f"  {verb.upper()} {p}: {op.get('summary', '')} | {(op.get('description') or '')[:400]}")
-                    for prm in op.get("parameters", []) or []:
-                        if isinstance(prm, dict) and "$ref" not in prm:
-                            print(f"      param {prm.get('name')}: {(prm.get('description') or '')[:200]}")
-                        elif isinstance(prm, dict):
-                            print(f"      param {prm['$ref']}")
-    print("\n== every schema field named client_order_id ==")
-    def walk(node, where):
-        if isinstance(node, dict):
-            for k, v in node.items():
-                if k == "client_order_id":
-                    print(f"  {where}: {json.dumps(v)[:500]}")
-                walk(v, f"{where}.{k}")
-        elif isinstance(node, list):
-            for i, v in enumerate(node):
-                walk(v, f"{where}[{i}]")
-    walk(spec, "spec")
-    comps = spec.get("components", {})
-    for name in ("parameters",):
-        for k, v in (comps.get(name) or {}).items():
-            if re.search(r"ts|cursor|status|limit", k, re.I):
-                print(f"  components.{name}.{k}: {json.dumps(v)[:300]}")
-    for k, v in (comps.get("schemas") or {}).items():
-        if re.search(r"^Order$|CreateOrder|Fill$|Historical", k):
-            print(f"\n  schema {k}: {json.dumps(v)[:1500]}")
+print("\n===== create order v2: client_order_id lines =====")
+t = get(f"{BASE}/api-reference/orders/create-order-v2.md")
+for m in re.finditer(r"client_order_id", t):
+    print("   ...", t[max(0, m.start() - 200): m.end() + 400].replace("\n", " "))
 
-for page in ("/api-reference/orders/get-orders", "/api-reference/portfolio/get-orders",
-             "/getting_started/historical_data", "/changelog", "/getting_started/rate_limits"):
-    t = get(BASE + page + ".md") or get(BASE + page)
-    if t:
-        show(t, r"histor|cutoff|older than|client_order_id|retention|archiv", ctx=250, most=8)
+print("\n===== openapi.yaml, cleaned =====")
+raw = get(f"{BASE}/openapi.yaml")
+clean = re.sub(r"[\x80-\x9f]", "", raw)
+try:
+    spec = yaml.safe_load(clean)
+except Exception as e:
+    print("still unreadable:", e)
+    spec = {}
+paths = spec.get("paths", {})
+print(len(paths), "paths")
+for p, ops in paths.items():
+    if re.search(r"histor|/portfolio/orders|/portfolio/fills|/portfolio/events/orders$|/markets$", p):
+        for verb, op in ops.items():
+            if not isinstance(op, dict):
+                continue
+            print(f"\n  {verb.upper()} {p}: {op.get('summary', '')}")
+            print("    ", (op.get("description") or "").replace("\n", " ")[:700])
+            for prm in op.get("parameters", []) or []:
+                if "$ref" in prm:
+                    ref = prm["$ref"].split("/")[-1]
+                    prm = spec.get("components", {}).get("parameters", {}).get(ref, {"name": ref})
+                print(f"      param {prm.get('name')} ({prm.get('in')}): "
+                      f"{(prm.get('description') or '').replace(chr(10), ' ')[:250]}")
+schemas = spec.get("components", {}).get("schemas", {})
+for name, s in schemas.items():
+    props = s.get("properties", {}) if isinstance(s, dict) else {}
+    if "client_order_id" in props:
+        print(f"\n  schema {name}.client_order_id: {json.dumps(props['client_order_id'])[:400]}")
+for name in schemas:
+    if re.search(r"Cutoff|Historical", name):
+        print(f"\n  schema {name}: {json.dumps(schemas[name])[:1200]}")
