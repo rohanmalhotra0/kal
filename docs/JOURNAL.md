@@ -2,6 +2,25 @@
 
 Newest first. Each 2-hour check-in adds one entry: what it checked, what it found, links.
 
+## 2026-10-30 12:50 UTC — check-in: 2 swarm fixes merged; the update check fixed for real systemd
+
+- Checked: CI and market-check green on main 0aa2058 (self-test passed, scan found
+  nothing, research 0 failed). No status report yet: the private `kal-status` repo isn't
+  shared with Claude.
+- Merged [PR #55](https://github.com/rohanmalhotra0/kal/pull/55) (limits hold for every
+  real order) and [PR #53](https://github.com/rohanmalhotra0/kal/pull/53) (the owner always
+  hears about a stop). #53's final reviews found 4 more ways a stop alert could be lost or
+  nag (dying mid-send, a slow alert clearing a newer one, a read-only disk). Now a stop is
+  owed before its alert goes, and only its own delivery settles it.
+- [PR #54](https://github.com/rohanmalhotra0/kal/pull/54) (auto-update check): its final
+  review, run on a real systemd 255 manager, found a blocker. If the owner restarted the
+  bot during an update, a bad release could crash-loop with no rollback. Now it waits out
+  a restart under way, reads a crash 3 ways, and blames the new code only if the old code
+  runs fine after the rollback. 12 real-systemd scenarios give the right verdict; undoing
+  any of 11 fixes fails a test. In a last short review.
+- This check-in's one fix: #54. The 5-hour paper soak ends about 14:15; read at 14:30.
+- Waiting on the owner: update the server, `sudo kal setup`, `sudo kal doctor`.
+
 ## 2026-10-30 10:50 UTC — check-in: swarm review of the money path, 6 fixes in review
 
 - Checked: CI green on main 9bb9385; market-check green on e5f49b8 (self-test passed, scan
