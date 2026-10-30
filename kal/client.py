@@ -209,11 +209,12 @@ class Kalshi:
 
     def trades(self, ticker, min_ts=None, limit=500):
         """Public trades in one market, newest first. Each says which side its taker bought
-        (taker_side), how many (count_fp) and when (created_time)."""
+        (taker_outcome_side; the deprecated taker_side before it), how many (count_fp) and
+        when (created_time)."""
         params = {"ticker": ticker, "limit": min(limit, 1000)}
         if min_ts:
             params["min_ts"] = int(min_ts)
-        return self.paginate("/markets/trades", "trades", params, limit)
+        return self.paginate("/markets/trades", "trades", params, limit, strict=True)   # renamed: an error, not "no trades"
 
     def markets_by_ticker(self, tickers):
         """{ticker: market}. Batches with tickers=, then fetches any it missed one by one:
@@ -438,6 +439,23 @@ def every_order(client, ticker=None, min_ts=None, store=None):
 
 
 # ---------- field helpers ----------
+
+BOOK_SIDES = {"bid": "yes", "ask": "no"}
+
+
+def outcome_side(d, prefix=""):
+    """Which outcome a fill or order (or, with prefix "taker_", a public trade's taker) is
+    long: "yes", "no", or None if it doesn't say. Kalshi's outcome_side, else book_side
+    (bid is yes, ask is no): the same bit twice. Kalshi made these the canonical fields and
+    deprecated side/action (and taker_side), which it may drop since May 2026. Raises
+    ValueError if the two disagree: never a guess."""
+    side, book = d.get(f"{prefix}outcome_side"), d.get(f"{prefix}book_side")
+    side = side if side in ("yes", "no") else None
+    book = BOOK_SIDES.get(book) if isinstance(book, str) else None
+    if side and book and side != book:
+        raise ValueError(f"{prefix}outcome_side {side} but {prefix}book_side says {book}")
+    return side or book
+
 
 def num(d, field):
     """A count from `x_fp` (fixed-point string) or a legacy integer `x`."""

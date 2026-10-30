@@ -10,7 +10,7 @@ inflate it. Kalshi's fills are read only to lower it (contracts sold outside the
 import time
 
 from . import db
-from .client import UnknownSettlement, every_fill, fee, num, price, ts, yes_payout
+from .client import UnknownSettlement, every_fill, fee, num, outcome_side, price, ts, yes_payout
 
 OPEN = ("active", "open")
 
@@ -322,8 +322,28 @@ def write_off(ticker, side, count, note=""):
     return cost
 
 
+def _direction(f):
+    """(side, action) of a fill. Kalshi's deprecated side and action say exactly what was
+    done. Once they're gone, the outcome side says which way: buy YES and sell NO leave the
+    same position, so it reads as a buy of that side, priced on that side. Both there but
+    saying different things: CatchUpError, never a guess."""
+    try:
+        outcome = outcome_side(f)
+    except ValueError as e:
+        raise CatchUpError(f"a fill's direction fields disagree: {e}")
+    side, action = f.get("side"), f.get("action")
+    if side in ("yes", "no") and action in ("buy", "sell"):
+        long = side if action == "buy" else ("no" if side == "yes" else "yes")
+        if outcome and outcome != long:
+            raise CatchUpError(f"a fill says {action} {side} but outcome {outcome}: they should agree")
+        return side, action
+    if outcome:
+        return outcome, "buy"
+    return side, action or "buy"   # as before: a side with no action was a buy
+
+
 def _parse_fill(f):
-    side, action = f.get("side"), f.get("action", "buy")
+    side, action = _direction(f)
     n = num(f, "count")
     p = price(f, f"{side}_price") if side in ("yes", "no") else 0.0
     if side not in ("yes", "no") or action not in ("buy", "sell") or not n > 0 or not 0 < p < 1 \
@@ -343,16 +363,28 @@ def catch_up(client):
     make the bot think it spent more, and settle() never books their gains, only their
     losses. Returns how many orders were added (0 if no restore is waiting). Raises
     CatchUpError if a fill can't be read: never guess. Fills older than Kalshi's cutoff are
-    read from its historical store, so an old backup still gets every buy since its day."""
+    read from its historical store, so an old backup still gets every buy since its day.
+
+    Never added: a fill on the other side of contracts the books hold at that moment. It
+    nets them away (the owner selling them, or buying the other side; the bot never buys
+    both sides of a market), so shortfalls() and the sold-outside check write them off.
+    Added as a buy, it would hide that, and the payout would be booked. Fills go in time
+    order, so a buy and its sale inside the gap work out too."""
     gap = db.get("restored")
     if not gap:
         return 0
     known = {r["order_id"] for r in db.query("SELECT DISTINCT order_id FROM orders WHERE order_id != ''")}
+    held = {}
+    for r in open_positions():
+        held[(r["ticker"], r["side"])] = held.get((r["ticker"], r["side"]), 0.0) + r["count"]
     found = {}
-    for f in every_fill(client, min_ts=gap["since"]):
-        oid, ticker, side, action, n, p, when = _parse_fill(f)
+    for oid, ticker, side, action, n, p, when in sorted((_parse_fill(f) for f in every_fill(client, min_ts=gap["since"])),
+                                                        key=lambda x: x[6]):
         if action != "buy" or oid in known:
             continue  # the bot never sells; a sold position shows up in shortfalls()
+        if held.get((ticker, "no" if side == "yes" else "yes"), 0.0) > 1e-6:
+            continue  # nets held contracts away: written off, never booked as the bot's buy
+        held[(ticker, side)] = held.get((ticker, side), 0.0) + n
         o = found.setdefault(oid, {"ticker": ticker, "side": side, "n": 0.0, "p": 0.0, "ts": when})
         o["n"] += n
         o["p"] = max(o["p"], p)
