@@ -115,11 +115,13 @@ tests/            unittest; tests/fakes.py has FakeKalshi, tests/helpers.py has 
   baskets use) where the best YES buyer bids $0.90 or less. Needed again for a new key
   or exchange, or after Kalshi refuses any order. Until it passes, live strategies trade
   on paper; a failed try waits an hour. If either fills or rests -> trip.
-- Before every live order the settings are read again: OFF, the strategy leaving live, or
-  any money limit set stricter (`config.LIMITS`) ends the run's real trading, and the next
-  run starts on the new settings. OFF works even with a bad config file.
+- Before every live order the settings are read again, last, after the rechecks that read
+  Kalshi: OFF, the strategy leaving live, or any money limit set stricter (`config.LIMITS`)
+  ends the run's real trading, and the next run starts on the new settings. OFF works even
+  with a bad config file.
 - The legs a half-built basket left count as bets in the open-bets cap (`max_exposure`):
-  nothing locks them in any more.
+  nothing locks them in any more. So do a basket's legs once any leg was written off (sold
+  outside the bot, say).
 - Kalshi closed (maintenance) -> run skipped. Network errors, 5xx and 429 never count
   toward the error trip (nothing can be bought then); 6+ hours of that sends one alert.
 - Waiting for a lost order to show up isn't counted as an error: a network blip
@@ -139,7 +141,7 @@ tests/            unittest; tests/fakes.py has FakeKalshi, tests/helpers.py has 
   trade run or the health check (every 10 minutes); the watchdog looks too, since a run
   can't buy on them and the heartbeat stays fresh. Busy, locked or full books are only a
   warning (a backup wouldn't fix them), and runs that can't write their error count count
-  it in memory, so 3 in a row still trip. Alerts go with the books unreadable, and a stop
+  it in memory and add it to the books' count, so 3 in a row still trip. Alerts go with the books unreadable, and a stop
   alert that didn't get through is sent again until it does, while that stop lasts. A
   stop is noted as owed before its alert goes, so a restart mid-send still sends it, and
   only that alert's delivery settles it. A stop that can't be saved says so, at most

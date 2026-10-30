@@ -3,8 +3,12 @@ money path found (each finding checked by a separate skeptic):
 - a budget cut, a lower cap or a strategy moved off live mid-run were ignored until the
   run ended: only OFF was re-checked before each real order;
 - the legs a half-built basket left stayed "locked-in", so the cap on open bets never
-  counted them. python -m unittest tests.test_limits_hold
+  counted them.
+A later cross-PR audit found the same check came before the rechecks that read Kalshi, so a
+stop saved during them was missed; and a basket with a leg sold outside the bot still read
+as locked in. python -m unittest tests.test_limits_hold
 """
+import sqlite3
 from unittest import mock
 
 from kal import config, db, engine, ledger, paper
@@ -82,6 +86,34 @@ class MidRunTests(TempHome):
                 assert_one_whole_basket(self, c)
                 self.assertIn("basket_arb left live mid-run", " ".join(s["notes"]))
 
+    def run_acting_during_recheck(self, act):
+        """`act` lands while basket 2 is rechecked (its order books read), after the check
+        before it passed: the audit's repro bought both baskets."""
+        c = two_baskets()
+        real, done = c.orderbook, []
+
+        def orderbook(ticker):
+            if len(c.orders) == 4 and not done:
+                done.append(1)
+                act()
+            return real(ticker)
+        c.orderbook = orderbook
+        return c, engine.run_once(c)
+
+    def test_a_stop_saved_while_a_signal_is_rechecked_stops_its_order(self):
+        for name, act, note in (
+                ("budget cut", lambda: config.update({"budget": 10}), "budget set stricter mid-run"),
+                ("OFF", config.turn_off, "turned off mid-run"),
+                ("health trip", lambda: config.trip("Disk almost full: 150 MB free."), "turned off mid-run")):
+            with self.subTest(name):
+                config.update({"enabled": True, "disabled_reason": "", "budget": 60})
+                db.execute("DELETE FROM orders")
+                db.execute("DELETE FROM signals")
+                c, s = self.run_acting_during_recheck(act)
+                self.assertEqual(len(baskets_bought(c)), 1, f"{len(c.orders)} orders after the {name}")
+                self.assertEqual(len(c.orders), 4)
+                self.assertIn(note, " ".join(s["notes"]))
+
     def test_a_looser_setting_mid_run_changes_nothing(self):
         c, s = self.run_editing({"budget": 200, "max_per_arb": 40})
         self.assertEqual(len(baskets_bought(c)), 2)
@@ -134,6 +166,79 @@ class StrandedLegTests(TempHome):
         self.order(sid, "EV4-0", 10)
         self.order(sid, "EV4-1", 10)
         self.assertGreater(ledger.open_directional(), 0)
+
+
+class SoldLegTests(TempHome):
+    """A whole basket, then the owner sells one leg in Kalshi's app: the next run writes it
+    off, and the other legs are naked bets now."""
+
+    def setUp(self):
+        super().setUp()
+        config.update({"enabled": True, "budget": 300,
+                       "strategies": {k: {"mode": "off"} for k in config.DEFAULTS["strategies"]}})
+        config.update({"strategies": {"basket_arb": {"mode": "live"}}})
+        orders_proven()
+
+    def test_a_basket_with_a_leg_sold_outside_the_bot_counts_as_bets(self):
+        c = fake_with_arb()
+        self.assertTrue(engine.run_once(c)["ok"])
+        self.assertEqual([o[0] for o in c.orders], ["EV1-0", "EV1-1", "EV1-2", "EV1-3"])
+        self.assertEqual(ledger.open_directional(), 0)   # whole: locked in
+        c.held["EV1-0"] = 0                               # the owner sells the NO on EV1-0
+        s = engine.run_once(c)
+        self.assertIn("counted them as lost", " ".join(s["notes"]))
+        left = sum(r["cost"] for r in ledger.open_positions() if r["count"] > 0)
+        self.assertAlmostEqual(left, 24.60, places=2)     # 3 legs, no longer locked in
+        # The legs left count; the sold one too, until it settles (as for a bet).
+        bought = sum(10 * o[3] + fee(10, o[3]) for o in c.orders)
+        self.assertAlmostEqual(ledger.open_directional(), bought, places=2)
+        self.assertGreaterEqual(ledger.open_directional(), left)
+
+    def test_a_write_off_on_one_basket_leaves_another_basket_locked_in(self):
+        c = two_baskets()
+        self.assertTrue(engine.run_once(c)["ok"])
+        self.assertEqual(baskets_bought(c), {"EV1", "EV3"})
+        c.held["EV1-0"] = 0
+        engine.run_once(c)
+        ev1 = sum(10 * o[3] + fee(10, o[3]) for o in c.orders if o[0].startswith("EV1"))
+        self.assertAlmostEqual(ledger.open_directional(), ev1, places=2)   # EV3 stays locked in
+
+
+class ErrorStreakTests(TempHome):
+    def setUp(self):
+        super().setUp()
+        config.update({"enabled": True, "budget": 60,
+                       "strategies": {k: {"mode": "off"} for k in config.DEFAULTS["strategies"]}})
+        config.update({"strategies": {"basket_arb": {"mode": "live"}}})
+        orders_proven()
+
+    def failed_runs_until_the_stop(self, locked_when):
+        real_put, locked, failed = db.put, [False], 0
+
+        def put(key, value):
+            if key == "consecutive_errors" and locked[0]:
+                raise sqlite3.OperationalError("database is locked")
+            return real_put(key, value)
+        with mock.patch.object(engine.fees, "check", side_effect=ValueError("a bug")), \
+                mock.patch.object(db, "put", put), self.assertLogs("kal", "ERROR"):
+            for i in range(6):
+                if config.load()["disabled_reason"]:
+                    break
+                locked[0] = locked_when(i)
+                failed += not engine.run_once(fake_with_arb())["ok"]
+        return failed, config.load()["disabled_reason"]
+
+    def test_failed_runs_stop_the_bot_at_three_when_the_books_take_only_some_counts(self):
+        # The audit's repro: the books took every other count, so the two counts climbed in
+        # turn and the stop came after 5 failed runs, not 3.
+        failed, reason = self.failed_runs_until_the_stop(lambda i: i % 2 == 1)
+        self.assertEqual(failed, 3)
+        self.assertIn("3 failed runs in a row", reason)
+
+    def test_a_third_failed_run_the_books_cant_count_still_stops_the_bot(self):
+        failed, reason = self.failed_runs_until_the_stop(lambda i: i == 2)
+        self.assertEqual(failed, 3)
+        self.assertIn("3 failed runs in a row, and the books can't be written", reason)
 
 
 class HeldDollarsTests(TempHome):

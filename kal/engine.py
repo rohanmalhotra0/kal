@@ -448,9 +448,14 @@ _errors_here = {}   # KAL_HOME -> failed runs in a row, counted here when the bo
 
 
 def _count_error(cfg, e):
+    # One streak: the failed runs the books couldn't take are added to the books' count, so
+    # books that take some writes and not others still stop the bot at max_consecutive_errors.
+    held, books_n = _errors_here.get(config.home(), 0), 0
     try:
-        errors = (db.get("consecutive_errors", 0) or 0) + 1
+        books_n = db.get("consecutive_errors", 0) or 0
+        errors = books_n + held + 1
         db.put("consecutive_errors", errors)
+        _errors_here.pop(config.home(), None)   # (now in the books)
     except Exception as books:
         # No order can be recorded on such books, so none is sent; but every run fails, and
         # the count itself can't be kept there. Damaged: stop now, nothing will change.
@@ -464,7 +469,8 @@ def _count_error(cfg, e):
                 config.trip(f"the books are damaged ({books}). Nothing can trade. "
                             f"Put a backup back: {config.command('restore')}")
             return
-        n = _errors_here[config.home()] = _errors_here.get(config.home(), 0) + 1
+        _errors_here[config.home()] = held + 1
+        n = books_n + held + 1
         if n >= cfg.get("max_consecutive_errors", 3):
             config.trip(f"{n} failed runs in a row, and the books can't be written "
                         f"({books}). Last error: {e}. See: {config.command('health')}")
@@ -711,6 +717,13 @@ def _trade(client, cfg, summary):
             if not reason and not sig_live and kind and share is not None:
                 if paper_kinds.get(kind, 0.0) + sig.cost > float(share) * paper_capital + 1e-9:
                     reason = f"over its {float(share):.0%} share of the paper money"
+            if not reason and sig_live:
+                # Again, last: the rechecks above read Kalshi (seconds, at worst), and a stop
+                # or a stricter limit saved meanwhile must still stop this order.
+                stop = _stop_live(cfg, name)
+                if stop:
+                    summary["notes"].append(stop)
+                    return
             sid = db.insert("signals", strategy=name, event=sig.event, title=sig.title,
                             mode="live" if sig_live else "paper",
                             guaranteed=int(sig.guaranteed), cost=sig.cost, payout_min=sig.payout_min,
