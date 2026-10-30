@@ -2,6 +2,20 @@
 
 Newest first. Each 2-hour check-in adds one entry: what it checked, what it found, links.
 
+## 2026-10-30 04:05 UTC — fill counts read one strict way; order memory merged
+
+- Merged [PR #45](https://github.com/rohanmalhotra0/kal/pull/45): one reader decides how much an
+  order bought, everywhere. A reply that doesn't say for sure, or contradicts itself, is looked
+  up (or the bot stops), never guessed. Three independent reviews. One found a reply shape that
+  crashed the "still on the book?" check after the order was written as done with 0 bought, so
+  that fill was never booked. Fixed, with tests that fail on the old code. A $0.01 test order
+  whose reply shows any sign of a fill raises the alarm again.
+- Merged [PR #43](https://github.com/rohanmalhotra0/kal/pull/43): every order the bot sends
+  carries a mark Kalshi keeps, so books lost with the server get the bot's orders back. Four
+  independent reviews, none blocking.
+- Running: one more review across everything merged today, for bugs in how the changes combine.
+- Waiting on the owner: server update and `sudo kal setup`, and the private status repo.
+
 ## 2026-10-30 02:55 UTC — check-in: install-check race fixed; order memory through 3 reviews
 
 - Checked: CI green on main adabb58; market-check green on 6f9cd89 (all 11 strategies ran, 0
