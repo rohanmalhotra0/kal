@@ -365,6 +365,7 @@ def _run_once(client, cfg, t0):
         client = client or Kalshi.from_env(config.home(), cfg["env"])
         _run(client, cfg, summary)
         db.put("consecutive_errors", 0)
+        _errors_here.pop(config.home(), None)
         db.put("last_ok_run", time.time())
     except (LegFailed, OrderUnknown, Halted) as e:
         summary.update(ok=False, error=str(e))
@@ -443,15 +444,50 @@ def _alert_once(key, title, message, every=86400):
         log.warning("alert failed", exc_info=True)
 
 
+_errors_here = {}   # KAL_HOME -> failed runs in a row, counted here when the books can't take it
+
+
 def _count_error(cfg, e):
-    errors = (db.get("consecutive_errors", 0) or 0) + 1
-    db.put("consecutive_errors", errors)
+    try:
+        errors = (db.get("consecutive_errors", 0) or 0) + 1
+        db.put("consecutive_errors", errors)
+    except Exception as books:
+        # No order can be recorded on such books, so none is sent; but every run fails, and
+        # the count itself can't be kept there. Damaged: stop now, nothing will change.
+        # Busy, locked or full: count here, so a lasting problem still stops the bot.
+        if db.damaged(books):
+            try:
+                stopped = bool(config.load().get("disabled_reason"))
+            except Exception:
+                stopped = False
+            if not stopped:   # the health check may have stopped it (and said so) meanwhile
+                config.trip(f"the books are damaged ({books}). Nothing can trade. "
+                            f"Put a backup back: {config.command('restore')}")
+            return
+        n = _errors_here[config.home()] = _errors_here.get(config.home(), 0) + 1
+        if n >= cfg.get("max_consecutive_errors", 3):
+            config.trip(f"{n} failed runs in a row, and the books can't be written "
+                        f"({books}). Last error: {e}. See: {config.command('health')}")
+        return
     if errors >= cfg.get("max_consecutive_errors", 3):
         config.trip(f"{errors} failed runs in a row. Last error: {e}")
 
 
-def _still_on():
-    return config.load()["enabled"]
+def _stop_live(cfg, name):
+    """Before each real order: why to stop real trading now, or None. OFF stops it; so does
+    this strategy leaving live, or any money limit set stricter since the run began (the
+    owner cut the budget, say): the run's limits came from the old settings. The next run
+    starts on the new ones. A looser setting waits for the next run too."""
+    now = config.load()
+    if not now["enabled"]:
+        return "turned off mid-run: stopped trading"
+    if (now["strategies"].get(name) or {}).get("mode") != "live":
+        return f"{name} left live mid-run: this run stopped, the next starts on the new settings"
+    tighter = [k for k, safer in config.LIMITS.items()
+               if now.get(k) != cfg.get(k) and safer(now[k], cfg[k]) == now[k]]
+    if tighter:
+        return f"{', '.join(tighter)} set stricter mid-run: this run stopped, the next starts on the new settings"
+    return None
 
 
 def _write_off_sold(client, positions, summary):
@@ -644,7 +680,8 @@ def _trade(client, cfg, summary):
         limits = live_limits if is_live else paper_limits
         ctx = Context(client, cfg, mode, limits.budget_left, live_bankroll if is_live else paper_bankroll,
                       held_live if is_live else held_paper, research, params,
-                      open_exposure=limits.directional_open, held_paper=frozenset(held_paper))
+                      open_exposure=limits.directional_open, held_paper=frozenset(held_paper),
+                      held_cost=ledger.open_by_ticker() if is_live else paper.open_by_ticker())
         try:
             signals = strat.scan(ctx)
         except Exception as e:
@@ -656,8 +693,9 @@ def _trade(client, cfg, summary):
             # A strategy can keep an unproven idea (e.g. a newly discovered edge) on paper.
             sig_live = is_live and not sig.meta.get("paper_only")
             if sig_live:
-                if not _still_on():
-                    summary["notes"].append("turned off mid-run: stopped trading")
+                stop = _stop_live(cfg, name)
+                if stop:
+                    summary["notes"].append(stop)
                     return
                 ctx.budget_left = live_limits.budget_left
                 sig = strat.recheck(ctx, sig)

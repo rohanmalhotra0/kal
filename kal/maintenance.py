@@ -11,8 +11,10 @@ that stop the bot before either can hurt it.
               leave an order the books don't know about.
   clock_ok()  compares our clock with Kalshi's. Kalshi refuses signed requests with a
               wrong timestamp, so a basket could stop half-built.
-  health()    disk, clock, trading and the status report: the scheduler runs it every
-              10 minutes.
+  books_ok()  stops the bot if its books (kal.db) fail SQLite's check: every trade run
+              would fail on them, and nothing else would say so.
+  health()    disk, clock, books, trading and the status report: the scheduler runs it
+              every 10 minutes. It also resends a stop alert that didn't get through.
   daily()     disk, backup, then prune: the scheduler runs it once a day.
 
 A check result is a row: {"check", "ok", "level" ("ok" / "warn" / "fail"), "detail"}.
@@ -105,28 +107,53 @@ def _trip_once(reason):
     return True
 
 
+_sent_here = {}   # (KAL_HOME, key) -> when this process last sent it: when the books can't say
+
+
 def _alert(key, title, message, priority="high", every=WARN_EVERY):
-    """One phone alert per key per `every` seconds, so a lasting problem doesn't buzz all day."""
+    """One phone alert per key per `every` seconds, so a lasting problem doesn't buzz all day.
+    It goes even when the books can't be read (that may be the problem it reports): then
+    this process remembers what it sent instead."""
     if not notify.enabled():
         return False
     try:
         sent = db.get("alerts", {}) or {}
-        if time.time() - float(sent.get(key) or 0) < every:
-            return False
-        if notify.send(scrub(title), scrub(message), priority=priority, tags=("warning",)):
-            sent[key] = time.time()
-            db.put("alerts", sent)
-            return True
+        last = float(sent.get(key) or 0)
+    except Exception:
+        sent, last = None, 0.0
+    last = max(last, float(_sent_here.get((config.home(), key)) or 0))   # the books may not take writes
+    if time.time() - last < every:
+        return False
+    try:
+        ok = notify.send(scrub(title), scrub(message), priority=priority, tags=("warning",))
     except Exception:
         log.warning("alert %s not sent", key, exc_info=True)
-    return False
+        return False
+    if ok:
+        _note_sent(key, sent)
+    return ok
+
+
+def _note_sent(key, sent=None):
+    """Remember that an alert about `key` went: in this process, and in the books when they
+    can be written."""
+    now = _sent_here[(config.home(), key)] = time.time()
+    try:
+        sent = (db.get("alerts", {}) or {}) if sent is None else sent
+        sent[key] = now
+        db.put("alerts", sent)
+    except Exception:
+        log.warning("could not save that alert %s was sent", key, exc_info=True)
 
 
 # ---------- SQLite files ----------
 
+OPEN_WAIT = 30          # seconds to wait for a locked db before giving up
+
+
 @contextmanager
 def _open(path, **kw):
-    c = sqlite3.connect(path, timeout=30, **kw)
+    c = sqlite3.connect(path, timeout=OPEN_WAIT, **kw)
     try:
         yield c
     finally:
@@ -154,6 +181,44 @@ def _problem(path):
         return "; ".join(map(str, got))[:200]
     missing = [t for t in BOOKS if t not in tables]
     return f"no {', '.join(missing)} table" if missing else None
+
+
+DAMAGED = "the books are damaged"   # how every stop for damaged books begins (engine's too)
+
+
+def books_ok(trip=True, quick=False):
+    """This exchange's books (kal.db) open and pass SQLite's check. Damaged books (corrupt,
+    or not a database) fail every trade run before it can buy, while the heartbeat stays
+    fresh: so it stops the bot and says how to restore. Busy, locked or unreadable for a
+    moment is only a warning: a backup wouldn't fix that, and would drop newer rows. None
+    yet, or an empty file, is fine (the first run makes them). quick: open it and read its
+    schema only, for the watchdog's frequent check."""
+    p = db.path(_env())
+    name = os.path.basename(p)
+    if not os.path.isfile(p) or os.path.getsize(p) == 0:
+        return _row("books", "ok", "none yet (the first run makes them)")
+    try:
+        with _open(p) as c:
+            c.execute("SELECT count(*) FROM sqlite_master").fetchone()
+            got = ["ok"] if quick else [r[0] for r in c.execute("PRAGMA quick_check")]
+    except sqlite3.Error as e:
+        if not db.damaged(e):
+            return _row("books", "warn", f"couldn't check {name}: {e}")
+        got = [str(e)]
+    if got == ["ok"]:
+        return _row("books", "ok", f"{name} reads fine")
+    text = (f"{name} is damaged ({'; '.join(map(str, got))[:200]}). Nothing can trade. "
+            f"Put a backup back: {config.command('restore')}")
+    # A trade run may have stopped the bot for this already: its alert said it.
+    tripped = bool(trip and (_trip_once(f"{DAMAGED}: {text}") or _stopped_for(DAMAGED)))
+    return _row("books", "fail", text, tripped=tripped)
+
+
+def _stopped_for(prefix):
+    try:
+        return str(config.load().get("disabled_reason") or "").startswith(prefix)
+    except Exception:
+        return False
 
 
 def _tmp(path):
@@ -702,27 +767,39 @@ def _report_rows():
 
 
 def _safe(check, fn, *args, **kw):
-    """Run one check; a bug in it becomes a warning row, never a crash that hides the others."""
+    """Run one check; a bug in it becomes a warning row, never a crash that hides the others.
+    One that failed on the books says so (books=True): with damaged books, that's the alert."""
     try:
         return fn(*args, **kw)
     except Exception as e:
         log.warning("%s check crashed", check, exc_info=True)
-        return _row(check, "warn", f"couldn't check: {type(e).__name__}: {e}")
+        return _row(check, "warn", f"couldn't check: {type(e).__name__}: {e}",
+                    books=isinstance(e, sqlite3.DatabaseError))
 
 
 def health(trip=True, client=None):
-    """Disk, clock, trading and the status report: the scheduler runs this every 10 minutes.
-    A hard failure trips the bot (config.trip alerts the phone); a warning alerts the phone
-    once a day."""
+    """Disk, clock, books, trading and the status report: the scheduler runs this every 10
+    minutes. A hard failure trips the bot (config.trip alerts the phone); a warning alerts
+    the phone once a day. A stop alert that didn't get through is sent again."""
     rows = [_safe("disk", disk_ok, trip=trip), _safe("clock", clock_ok, client, trip=trip),
-            _safe("trading", trading_ok)] + _report_rows()
+            _safe("books", books_ok, trip=trip), _safe("trading", trading_ok)] + _report_rows()
     try:
         note_trips()
     except Exception:
         log.warning("could not write the trip history", exc_info=True)
+    try:
+        config.resend_stop()
+    except Exception:
+        log.warning("could not resend the stop alert", exc_info=True)
+    broken = any(r["check"] == "books" and r["level"] == "fail" for r in rows)
     for r in rows:
-        if r["level"] != "ok" and not r.get("tripped") and not r.get("unknown"):
-            _alert(f"{r['check']}:{r['level']}", f"kal warning: {r['check']}", r["detail"],
+        if r["level"] == "ok" or r.get("unknown") or (broken and r.get("books")):
+            continue   # (a check that couldn't read the damaged books: the books alert says it)
+        key = f"{r['check']}:{r['level']}"
+        if r.get("tripped"):
+            _note_sent(key)   # its stop alert just went: no second one about it for a day
+        else:
+            _alert(key, f"kal warning: {r['check']}", r["detail"],
                    priority="high" if r["level"] == "fail" else "default")
     try:
         db.put("health", {"ts": time.time(), "checks": rows})
@@ -807,14 +884,16 @@ def _bot_row():
 def checks(client=None):
     """Everything `kal health` shows, as rows. Never trips: a person is looking."""
     return [_safe("disk", disk_ok, trip=False), _safe("clock", clock_ok, client, trip=False),
-            _safe("timer", _timer_row), _safe("trading", trading_ok), *_report_rows(),
-            _safe("backup", _backup_row), _safe("bot", _bot_row)]
+            _safe("books", books_ok, trip=False), _safe("timer", _timer_row), _safe("trading", trading_ok),
+            *_report_rows(), _safe("backup", _backup_row), _safe("bot", _bot_row)]
 
 
 def alive():
-    """The quick local check (no network) for Docker's health check: timer and disk.
-    Only a "fail" row counts as unhealthy; a disk warning is not a reason to flag it."""
-    rows = [_safe("disk", disk_ok, trip=False), _safe("timer", _timer_row)]
+    """The quick local check (no network) for Docker's health check and kal-watch: disk,
+    books and timer. Only a "fail" row counts as unhealthy; a disk warning is not a reason
+    to flag it."""
+    rows = [_safe("disk", disk_ok, trip=False), _safe("books", books_ok, trip=False, quick=True),
+            _safe("timer", _timer_row)]
     for r in rows:
         if r["level"] == "warn" and r["check"] == "timer":
             r.update(ok=False, level="fail")   # here, no heartbeat at all means it isn't running

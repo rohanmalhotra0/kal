@@ -302,7 +302,7 @@ To change it (the hour is in UTC): `sudo kal set summary_hour_utc 14`
 
 | Alert | What it means | What to do |
 |---|---|---|
-| **kal stopped itself** (loud) | A safety stop. The bot is off. The alert says why. | See the next table. |
+| **kal stopped itself** (loud) | A safety stop. The bot is off. The alert says why. If ntfy was down, it is sent again every 10 minutes until it gets through. If it says "couldn't be saved", the disk is full or broken and the bot may run again: look now (this one repeats at most once an hour). | See the next table. |
 | **kal is not running** (loud) | The watchdog found the bot stopped. | Start it: `sudo systemctl start kal`. If it won't stay up: `sudo kal logs` |
 | **kal keeps restarting** (loud) | The bot is crash-looping. | `sudo kal logs`. The check-in will look into it. |
 | **kal looks unhealthy** (loud) | The bot runs, but a check fails (e.g. the scheduler stopped). | `sudo kal health` |
@@ -313,6 +313,7 @@ To change it (the hour is in UTC): `sudo kal set summary_hour_utc 14`
 | **kal warning: disk** | The disk is getting full. Under 200 MB it stops itself. | Free some space (see below). |
 | **kal warning: clock** | The server clock is off. Kalshi may refuse orders. | `timedatectl`. If it says not synchronized: `sudo systemctl restart chrony` |
 | **kal warning: trading** | Trade runs keep failing. Kalshi or the internet is down. It keeps trying. | Usually nothing. If it lasts a day: `sudo kal logs` |
+| **kal warning: books** | The books (`kal.db`) are damaged and the bot is stopped. | Put a backup back: see "Restore" below. |
 | **kal warning: report** | The status report can't reach GitHub. Usually the token ran out (they last 90 days). | Make a new token: step 10 below. Until then the check-in can't see the bot. |
 | **kal backup failed** | Last night's backup didn't work. | `sudo kal backup` shows why. |
 
@@ -333,6 +334,7 @@ It stays stopped until a person says so. `sudo kal health` shows why.
 | Disk almost full | Free some space (below). |
 | The server clock is ... Kalshi's clock | Fix the clock: `sudo systemctl restart chrony`, then `timedatectl`. |
 | Books restored from the ... backup | See "Restore" below. |
+| the books are damaged | `kal.db` is corrupt, so nothing can trade. See "Restore" below. (A lock or a full disk is not damage: those say "can't be written" and need no restore.) |
 
 When the cause is fixed: `sudo kal on --clear-trip`
 

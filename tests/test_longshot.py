@@ -434,9 +434,9 @@ def open_event(c, et, series="KXHIGHNY", hours=5.5, longshots=((0.07, 0.08),), c
     return markets
 
 
-def ctx_for(c, cells, bankroll=1000.0, budget=1000.0, held=(), open_exposure=0.0, **cfg_kw):
+def ctx_for(c, cells, bankroll=1000.0, budget=1000.0, held=(), open_exposure=0.0, held_cost=None, **cfg_kw):
     return Context(c, cfg(**cfg_kw), "paper", budget, bankroll, set(held), {"longshot": cells}, {},
-                   open_exposure=open_exposure)
+                   open_exposure=open_exposure, held_cost=dict(held_cost or {}))
 
 
 class StrategyTests(TempHome):
@@ -581,16 +581,34 @@ class StrategyTests(TempHome):
         self.assertEqual(len(sigs), 5)
         self.assertLessEqual(sum(s.cost for s in sigs), 10.0)
         self.assertEqual(len({s.meta["group"] for s in sigs}), 1)
-        # What's already held there counts as a full $5 bet each.
-        sigs = self.scan(bankroll=100.0, held={"KXHIGHNY-7-M1"})
+        # What's already held there counts as the most any bet can be (max_per_trade, $10):
+        # it may be a favorites bet. At $100 one holding fills the $10 cap; at $200, half.
+        self.assertEqual(self.scan(bankroll=100.0, held={"KXHIGHNY-7-M1"}), [])
+        sigs = self.scan(bankroll=200.0, held={"KXHIGHNY-7-M1"})
         self.assertTrue(sigs)
-        self.assertLessEqual(sum(s.cost for s in sigs) + fade.MAX_PER_TRADE, 10.0)
+        self.assertLessEqual(sum(s.cost for s in sigs) + 10.0, 20.0)
         # Another series is another group, with room of its own.
         for i in range(8):
             open_event(self.c, f"KXHIGHCHI-{i}", series="KXHIGHCHI")
         sigs = self.scan([cell(series=["KXHIGHNY", "KXHIGHCHI"])], bankroll=100.0)
         self.assertEqual(len(sigs), 10)
         self.assertEqual(len({s.meta["group"] for s in sigs}), 2)
+
+    def test_favorites_bets_held_in_a_series_day_count_in_full(self):
+        # Three $10 favorites bets fill a $300 bankroll's $30 cap on a series-day: the
+        # fade adds nothing there. (Counted at $5 each, it added $14.98: $44.98 on a $30 cap.)
+        self.c = FakeKalshi()
+        for i in range(8):
+            open_event(self.c, f"KXHIGHNY-{i}")
+        held = {f"KXHIGHNY-{i}-M0" for i in range(3)}
+        self.assertEqual(self.scan(bankroll=300.0, held=held), [])
+        self.assertTrue(self.scan(bankroll=300.0, held=set(list(held)[:2])))   # $10 of room left
+        # Lowering max_per_trade later can't shrink them: they count what the books say they cost.
+        cost = {tk: 10.0 for tk in held}
+        for lower in (5.0, 3.0):
+            self.assertEqual(self.scan(bankroll=300.0, held=held, held_cost=cost, max_per_trade=lower), [])
+        # And a small bet held there counts small.
+        self.assertTrue(self.scan(bankroll=300.0, held=held, held_cost={tk: 2.0 for tk in held}))
 
     def test_recheck_before_a_live_order(self):
         ctx = ctx_for(self.c, [cell("live")])

@@ -2,6 +2,30 @@
 
 Newest first. Each 2-hour check-in adds one entry: what it checked, what it found, links.
 
+## 2026-10-30 10:50 UTC — check-in: swarm review of the money path, 6 fixes in review
+
+- Checked: CI green on main 9bb9385; market-check green on e5f49b8 (self-test passed, scan
+  found nothing, research 0 failed). No status report yet: the private `kal-status` repo
+  isn't shared with Claude.
+- Swarm review of the whole money path: 3 finders (limits, order handling, operations),
+  each finding checked by a separate skeptic told to refute it. 6 confirmed, 1 refuted
+  (mentions' flat $5 bets: by design). None loses money directly; each could let a limit
+  read looser than the truth, or let the bot stop without the owner hearing.
+- [PR #53](https://github.com/rohanmalhotra0/kal/pull/53): damaged books (`kal.db`) stopped
+  all trading with no stop and no alert, and the watchdog stayed green (2.5 h reproduced, 0
+  alerts). Now they stop the bot and say how to restore; alerts go even with the books
+  unreadable; a stop alert ntfy refused is sent again until it gets through.
+- [PR #54](https://github.com/rohanmalhotra0/kal/pull/54): the auto-update missed a crash
+  loop after earlier crashes (its own restart resets systemd's count). Now any crash rolls
+  back.
+- [PR #55](https://github.com/rohanmalhotra0/kal/pull/55): a budget cut or a strategy moved
+  off live mid-run was ignored until the run ended ($57.60 bought on a $10 budget); a
+  half-built basket's legs weren't counted as bets; two bet strategies could pass their
+  shared per-series cap ($44.98 on $30). All fixed.
+- Each PR has tests that fail on main, and its own independent review.
+- Research: only idea #18 is left, and it needs weeks of paper trades from the server.
+- Waiting on the owner: update the server, `sudo kal setup`, `sudo kal doctor`.
+
 ## 2026-10-30 08:50 UTC — check-in: memory cut by 43% at the peak; fix merged
 
 - Checked: CI green on main 3eae68e; market-check green on e876e50 (today, 06:42). No
