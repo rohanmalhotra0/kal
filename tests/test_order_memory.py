@@ -261,10 +261,19 @@ class RecoverAtomicTests(TempHome):
     def test_a_write_off_that_fails_leaves_nothing_half_done(self):
         db.insert("settlements", ticker="M-1", settled_ts=time.time(), result="yes", revenue=0, cost=0, pnl=0)
         self.c.order_list = [order(self.mine, ago=1800)]
-        with mock.patch.object(ledger, "fee", side_effect=OSError("database is locked")):
+        calls = []
+
+        def locked_on_the_write_off(n, p):   # the stand-in signal's fee goes first
+            calls.append((n, p))
+            if len(calls) > 1:
+                raise OSError("database is locked")
+            return client.fee(n, p)
+        with mock.patch.object(ledger, "fee", locked_on_the_write_off):
             with self.assertRaises(OSError):
                 ledger.recover(self.c)
+        self.assertEqual(len(calls), 2)                                                # got to the write-off
         self.assertEqual(db.query("SELECT COUNT(*) AS n FROM orders")[0]["n"], 0)   # rolled back
+        self.assertEqual(db.query("SELECT COUNT(*) AS n FROM signals")[0]["n"], 0)  # its stand-in too
         self.assertEqual(ledger.recover(self.c), 1)                                    # done again, whole
         self.assertAlmostEqual(ledger.realized(), -(5 + client.fee(10, 0.5)))
 

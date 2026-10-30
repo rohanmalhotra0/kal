@@ -74,7 +74,10 @@ tests/            unittest; tests/fakes.py has FakeKalshi, tests/helpers.py has 
   books. Books rolled back to an older copy get its full result. New books (a lost disk)
   can't see what came before the mark (Oct 30, 2026), so there their gains only make up
   their losses, never more (`ledger.made_up`): a past basket nets out instead of reading
-  as a loss of one leg. Each live run looks back to its last check.
+  as a loss of one leg. Each live run looks back to its last check. Every order put back
+  (here or by `catch_up`) gets a stand-in signal with its event from Kalshi's market
+  data, so `max_per_event` counts it. A ticker can't say its event: player-prop and
+  negative-threshold tickers carry extra hyphens.
 - **API keys are Ed25519 (Kalshi's default since 2026) or RSA.** Both sign timestamp +
   method + path (no query), base64: Ed25519 signs the text itself, RSA uses RSA-PSS with
   SHA-256 (`client.sign`). The PEM header doesn't say which; `client.parse_key` refuses
