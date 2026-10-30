@@ -148,9 +148,12 @@ def _note_sent(key, sent=None):
 
 # ---------- SQLite files ----------
 
+OPEN_WAIT = 30          # seconds to wait for a locked db before giving up
+
+
 @contextmanager
 def _open(path, **kw):
-    c = sqlite3.connect(path, timeout=30, **kw)
+    c = sqlite3.connect(path, timeout=OPEN_WAIT, **kw)
     try:
         yield c
     finally:

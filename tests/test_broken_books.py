@@ -144,6 +144,72 @@ class BrokenBooksTests(Base):
         self.assertIn("can't be written", reason)
         self.assertNotIn("restore", reason)   # a backup wouldn't fix a lock or a full disk
 
+    def test_a_real_lock_is_not_damage(self):
+        p = db.path()
+        with sqlite3.connect(p) as c:
+            c.execute("PRAGMA journal_mode=DELETE")   # as after a restore: a writer blocks readers
+        holder = sqlite3.connect(p, isolation_level=None)
+        self.addCleanup(holder.close)
+        holder.execute("BEGIN EXCLUSIVE")
+        try:
+            with mock.patch.object(maintenance, "OPEN_WAIT", 0.1):
+                row = maintenance.books_ok()
+            busy = None
+            try:
+                sqlite3.connect(p, timeout=0).execute("SELECT 1 FROM kv").fetchall()
+            except sqlite3.OperationalError as e:
+                busy = e
+        finally:
+            holder.execute("ROLLBACK")
+        self.assertEqual(row["level"], "warn", row)
+        self.assertTrue(config.load()["enabled"])
+        self.assertIsNotNone(busy)
+        self.assertFalse(db.damaged(busy))   # a real one, with its SQLite code
+
+    def test_real_corruption_inside_the_file_is_damage(self):
+        p = db.path()
+        with sqlite3.connect(p) as c:
+            c.execute("CREATE TABLE IF NOT EXISTS filler (x TEXT)")
+            c.executemany("INSERT INTO filler VALUES (?)", [("x" * 500,)] * 2000)
+        with sqlite3.connect(p) as c:
+            c.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        size = os.path.getsize(p)
+        with open(p, "r+b") as f:   # garbage over a page in the middle: the header still reads
+            f.seek(size // 2 // 4096 * 4096)
+            f.write(os.urandom(4096))
+        err = None
+        try:
+            with sqlite3.connect(p) as c:
+                rows = c.execute("PRAGMA quick_check").fetchall()
+        except sqlite3.DatabaseError as e:
+            err, rows = e, []
+        self.assertTrue(err is not None or rows != [("ok",)])
+        if err is not None:
+            self.assertTrue(db.damaged(err))   # SQLITE_CORRUPT
+        with free_disk(50_000), kalshi_clock(0):
+            maintenance.health()   # (the other checks still read their own pages fine)
+        self.assertTrue(config.load()["disabled_reason"].startswith(maintenance.DAMAGED))
+        self.assertEqual(self.phone.titles, ["kal stopped itself"])
+
+    def test_the_count_kept_in_memory_starts_again_after_a_good_run(self):
+        cfg = config.load()
+        locked = sqlite3.OperationalError("database is locked")
+        for _ in range(2):
+            with mock.patch.object(db, "get", side_effect=locked):
+                engine._count_error(cfg, RuntimeError("boom"))
+        self.assertTrue(engine.run_once(self.client)["ok"])
+        for _ in range(2):
+            with mock.patch.object(db, "get", side_effect=locked):
+                engine._count_error(cfg, RuntimeError("boom"))
+        self.assertTrue(config.load()["enabled"])   # 2 + 2 with a good run between: no stop
+
+    def test_a_run_finding_damage_after_the_health_check_stopped_it_sends_nothing_more(self):
+        break_books()
+        with free_disk(50_000), kalshi_clock(0), self.assertLogs("kal", "WARNING"):
+            maintenance.health()
+        engine._count_error(config.load(), sqlite3.DatabaseError("file is not a database"))
+        self.assertEqual(self.phone.titles, ["kal stopped itself"])
+
     def test_an_empty_books_file_is_none_yet(self):
         os.remove(db.path())
         open(db.path(), "w").close()
@@ -216,9 +282,30 @@ class StaleStopTests(Base):
             self.assertTrue(config.resend_stop())
         self.assertIn("second reason", send.call_args.args[1])
 
-    def test_a_stop_for_another_reason_since_drops_the_unsent_one(self):
+    def test_what_goes_is_what_it_is_stopped_for_now(self):
         self.unsent("first reason")
-        config.update({"disabled_reason": "someone else stopped it"})   # e.g. a later trip
-        self.assertFalse(config.resend_stop())
-        self.assertFalse(os.path.exists(os.path.join(config.home(), config.UNSENT_STOP)))
+        config.update({"disabled_reason": "a later stop"})
+        with mock.patch.object(notify, "send", wraps=notify.send) as send:
+            self.assertTrue(config.resend_stop())
+        self.assertIn("a later stop", send.call_args.args[1])
+        self.assertFalse(config.resend_stop())   # owed no more
+
+    def test_a_reason_with_crlf_is_still_resent(self):
+        # Raw HTTP error pages (CRLF) end up in reasons: the old text match dropped them.
+        self.unsent("basket left half-built: <html>\r\n<h1>502</h1>\r\n</html>")
+        self.assertTrue(config.resend_stop())
+        self.assertEqual(self.phone.titles, ["kal stopped itself"])
+
+    def test_a_resend_that_finishes_late_keeps_a_newer_owed_alert(self):
+        self.unsent("first reason")
+        token = config._owed()
+        config._owe_alert()            # another stop's alert failed meanwhile
+        config._settle_owed(token)     # the older resend finishes
+        self.assertIsNotNone(config._owed())
+
+    def test_a_stop_that_cant_be_saved_still_says_so(self):
+        full = OSError(28, "No space left on device")
+        with mock.patch.object(config, "_write", side_effect=full), self.assertRaises(OSError):
+            config.trip("3 failed runs in a row, and the books can't be written")
+        self.assertEqual(self.phone.titles, ["kal stopped itself"])
 

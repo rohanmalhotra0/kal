@@ -193,76 +193,89 @@ def trip(reason):
     The phone alert is "high", not "urgent": a stop already ends all trading, so it is
     news to read when awake, not an alarm for 3 AM."""
     reason = str(reason) or "stopped"
-    with _locked():
-        try:
-            data = _raw()
-        except (OSError, ValueError):
-            data = {}
-        data.update(enabled=False, disabled_reason=reason)
-        _write(data)
+    failed = None
+    try:
+        with _locked():
+            try:
+                data = _raw()
+            except (OSError, ValueError):
+                data = {}
+            data.update(enabled=False, disabled_reason=reason)
+            _write(data)
+    except Exception as e:   # a full disk, a read-only folder: still say so, then raise
+        failed = e
+    body = (f"{reason}\n\n{STOPPED_HELP}" if failed is None else
+            f"{reason}\n\nThis stop couldn't be saved ({failed}), so the bot may run again. "
+            f"Look now: {command('health')}")
     try:
         from . import notify
         if notify.enabled():
-            if notify.send("kal stopped itself", f"{reason}\n\n{STOPPED_HELP}", priority="high",
-                           tags=("no_entry",)):
-                _drop_unsent()   # an older stop that didn't get through is old news now
+            if notify.send("kal stopped itself", body, priority="high", tags=("no_entry",)):
+                _settle_owed()   # the latest stop got through: nothing older is owed
             else:
-                _keep_unsent(reason)
+                _owe_alert()
     except Exception:
         pass  # an alert must never block a trip
+    if failed is not None:
+        raise failed
 
 
-UNSENT_STOP = "unsent_stop.txt"
+UNSENT_STOP = "unsent_stop.txt"   # exists while a stop alert is owed (one didn't get through)
 
 
-def _keep_unsent(reason):
-    """A stop alert that didn't get through (ntfy down, no network). resend_stop() tries it
-    again: it is the one alert that says the bot stopped trading. Never raises."""
+def _owed():
+    """The token of the owed stop alert, or None."""
     try:
-        p = os.path.join(home(), UNSENT_STOP)
-        tmp = f"{p}.{os.getpid()}.tmp"
-        with open(tmp, "w") as f:
-            f.write(reason)
-        os.replace(tmp, p)
+        with open(os.path.join(home(), UNSENT_STOP), newline="") as f:
+            return f.read()
     except OSError:
+        return None
+
+
+def _owe_alert():
+    """A stop alert didn't get through: note that one is owed, with a fresh token, so a
+    resend that finishes later can't clear this one. Never raises."""
+    try:
+        with _locked():
+            p = os.path.join(home(), UNSENT_STOP)
+            tmp = f"{p}.{os.getpid()}.{threading.get_ident()}.tmp"
+            with open(tmp, "w") as f:
+                f.write(f"{time.time_ns()}-{threading.get_ident()}")
+            os.replace(tmp, p)
+    except Exception:
         pass
 
 
-def _drop_unsent(only=None):
-    """Forget the unsent stop alert: any, or only if it still says `only` (a newer one that
-    didn't get through stays). Never raises."""
+def _settle_owed(token=None):
+    """No stop alert is owed any more. With a token: only if no newer one was noted since.
+    Never raises."""
     try:
-        p = os.path.join(home(), UNSENT_STOP)
-        if only is not None:
-            with open(p) as f:
-                if f.read() != only:
-                    return
-        os.remove(p)
-    except OSError:
+        with _locked():
+            if token is None or _owed() == token:
+                os.remove(os.path.join(home(), UNSENT_STOP))
+    except Exception:
         pass
 
 
 def resend_stop():
-    """Send a stop alert again if it didn't get through, while the bot is still stopped for
-    that reason (cleared, or stopped since for another: dropped). The health job calls this
-    every 10 minutes. True if it went now. Never raises."""
+    """A stop alert is owed: while the bot is stopped, send what it is stopped for now (the
+    owed one may be older); once it is back on, nothing is owed. The health job calls this
+    every 10 minutes. True if one went now. Never raises."""
     try:
-        with open(os.path.join(home(), UNSENT_STOP)) as f:
-            reason = f.read()
-    except OSError:
-        return False
-    try:
+        token = _owed()
+        if token is None:
+            return False
         try:
-            now = _raw().get("disabled_reason")
+            reason = _raw().get("disabled_reason") or ""
         except Exception:
-            now = reason   # can't tell: a repeat is better than silence
-        if now != reason:
-            _drop_unsent(reason)
+            reason = "kal stopped itself, and its settings can't be read now."   # still owed
+        if not reason:
+            _settle_owed(token)
             return False
         from . import notify
         if notify.send("kal stopped itself", f"{reason}\n\n{STOPPED_HELP}", priority="high",
                        tags=("no_entry",)):
-            _drop_unsent(reason)
+            _settle_owed(token)
             return True
     except Exception:
         pass
@@ -282,7 +295,7 @@ def turn_off():
 
 def clear_trip():
     update({"disabled_reason": ""})
-    _drop_unsent()
+    _settle_owed()
 
 
 def command(rest):

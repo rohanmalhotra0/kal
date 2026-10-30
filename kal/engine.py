@@ -456,8 +456,13 @@ def _count_error(cfg, e):
         # the count itself can't be kept there. Damaged: stop now, nothing will change.
         # Busy, locked or full: count here, so a lasting problem still stops the bot.
         if db.damaged(books):
-            config.trip(f"the books are damaged ({books}). Nothing can trade. "
-                        f"Put a backup back: {config.command('restore')}")
+            try:
+                stopped = bool(config.load().get("disabled_reason"))
+            except Exception:
+                stopped = False
+            if not stopped:   # the health check may have stopped it (and said so) meanwhile
+                config.trip(f"the books are damaged ({books}). Nothing can trade. "
+                            f"Put a backup back: {config.command('restore')}")
             return
         n = _errors_here[config.home()] = _errors_here.get(config.home(), 0) + 1
         if n >= cfg.get("max_consecutive_errors", 3):
