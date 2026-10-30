@@ -29,8 +29,9 @@ KillSignal=SIGTERM
 TimeoutStopSec=330
 
 # Cap kal's memory, so it can never starve SSH or the system: 60% of the server's RAM
-# (1.2 GB of 2 GB). A trade run peaks near 320 MB and research near 220 MB, and they run at
-# the same time (install-check measures it, with no swap). Past the cap the kernel stops one
+# (1.2 GB of 2 GB). A trade run peaks near 320 MB and gives it back after (about 185 MB
+# between runs, measured 2026-10-30), research peaks near 220 MB, and they run at the same
+# time (install-check measures it, with no swap). Past the cap the kernel stops one
 # process. Research runs in its own process and asks to go first; OOMPolicy=continue keeps
 # the rest (trading) running. If the main process is the one stopped, it starts again.
 MemoryMax=60%

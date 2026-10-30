@@ -4,14 +4,18 @@
 reads them a page at a time, and slims each market, without changing what a strategy sees
 in the events it keeps. python -m unittest tests.test_engine_memory
 """
+import copy
 import glob
+import json
 import os
+import platform
 import re
+import sys
 import time
 from datetime import datetime, timezone
 from unittest import mock
 
-from kal import client, config, db, engine, risk
+from kal import client, config, db, engine, risk, scheduler
 from kal.research import discover
 from kal.strategies import load_all
 from kal.strategies.base import Context
@@ -46,7 +50,7 @@ class Pages(FakeKalshi):
         self.event_list = [ev for p in pages for ev in p]
 
     def event_pages(self, **params):
-        yield from self.page_list
+        yield from copy.deepcopy(self.page_list)
 
 
 class ScopeTests(TempHome):
@@ -130,6 +134,20 @@ class LeanTests(TempHome):
         for k in ("price_ranges", "updated_time", "early_close_condition"):
             self.assertNotIn(k, a)
         self.assertEqual((a["ticker"], a["yes_bid_dollars"], a["floor_strike"]), ("E-0", "0.5000", 1.5))
+
+    def test_a_slimmed_market_takes_only_the_room_it_needs(self):
+        # A dict never shrinks when keys go. Slimmed in place, half the real markets kept a
+        # table built for 43+ fields: 1,584 bytes where 832 do (40 MB on 2026-10-30).
+        kept = {**{f"field_{i}": i for i in range(30)}, "ticker": "E-1"}
+        parsed = json.loads(json.dumps({**{k: "x" for k in engine.UNREAD}, **kept}))
+        self.assertGreater(len(parsed), 42)
+        ev = {"event_ticker": "E", "markets": [parsed, "odd"]}
+        slim, odd = engine._lean(ev, {})["markets"]
+        self.assertEqual(slim, kept)
+        self.assertEqual(list(slim), list(kept))  # same order too
+        self.assertEqual(sys.getsizeof(slim), sys.getsizeof(dict(kept)))
+        self.assertLess(sys.getsizeof(slim), sys.getsizeof(parsed))
+        self.assertEqual(odd, "odd")
 
     def test_no_code_reads_a_field_the_run_drops(self):
         # If code starts to read one, take it out of engine.UNREAD: else it reads None.
@@ -342,3 +360,42 @@ class SameTradesTests(TempHome):
                 if mod is metal_link_arb and days == 2:
                     self.assertTrue(cut_off)   # its money is back 8 days after the close: near enough
         self.assertGreater(traded, 5)   # the fixtures do trade when they're near
+
+
+class GiveBackTests(TempHome):
+    """A trade run frees its events at the end, but glibc keeps the pages: after each job the
+    scheduler hands them back (give_back_memory), so research has more headroom under the
+    cap on a server with no swap."""
+
+    def sched(self, **jobs):
+        return scheduler.Scheduler(jobs=jobs, clock=lambda: 1_000_000.0, threaded=False)
+
+    def test_every_job_gives_memory_back_even_one_that_crashes(self):
+        def boom():
+            raise RuntimeError("kaboom")
+        s = self.sched(trade=lambda: {"ok": True}, report=boom)
+        with mock.patch.object(scheduler, "give_back_memory") as give, \
+                self.assertLogs("kal.scheduler", "ERROR"):
+            self.assertEqual(s.tick(), ["trade", "report"])
+        self.assertEqual(give.call_count, 2)
+        self.assertTrue(s.state()["trade"]["ok"])
+        self.assertFalse(s.state()["report"]["ok"])
+
+    def test_no_libc_never_stops_a_job(self):
+        s = self.sched(trade=lambda: {"ok": True})
+        with mock.patch("ctypes.CDLL", side_effect=OSError("no libc here")):
+            self.assertFalse(scheduler.give_back_memory())
+            self.assertEqual(s.tick(), ["trade"])
+        self.assertTrue(s.state()["trade"]["ok"])
+
+    def test_it_really_gives_memory_back_on_glibc(self):
+        # No mocks. A renamed symbol or a broken call would quietly return False, and the bot
+        # would sit at a run's peak again with every test green. Free 40 MB of heap held
+        # below newer blocks (so glibc can't trim it by itself), then it must go back.
+        if platform.libc_ver()[0] != "glibc":
+            self.skipTest("malloc_trim is glibc's")
+        junk = [bytes(2048) for _ in range(20000)]
+        keep = [bytes(600) for _ in range(2000)]
+        del junk
+        self.assertTrue(scheduler.give_back_memory())
+        self.assertEqual(len(keep), 2000)

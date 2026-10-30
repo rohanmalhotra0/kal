@@ -2,6 +2,35 @@
 
 Newest first. Each 2-hour check-in adds one entry: what it checked, what it found, links.
 
+## 2026-10-30 08:50 UTC — check-in: memory cut by 43% at the peak; fix in review
+
+- Checked: CI green on main 3eae68e; market-check green on e876e50 (today, 06:42). No
+  status report yet: the private `kal-status` repo isn't shared with Claude.
+- Found why the soak peaked at 546 MB: a trade run keeps 11,433 of 16,345 open events
+  (209 MB in Python, mostly sports and the midterms). Python frees it all after the run, but
+  the memory wasn't handed back to the system, so the bot sat near 560 MB between runs. No
+  leak: memory stayed flat over 20 runs. Also, slimmed markets kept tables sized for 43+
+  fields: 40 MB wasted.
+- Fix: [PR #52](https://github.com/rohanmalhotra0/kal/pull/52). Hand memory back after every
+  job; copy each slimmed market into a right-sized table. On live data: peak 312-343 MB (was
+  556-567), about 185 MB between runs (was about 560). Independent review and CI running.
+- Research: only idea #18 is left, and it needs weeks of paper trades from the server.
+- Waiting on the owner: update the server, `sudo kal setup`, `sudo kal doctor`.
+
+## 2026-10-30 07:45 UTC — check-in: 40-minute paper run on live data is clean
+
+- Checked: CI green on main 824e099; market-check green on e876e50. No status report yet:
+  the private `kal-status` repo isn't shared with Claude, so the server isn't reporting.
+- Soak test (GitHub Actions, live Kalshi data, no key so paper only): the real scheduler ran
+  40 minutes. 8 trade runs, all ok; maintenance ok (backup made); 0 errors; 0 live orders.
+  0 signals, which is normal for 3 AM New York with these strict rules.
+- One number to chase: the bot's process peaked at 546 MB, more than the 320 MB a trade run
+  was measured at. Still well under the server's 1.2 GB cap, but a slow climb would matter on
+  a server with no swap. A follow-up probe now logs memory after every trade run.
+- Research: only idea #18 is untested, and it needs 4+ weeks of paper trades from the
+  server. Nothing new to build until then.
+- Waiting on the owner: update the server, `sudo kal setup`, `sudo kal doctor`.
+
 ## 2026-10-30 06:30 UTC — audit fixes merged: restore, lost disk, per-event cap, baskets, backups
 
 The cross-PR audit (3 finders, each finding checked by a separate verifier) found 6 issues in
