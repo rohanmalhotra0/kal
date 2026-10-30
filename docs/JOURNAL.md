@@ -2,6 +2,17 @@
 
 Newest first. Each 2-hour check-in adds one entry: what it checked, what it found, links.
 
+## 2026-10-30 20:50 UTC — check-in: all green; the soak of main is still running
+
+- Checked: CI green on main 9c7f4b9. Scheduled market-check on a54c586: self-test all ok,
+  scan 0 found for all 11 strategies (no orders), research 3 tested / 0 failed, coverage
+  ok. No status report: the private `kal-status` repo isn't shared with Claude.
+- Nothing broken, so no fix. Research: only idea #18 is left, and it needs weeks of paper
+  trades from the server.
+- The 3-hour paper soak of main ([run 41105723547](https://github.com/rohanmalhotra0/kal/actions/runs/41105723547))
+  ends about 21:20; read at 21:30.
+- Waiting on the owner: update the server, `sudo kal setup`, `sudo kal doctor`.
+
 ## 2026-10-30 18:50 UTC — check-in: all green on #57; a 3-hour soak of main runs
 
 - Checked: CI green on main a54c586. Market-check on 8cd421b (#57 merged): self-test all
