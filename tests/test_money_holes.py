@@ -236,9 +236,9 @@ class LiveBasketTests(TempHome):
         self.assertEqual({abs(n) for n in c.held.values()}, {9.5})
         self.assertEqual(config.load()["disabled_reason"], "")
 
-    def test_a_part_fill_read_from_what_was_left_matches_every_leg(self):
-        # A reply with only initial and remaining counts: 10.00 - 1.13 is 8.870000000000001 in
-        # floats. The later legs must ask for the 8.87 they send, not read 8.87 as short (critic).
+    def test_a_part_fill_read_from_the_fill_count_matches_every_leg(self):
+        # Kalshi's counts have 2 decimals: the later legs ask for the 8.87 the first leg got,
+        # and never read it as short (critic).
         c = fake_with_arb()
         real_buy = c.buy
 
@@ -246,14 +246,34 @@ class LiveBasketTests(TempHome):
             r = real_buy(ticker, side, count, price, client_order_id)
             if len(c.orders) == 1:
                 c.held[ticker] += 1.13 if c.held[ticker] < 0 else -1.13   # 1.13 never filled
-                return {"order_id": "o1", "status": "canceled", "initial_count_fp": f"{count:.2f}",
-                        "remaining_count_fp": "1.13"}
+                return {"order_id": "o1", "status": "canceled", "fill_count_fp": "8.87",
+                        "remaining_count_fp": "0.00"}
             return r
         c.buy = buy
         engine.run_once(c)
         self.assertEqual(config.load()["disabled_reason"], "")
         self.assertEqual([o[2] for o in c.orders], [10, 8.87, 8.87, 8.87])
         self.assertEqual([r["filled"] for r in db.query("SELECT filled FROM orders ORDER BY id")], [8.87] * 4)
+
+    def test_a_cancelled_reply_with_no_fill_count_buys_no_more_legs(self):
+        # Initial and remaining alone: Kalshi zeroes "remaining" when it cancels the rest, so
+        # 10 less 0 would read as 10 bought when 8.87 were. The later legs would then buy 10
+        # each: a position no locked-in set covers. The order is looked up instead.
+        c = fake_with_arb()
+        real_buy = c.buy
+
+        def buy(ticker, side, count, price, client_order_id=None):
+            r = real_buy(ticker, side, count, price, client_order_id)
+            if len(c.orders) == 1:
+                c.held[ticker] += 1.13 if c.held[ticker] < 0 else -1.13
+                return {"order_id": "o1", "status": "canceled", "initial_count_fp": f"{count:.2f}",
+                        "remaining_count_fp": "0.00"}
+            return r
+        c.buy = buy
+        s = engine.run_once(c)
+        self.assertFalse(s["ok"], s)
+        self.assertEqual(len(c.orders), 1)                         # no later leg bought
+        self.assertEqual([r["status"] for r in ledger.unresolved_orders()], ["unknown"])   # looked up next run
 
     def test_env_switch_mid_run_keeps_one_runs_orders_in_one_books(self):
         c = fake_with_arb()

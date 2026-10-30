@@ -50,6 +50,24 @@ class ClientTests(unittest.TestCase):
         self.assertEqual(client.filled({"fill_count_fp": "3.00"}, 5), 3)
         self.assertEqual(client.filled({"status": "executed"}, 5), 5)
 
+    def test_initial_less_remaining_counts_only_for_an_order_done_in_full(self):
+        # Kalshi zeroes "remaining" when it cancels the rest of an order.
+        cancelled = {"status": "canceled", "initial_count_fp": "10.00", "remaining_count_fp": "0.00"}
+        self.assertEqual(client.filled(cancelled, 10), 0)
+        self.assertFalse(client.fill_known(cancelled))           # looked up, never guessed
+        done = dict(cancelled, status="executed")
+        self.assertEqual(client.filled(done, 10), 10)
+        self.assertTrue(client.fill_known(done))
+        self.assertEqual(client.filled(dict(cancelled, fill_count_fp="3.00"), 10), 3)
+
+    def test_a_cancelled_test_order_without_a_fill_count_is_no_false_alarm(self):
+        from kal import gate
+        ok, why, alarming = gate.judge("T-1", 0.10, {"status": "canceled", "initial_count_fp": "1.00",
+                                                      "remaining_count_fp": "0.00"})
+        self.assertFalse(ok)
+        self.assertFalse(alarming, why)   # it was "FILLED": a stop for an order that bought nothing
+        self.assertIn("can't tell", why)
+
     def test_price_shapes_seen_on_the_real_api(self):
         self.assertEqual(client.price({"yes_bid_dollars": "0.0500"}, "yes_bid"), 0.05)
         self.assertEqual(client.price({"close": "0.8000"}, "close"), 0.8)   # historical candles

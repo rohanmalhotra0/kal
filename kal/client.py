@@ -516,29 +516,33 @@ def price_strict(d, field):
 
 
 def filled(order, requested):
-    """Contracts an order actually bought. Prefers Kalshi's fill count; falls back to
-    initial - remaining; then to the status. Never reports more than was asked for."""
+    """Contracts an order actually bought: Kalshi's fill count. Without one, all of it for an
+    order "executed" in full (initial less remaining, or what was asked), else 0. On any other
+    order initial less remaining says nothing: Kalshi zeroes "remaining" when it cancels the
+    rest, so it would read as all of it (fill_known() is False there). Never more than asked."""
     if "fill_count_fp" in order or "fill_count" in order:
         n = num(order, "fill_count")
+    elif order.get("status") != "executed":
+        n = 0
     elif ("initial_count_fp" in order or "initial_count" in order) and \
             ("remaining_count_fp" in order or "remaining_count" in order):
         n = num(order, "initial_count") - num(order, "remaining_count")
     else:
-        n = requested if order.get("status") == "executed" else 0
+        n = requested
     # Kalshi counts have 2 decimals. Without rounding, 10.00 - 1.13 is 8.870000000000001: a
     # basket's later legs would ask for that, get the 8.87 sent, and read as short.
     return max(0.0, min(float(requested), round(n, 2)))
 
 
 def fill_known(order):
-    """True if an order reply says how much it bought: a fill count, initial and remaining
-    counts, or "executed" (all of it). A "canceled" alone could hide a part fill."""
+    """True if an order reply says how much it bought: a fill count, or "executed" (all of
+    it). A "canceled" alone could hide a part fill, and so could initial and remaining counts:
+    Kalshi zeroes "remaining" when it cancels the rest. The order gets looked up instead."""
     def has(field):
         return f"{field}_fp" in order or field in order
     if not isinstance(order, dict):
         return False
-    counts = has("fill_count") or (has("initial_count") and has("remaining_count"))
-    return counts or order.get("status") == "executed"
+    return has("fill_count") or order.get("status") == "executed"
 
 
 DONE = ("executed", "canceled", "cancelled")
