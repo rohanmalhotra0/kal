@@ -434,11 +434,15 @@ Each morning (about 09:30 UTC) it fetches `main` and then, to stay safe:
   user that can't read your key, topic or books. Only if the tests pass does it swap the
   new code into `/opt/kal`. If a test fails, it stays put and sends "kal update failed
   its tests" (once per bad version).
-- After the restart it **checks the bot is really alive**: running, not restarting by
-  itself, and no check failing that passed before. If not, it puts the old code and
-  packages back and sends "kal update rolled back". If the bot was already crash-looping
-  before the update, it still rolls back, but tries that version again the next day. If
-  you stop the bot during the check, it keeps the new code and says it wasn't checked.
+- After the restart it **checks the bot is really alive** for 2 minutes: running, not
+  crashing, and no check failing that passed before. If not, it puts the old code and
+  packages back and sends "kal update rolled back". If the old code then fails the same
+  way (a crash loop that started before or during the update, say), the update isn't
+  to blame: the alert says so, and it tries that version again the next day.
+- If you restart the bot while it updates, it waits for that restart to finish, then
+  checks the new code all the same. If you stop the bot, it keeps the new code and says
+  it wasn't checked. If the restart itself fails, it goes back to the old code and tries
+  again the next day.
 
 See what it did: `sudo journalctl -u kal-update`. Turn it off:
 `sudo systemctl disable --now kal-update.timer`

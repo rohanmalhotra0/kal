@@ -84,7 +84,7 @@ fi
 # the count from 0, so a crash after one can read the same as, or lower than, before.
 nown=$(systemctl show kal -p NRestarts --value 2>/dev/null || echo 0)
 inv=$(systemctl show kal -p InvocationID --value 2>/dev/null || true)
-read -r prev pinv < "$DATA/watch_nrestarts" 2>/dev/null || { prev=$nown; pinv=$inv; }
+read -r prev pinv 2>/dev/null < "$DATA/watch_nrestarts" || { prev=$nown; pinv=$inv; }
 echo "$nown ${inv:-}" > "$DATA/watch_nrestarts" 2>/dev/null || true
 if [ "$nown" -gt 0 ] 2>/dev/null && { [ "$nown" != "$prev" ] || [ "${inv:-}" != "${pinv:-${inv:-}}" ]; }; then
   alert loop "kal keeps restarting" "The bot is crash-looping. Look: sudo kal logs"

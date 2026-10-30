@@ -109,6 +109,13 @@ esac
         self._run()
         self.assertEqual(_read(self.curl_log), first)   # no second buzz the same day
 
+    def test_the_first_look_logs_no_error(self):
+        # No count saved yet: the journal must not show a "No such file" error for it.
+        open(self.active, "w").close()
+        r = self._run()
+        self.assertEqual(r.stderr, "")
+        self.assertTrue(os.path.exists(os.path.join(self.data, "watch_nrestarts")))
+
     def test_crash_loop_alerts(self):
         open(self.active, "w").close()
         _write(self.nrest, "5\n")
