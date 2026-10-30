@@ -12,7 +12,7 @@ import time
 import traceback
 
 from . import books, config, db, fees, flow, gate, ledger, paper, risk, sizing
-from .client import (Kalshi, KalshiError, UnknownSettlement, every_order, fee, fill_known, filled, is_transient,
+from .client import (Kalshi, KalshiError, UnknownSettlement, every_order, fee, fill_count, is_transient,
                      new_order_id, resting, ts)
 from .strategies import load_all
 from .strategies.base import Context
@@ -229,13 +229,13 @@ def reconcile(client):
                 # Still on the book: stop, as when a reply shows it. More can fill before the
                 # cancel lands, so its count now isn't booked. It's looked up again after Reset.
                 raise _stop_resting(client, r["ticker"], o)
-            if not fill_known(o):
+            n = fill_count(o, r["count"])
+            if n is None:
                 # "canceled" alone can hide a part fill: never book it as nothing. It stays
                 # 'unknown', and the bot stops for a person to check it.
                 config.trip(f"can't tell how much order {r['client_order_id']} on {r['ticker']} filled "
                             f"(Kalshi says only {o.get('status', 'nothing')!r}). Check it on Kalshi.")
                 raise Halted(f"{r['ticker']}: the order lookup doesn't say how much filled")
-            n = filled(o, r["count"])
             db.execute("UPDATE orders SET status = ?, filled = ?, order_id = ? WHERE id = ?",
                        f"reconciled:{o.get('status', '?')}", n, o.get("order_id", ""), r["id"])
             fixed += 1
@@ -300,18 +300,20 @@ def execute(client, sig, signal_id):
             # Earlier legs filled and this one may not have: the basket is part-bought.
             raise LegFailed(f"leg {i + 1}/{len(sig.legs)} {leg.ticker} got no clear reply after earlier "
                             f"legs filled ({e})") from e
-        n = filled(order, want)
+        # Nothing here can raise before the row is written: a row left with a final status and
+        # 0 filled would never be looked up again, whatever the order really bought.
+        n = fill_count(order, want)
+        on_book = resting(order)
+        # 'unknown' makes the next run look the order up, so whatever filled (before the cancel,
+        # or in a reply that doesn't say) lands in the books.
         db.execute("UPDATE orders SET status = ?, filled = ?, order_id = ? WHERE id = ?",
-                   order.get("status", "?"), n, order.get("order_id", ""), oid)
-        if resting(order):
-            # 'unknown' makes the next run look the order up, so whatever filled before the
-            # cancel lands in the books.
-            db.execute("UPDATE orders SET status = 'unknown' WHERE id = ?", oid)
+                   "unknown" if on_book or n is None else str(order.get("status") or "?"), n or 0,
+                   str(order.get("order_id") or ""), oid)
+        if on_book:
             raise _stop_resting(client, leg.ticker, order)
-        if not fill_known(order):
+        if n is None:
             # The reply doesn't say how much filled ("canceled" alone can hide a part fill).
-            # Never read that as nothing: 'unknown' makes the next run look the order up.
-            db.execute("UPDATE orders SET status = 'unknown' WHERE id = ?", oid)
+            # Never read that as nothing.
             if i == 0:
                 raise OrderUnknown(f"{leg.ticker}: Kalshi's reply doesn't say how much filled")
             raise LegFailed(f"leg {i + 1}/{len(sig.legs)} {leg.ticker}: Kalshi's reply doesn't say how much "

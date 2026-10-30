@@ -17,7 +17,7 @@ import logging
 import time
 
 from . import config, db
-from .client import KalshiError, fill_known, filled, is_transient, num, resting
+from .client import KalshiError, fill_count, is_transient, num, resting, shows_fill
 
 KEY = "order_probe"
 PROBE_PRICE = 0.01
@@ -100,19 +100,23 @@ def clear(reason):
 
 
 def judge(ticker, ask, order, side="yes", bid=None):
-    """(ok, detail, alarming). Alarming means the order filled or rested: Kalshi isn't
-    doing what we assume, so the bot must stop."""
+    """(ok, detail, alarming). Alarming means the order filled (or its reply shows signs it
+    did) or rested: Kalshi isn't doing what we assume, so the bot must stop."""
     what = f"$0.01 {side.upper()} test order"
     if not isinstance(order, dict):
         return False, f"{ticker}: the {what}'s reply is not a dict", False
     status_ = order.get("status")
-    n = filled(order, 1)
-    if n > 0:
+    n = fill_count(order, 1)
+    if n:
         return False, (f"the {what} on {ticker} FILLED ({n:g}). Orders aren't priced the way "
                        "the bot thinks. It cost at most $0.02; check it on Kalshi."), True
+    if n is None and shows_fill(order):
+        # A reply that contradicts itself but shows a fill: as alarming as a plain fill.
+        return False, (f"the {what} on {ticker} may have FILLED: its reply doesn't add up (status "
+                       f"{status_!r}). It cost at most $0.02; check it on Kalshi."), True
     if resting(order):
         return False, f"the {what} on {ticker} stayed on the book: immediate-or-cancel was ignored.", True
-    if not fill_known(order):   # real money waits until replies say how much filled
+    if n is None:   # real money waits until replies say how much filled
         return False, f"{ticker}: can't tell from the {what}'s reply how much filled (keys: {sorted(order)[:12]})", False
     book = f"YES ask was ${ask:.2f}" if side == "yes" else f"YES bid was ${bid or 0:.2f}"
     return True, f"{ticker}: {side.upper()} accepted, 0 filled ({book}, status {status_})", False

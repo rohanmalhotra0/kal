@@ -814,6 +814,15 @@ class OrderProbeTests(TempHome):
         c.buy = lambda *a, **k: c.orders.append(a) or {"order_id": "o1"}
         self.assertFalse(rows_by_check(selftest.run(c, order_probe=True))["order probe"]["ok"])
 
+    def test_a_reply_that_doesnt_add_up_but_shows_a_fill_stops_the_bot(self):
+        c = GoodFake()
+        c.buy = lambda *a, **k: c.orders.append(a) or {"order_id": "o1", "status": "executed",
+                                                       "fill_count_fp": "0.00", "initial_count_fp": "1.00"}
+        probe = rows_by_check(selftest.run(c, order_probe=True))["order probe"]
+        self.assertFalse(probe["ok"])
+        self.assertEqual(len(c.orders), 1)                               # never a second order
+        self.assertIn("may have FILLED", config.load()["disabled_reason"])
+
     def test_real_client_sends_ioc_at_one_cent(self):
         """The real Kalshi class, with HTTP stubbed: proves the probe's request body."""
         m = good_markets()[0]
