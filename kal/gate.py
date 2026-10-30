@@ -110,8 +110,9 @@ def judge(ticker, ask, order, side="yes", bid=None):
     if n:
         return False, (f"the {what} on {ticker} FILLED ({n:g}). Orders aren't priced the way "
                        "the bot thinks. It cost at most $0.02; check it on Kalshi."), True
-    if n is None and shows_fill(order):
-        # A reply that contradicts itself but shows a fill: as alarming as a plain fill.
+    if shows_fill(order):
+        # Any other sign of a fill (a reply that doesn't add up, a count under a cent): as
+        # alarming as a plain fill.
         return False, (f"the {what} on {ticker} may have FILLED: its reply doesn't add up (status "
                        f"{status_!r}). It cost at most $0.02; check it on Kalshi."), True
     if resting(order):
