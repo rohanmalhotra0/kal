@@ -473,8 +473,21 @@ def _count_error(cfg, e):
         config.trip(f"{errors} failed runs in a row. Last error: {e}")
 
 
-def _still_on():
-    return config.load()["enabled"]
+def _stop_live(cfg, name):
+    """Before each real order: why to stop real trading now, or None. OFF stops it; so does
+    this strategy leaving live, or any money limit set stricter since the run began (the
+    owner cut the budget, say): the run's limits came from the old settings. The next run
+    starts on the new ones. A looser setting waits for the next run too."""
+    now = config.load()
+    if not now["enabled"]:
+        return "turned off mid-run: stopped trading"
+    if (now["strategies"].get(name) or {}).get("mode") != "live":
+        return f"{name} left live mid-run: this run stopped, the next starts on the new settings"
+    tighter = [k for k, safer in config.LIMITS.items()
+               if now.get(k) != cfg.get(k) and safer(now[k], cfg[k]) == now[k]]
+    if tighter:
+        return f"{', '.join(tighter)} set stricter mid-run: this run stopped, the next starts on the new settings"
+    return None
 
 
 def _write_off_sold(client, positions, summary):
@@ -667,7 +680,8 @@ def _trade(client, cfg, summary):
         limits = live_limits if is_live else paper_limits
         ctx = Context(client, cfg, mode, limits.budget_left, live_bankroll if is_live else paper_bankroll,
                       held_live if is_live else held_paper, research, params,
-                      open_exposure=limits.directional_open, held_paper=frozenset(held_paper))
+                      open_exposure=limits.directional_open, held_paper=frozenset(held_paper),
+                      held_cost=ledger.open_by_ticker() if is_live else paper.open_by_ticker())
         try:
             signals = strat.scan(ctx)
         except Exception as e:
@@ -679,8 +693,9 @@ def _trade(client, cfg, summary):
             # A strategy can keep an unproven idea (e.g. a newly discovered edge) on paper.
             sig_live = is_live and not sig.meta.get("paper_only")
             if sig_live:
-                if not _still_on():
-                    summary["notes"].append("turned off mid-run: stopped trading")
+                stop = _stop_live(cfg, name)
+                if stop:
+                    summary["notes"].append(stop)
                     return
                 ctx.budget_left = live_limits.budget_left
                 sig = strat.recheck(ctx, sig)

@@ -189,6 +189,17 @@ class Context:
     params: dict               # this strategy's settings from config
     open_exposure: float = 0.0  # dollars already in open directional bets (for sizing caps)
     held_paper: frozenset = frozenset()  # tickers open on paper (paper-only signals of a live scan)
+    held_cost: dict = field(default_factory=dict)  # ticker -> dollars the books show open on it
+
+
+def held_dollars(ctx, ticker):
+    """What a held ticker counts for in a cap: the dollars the books show open on it, else
+    (the owner's own, or one the books don't know) the most one bet can be. Never today's
+    bet size for a bet already made: lowering max_per_trade can't shrink what's held."""
+    cost = ctx.held_cost.get(ticker)
+    if cost is not None:
+        return float(cost)
+    return max(0.0, min(ctx.cfg["max_per_trade"], ctx.cfg["max_per_event"]))
 
 
 class Strategy:

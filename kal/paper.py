@@ -97,6 +97,11 @@ def open_by_event():
     return {r["event"]: r["c"] for r in rows}
 
 
+def open_by_ticker():
+    rows = db.query("SELECT ticker, COALESCE(SUM(cost), 0) AS c FROM paper WHERE settled = 0 GROUP BY ticker")
+    return {r["ticker"]: r["c"] for r in rows}
+
+
 def open_cost():
     return db.query("SELECT COALESCE(SUM(cost), 0) AS c FROM paper WHERE settled = 0")[0]["c"]
 
