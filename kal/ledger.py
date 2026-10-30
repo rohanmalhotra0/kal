@@ -393,9 +393,12 @@ def _whole(sid, legs):
     """True if every leg of a basket filled alike after all (engine.stranded_baskets' rule):
     a lost reply can mark one stranded that reconcile later finds whole, so locked in."""
     try:
-        n = len(json.loads(legs or "[]"))
+        legs = json.loads(legs or "[]")
     except (TypeError, ValueError):
         return False
+    if not isinstance(legs, list):
+        return False   # junk: count it as bets
+    n = len(legs)
     fills = [r["filled"] or 0 for r in db.query("SELECT filled FROM orders WHERE signal_id = ?", sid)]
     return n > 1 and len(fills) == n and min(fills) == max(fills) > 0
 

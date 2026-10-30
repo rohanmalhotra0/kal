@@ -5,7 +5,10 @@ money path found (each finding checked by a separate skeptic):
 - the legs a half-built basket left stayed "locked-in", so the cap on open bets never
   counted them. python -m unittest tests.test_limits_hold
 """
-from kal import config, db, engine, ledger
+from unittest import mock
+
+from kal import config, db, engine, ledger, paper
+from kal.strategies import load_all
 from kal.client import fee
 from kal.strategies.base import Context, held_dollars
 from tests.helpers import TempHome, orders_proven
@@ -114,6 +117,25 @@ class StrandedLegTests(TempHome):
         self.assertEqual(ledger.open_directional(), 0)
 
 
+    def test_a_half_built_basket_two_of_four_legs_filled_alike_is_still_bets(self):
+        # A lost reply on leg 2; reconcile finds it filled: fills [10, 10], legs 3-4 never sent.
+        legs = [{"ticker": f"EV3-{i}"} for i in range(4)]
+        sid = db.insert("signals", strategy="basket_arb", event="EV3", title="basket", mode="live",
+                        guaranteed=1, cost=20.0, payout_min=21.0, exp_profit=1.0, legs=legs,
+                        status="stranded: leg 2/4 EV3-1: no clear reply")
+        self.order(sid, "EV3-0", 10)
+        self.order(sid, "EV3-1", 10)
+        self.assertAlmostEqual(ledger.open_directional(), 2 * (10 * 0.45 + fee(10, 0.45)))
+
+    def test_junk_legs_count_as_bets(self):
+        sid = db.insert("signals", strategy="basket_arb", event="EV4", title="basket", mode="live",
+                        guaranteed=1, cost=9.0, payout_min=10.0, exp_profit=1.0, legs={"a": 1, "b": 2},
+                        status="stranded: odd")
+        self.order(sid, "EV4-0", 10)
+        self.order(sid, "EV4-1", 10)
+        self.assertGreater(ledger.open_directional(), 0)
+
+
 class HeldDollarsTests(TempHome):
     def ctx(self, held_cost, **cfg):
         return Context(None, dict(config.DEFAULTS, **cfg), "live", 0, 300.0, set(held_cost), {}, {},
@@ -131,4 +153,43 @@ class HeldDollarsTests(TempHome):
         db.insert("settlements", ticker="B-1", settled_ts=1.0, result="yes", revenue=4.0, cost=2.0, pnl=2.0)
         self.assertEqual(set(ledger.open_by_ticker()), {"A-1"})
         self.assertAlmostEqual(ledger.open_by_ticker()["A-1"], 7.5 + fee(10, 0.5) + fee(5, 0.5))
+
+
+class EngineHeldCostTests(TempHome):
+    """The engine hands each scan the books' open cost per ticker: live from the ledger,
+    paper from the paper books."""
+
+    def setUp(self):
+        super().setUp()
+        config.update({"enabled": True, "budget": 300,
+                       "strategies": {k: {"mode": "off"} for k in config.DEFAULTS["strategies"]}})
+        orders_proven()
+
+    def seen_held_cost(self, mode, client):
+        config.update({"strategies": {"favorites": {"mode": mode}}})
+        seen = []
+        strat = load_all()["favorites"]
+        with mock.patch.object(type(strat), "proven", lambda self, ctx: (True, "test")), \
+                mock.patch.object(type(strat), "scan", lambda self, ctx: seen.append(dict(ctx.held_cost)) or []):
+            engine.run_once(client)
+        return seen[0]
+
+    def test_a_live_scan_gets_the_ledgers_cost_per_ticker(self):
+        c = fake_with_arb()
+        for i in range(3):
+            tk = f"KXBTCD-H{i}-T"
+            db.insert("orders", signal_id=0, strategy="favorites", ticker=tk, side="yes", count=10,
+                      price=1.0, filled=10, status="executed", order_id=f"o{i}")
+            c.position_list = (c.position_list or []) + [{"ticker": tk, "position": 10}]
+        got = self.seen_held_cost("live", c)
+        self.assertEqual(got, ledger.open_by_ticker())
+        self.assertEqual(len(got), 3)
+        self.assertTrue(all(v >= 10.0 for v in got.values()))
+
+    def test_a_paper_scan_gets_the_paper_books_cost_per_ticker(self):
+        db.insert("paper", signal_id=0, strategy="favorites", event="E", ticker="P-1", side="yes",
+                  count=10, price=0.5, cost=5.0)
+        got = self.seen_held_cost("paper", fake_with_arb())
+        self.assertEqual(got, paper.open_by_ticker())
+        self.assertEqual(got, {"P-1": 5.0})
 
