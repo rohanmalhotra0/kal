@@ -6,6 +6,7 @@ import errno
 import os
 import re
 import sqlite3
+from contextlib import ExitStack
 from types import SimpleNamespace
 from unittest import mock
 
@@ -270,16 +271,41 @@ class ReadOnlyDiskTests(Base):
     so the health check stops it, by name."""
 
     def read_only(self):
-        return mock.patch.object(maintenance.tempfile, "mkstemp",
-                                 side_effect=OSError(errno.EROFS, "Read-only file system"))
+        """As on a real read-only disk: no new file, and the books (WAL needs its -shm file)
+        can't be opened either, so the books and trading checks fail too."""
+        stack = ExitStack()
+        stack.enter_context(mock.patch.object(maintenance.tempfile, "mkstemp",
+                                              side_effect=OSError(errno.EROFS, "Read-only file system")))
+        cant = sqlite3.OperationalError("unable to open database file")
+        stack.enter_context(mock.patch.object(maintenance, "_open", side_effect=cant))
+        stack.enter_context(mock.patch.object(db, "connect", side_effect=cant))
+        return stack
 
-    def test_a_read_only_disk_stops_the_bot_and_says_so(self):
-        with self.read_only(), free_disk(50_000), kalshi_clock(0):
+    def test_a_read_only_disk_stops_the_bot_and_says_so_once(self):
+        with self.read_only(), free_disk(50_000), kalshi_clock(0), self.assertLogs("kal", "WARNING"):
             out = maintenance.health()
         disk = [r for r in out["checks"] if r["check"] == "disk"][0]
         self.assertEqual(disk["level"], "fail")
         self.assertIn("read-only", config.load()["disabled_reason"])
-        self.assertEqual(self.phone.titles, ["kal stopped itself"])   # once: no second warning
+        # One alert: the stop. Not "books busy" or "trading", which only failed on the disk.
+        self.assertEqual(self.phone.titles, ["kal stopped itself"])
+
+    def test_a_read_only_disk_when_already_stopped_says_read_only_not_full(self):
+        config.trip("lost too much today")
+        self.phone.titles.clear()
+        self.phone.bodies.clear()
+        with self.read_only(), free_disk(50_000), kalshi_clock(0), self.assertLogs("kal", "WARNING"):
+            maintenance.health()
+        self.assertEqual(self.phone.titles, ["kal warning: disk read-only"])   # its own DEPLOY.md row
+
+    def test_a_disk_that_cant_take_one_more_file_stops_the_bot(self):
+        # No free inodes: plenty of bytes, but nothing new can be written (the books' journal).
+        with mock.patch.object(maintenance.tempfile, "mkstemp",
+                               side_effect=OSError(errno.ENOSPC, "No space left on device")), \
+                free_disk(50_000), kalshi_clock(0):
+            row = maintenance.disk_ok()
+        self.assertEqual(row["level"], "fail")
+        self.assertIn("can't take one more file", config.load()["disabled_reason"])
 
     def test_when_the_stop_cant_be_saved_either_it_says_so_at_most_hourly(self):
         cant = OSError(errno.EROFS, "Read-only file system")
@@ -297,16 +323,20 @@ class ReadOnlyDiskTests(Base):
         with mock.patch.object(maintenance.tempfile, "mkstemp", side_effect=PermissionError(errno.EACCES, "Permission denied")):
             row = maintenance.disk_ok()
         self.assertEqual(row["level"], "warn")
+        self.assertEqual(row["title"], "kal warning: disk can't be written")   # not "getting full"
         self.assertTrue(config.load()["enabled"])   # no stop
 
 
 class BusyBooksTests(Base):
     def test_books_locked_for_a_moment_warn_under_their_own_title_and_say_dont_restore(self):
+        # Locked for every reader (as by an exclusive lock): the trading check can't read
+        # them either, and its alert would blame Kalshi or the internet. One alert, the books'.
         locked = sqlite3.OperationalError("database is locked")
-        with mock.patch.object(maintenance, "_open", side_effect=locked), free_disk(50_000), \
-                kalshi_clock(0):
+        with mock.patch.object(maintenance, "_open", side_effect=locked), \
+                mock.patch.object(db, "connect", side_effect=locked), free_disk(50_000), \
+                kalshi_clock(0), self.assertLogs("kal", "WARNING"):
             maintenance.health()
-        self.assertIn("kal warning: books busy", self.phone.titles)
+        self.assertEqual(self.phone.titles, ["kal warning: books busy"])
         self.assertNotIn("kal warning: books", self.phone.titles)   # that title means damaged: restore
         body = self.phone.bodies[self.phone.titles.index("kal warning: books busy")]
         self.assertIn("Not damaged: don't restore", body)

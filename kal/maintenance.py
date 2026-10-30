@@ -535,19 +535,25 @@ def disk_ok(trip=True):
     """Free space where the books live. Under 200 MB the bot trips; under 1 GB, a warning.
     A read-only disk trips too: every run fails before it can stop the bot itself."""
     err = _write_error(config.home())
-    if err is not None and err.errno == errno.EROFS:
-        reason = (f"The disk is read-only (it had errors), so nothing can be saved and trading "
-                  f"has stopped. The server needs a look: {config.command('health')}")
+    free = shutil.disk_usage(config.home()).free // MB
+    if err is not None and (err.errno == errno.EROFS or (err.errno == errno.ENOSPC and free >= DISK_TRIP_MB)):
+        # Read-only after errors, or no room for one more file with space left (all inodes
+        # used): nothing can be saved, so no run can trade, and none can stop the bot itself.
+        if err.errno == errno.EROFS:
+            what, title = "is read-only (it had errors)", "kal warning: disk read-only"
+        else:
+            what, title = "can't take one more file (too many files)", "kal warning: disk full of files"
+        reason = (f"The disk {what}, so nothing can be saved and trading has stopped. Look: "
+                  f"{config.command('health')}")
         try:
             tripped = trip and _trip_once(reason)
         except OSError:
             tripped = True   # it couldn't be saved; trip() said so (at most once an hour)
-        return _row("disk", "fail", "read-only: nothing can be saved, so trading has stopped",
-                    tripped=tripped)
-    if err is not None:   # a full disk is told below; anything else (who runs this?) is a warning
-        if err.errno != errno.ENOSPC:
-            return _row("disk", "warn", f"can't write to {config.home()} here: {err.strerror or err}")
-    free = shutil.disk_usage(config.home()).free // MB
+        return _row("disk", "fail", f"{what}: nothing can be saved, so trading has stopped",
+                    tripped=tripped, readonly=True, title=title, free_mb=free)
+    if err is not None and err.errno != errno.ENOSPC:   # (a full disk is told below)
+        return _row("disk", "warn", f"can't write to {config.home()} here: {err.strerror or err}",
+                    title="kal warning: disk can't be written", free_mb=free)
     if free < DISK_TRIP_MB:
         tripped = trip and _trip_once(f"Disk almost full: {free:,} MB free. Free up space, then press Reset.")
         return _row("disk", "fail", f"only {free:,} MB free. The bot stops under {DISK_TRIP_MB} MB.",
@@ -820,10 +826,14 @@ def health(trip=True, client=None):
         config.resend_stop()
     except Exception:
         log.warning("could not resend the stop alert", exc_info=True)
-    broken = any(r["check"] == "books" and r["level"] == "fail" for r in rows)
+    # One alert for one cause. Damaged or busy books: the books row says it, not each check
+    # that couldn't read them. A disk that takes nothing: its stop says it, books too.
+    books_bad = any(r["check"] == "books" and r["level"] != "ok" for r in rows)
+    readonly = any(r.get("readonly") for r in rows)
     for r in rows:
-        if r["level"] == "ok" or r.get("unknown") or (broken and r.get("books")):
-            continue   # (a check that couldn't read the damaged books: the books alert says it)
+        if r["level"] == "ok" or r.get("unknown") or ((books_bad or readonly) and r.get("books")) \
+                or (readonly and r["check"] == "books"):
+            continue
         key = f"{r['check']}:{r['level']}"
         if r.get("tripped"):
             _note_sent(key)   # its stop alert just went: no second one about it for a day

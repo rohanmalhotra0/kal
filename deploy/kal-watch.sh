@@ -83,7 +83,20 @@ twice() {  # cmd... : true if the command fails now, and again a little later
   ! "$@"
 }
 
+# kal-update is restarting the bot and judging it, and says what happened itself: look next
+# time (its crashes would use up the day's alert). A note over 30 minutes old is from an
+# update that died: then look as usual.
+CHECKING="${KAL_UPDATE_CHECKING:-/run/kal-update.checking}"
+if [ -e "$CHECKING" ] && [ -z "$(find "$CHECKING" -mmin +30 2>/dev/null)" ]; then
+  say "an update is checking the bot: looking next time"
+  exit 0
+fi
+
 if twice systemctl is-active --quiet kal; then
+  if [ "$(systemctl is-active kal 2>/dev/null)" = deactivating ]; then
+    say "the bot is stopping (a trade run finishing, say): looking next time"
+    exit 0
+  fi
   case "$(systemctl show kal -p SubState --value 2>/dev/null)" in
     auto-restart*)   # it crashed and waits to start again: starting it won't help
       alert loop "kal keeps restarting" "The bot is crash-looping. Look: sudo kal logs" ;;

@@ -315,6 +315,9 @@ To change it (the hour is in UTC): `sudo kal set summary_hour_utc 14`
 | **kal warning: trading** | Trade runs keep failing. Kalshi or the internet is down. It keeps trying. | Usually nothing. If it lasts a day: `sudo kal logs` |
 | **kal warning: books** | The books (`kal.db`) are damaged and the bot is stopped. | Put a backup back: see "Restore" below. |
 | **kal warning: books busy** | The books couldn't be read for a moment (locked, or the disk). Not damaged. | Nothing. Don't restore. If it lasts an hour: `sudo kal health` |
+| **kal warning: disk read-only** | The server's disk had errors and went read-only. Nothing can be saved, so the bot can't trade. | Reboot the server: `sudo reboot` (it checks the disk). If it happens again, ask DigitalOcean support. |
+| **kal warning: disk full of files** | No room for one more file, though there is space left (too many files). | `sudo kal health`, then free some space (see below). |
+| **kal warning: disk can't be written** | kal can't write to its folder (`/var/lib/kal`). | `sudo kal health`. |
 | **kal warning: report** | The status report can't reach GitHub. Usually the token ran out (they last 90 days). | Make a new token: step 10 below. Until then the check-in can't see the bot. |
 | **kal backup failed** | Last night's backup didn't work. | `sudo kal backup` shows why. |
 
@@ -333,6 +336,8 @@ It stays stopped until a person says so. `sudo kal health` shows why.
 | basket left half-built, or an order stayed on the book | Look at your open positions on Kalshi. |
 | capital is used up | The $300 is gone. Stop and think before you add more. |
 | Disk almost full | Free some space (below). |
+| The disk is read-only | Reboot the server: `sudo reboot`. If it happens again, ask DigitalOcean support. |
+| The disk can't take one more file | Free some space (below): too many files. |
 | The server clock is ... Kalshi's clock | Fix the clock: `sudo systemctl restart chrony`, then `timedatectl`. |
 | Books restored from the ... backup | See "Restore" below. |
 | the books are damaged | `kal.db` is corrupt, so nothing can trade. See "Restore" below. (A lock or a full disk is not damage: those say "can't be written" and need no restore.) |

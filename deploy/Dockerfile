@@ -5,8 +5,7 @@ FROM python:3.12-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    KAL_HOME=/data \
-    KAL_CMD="docker compose -f deploy/docker-compose.yml exec kal python -m kal"
+    KAL_HOME=/data
 
 # A fixed uid, so files you copy into the volume can be given to this user.
 RUN groupadd --system --gid 10001 kal \

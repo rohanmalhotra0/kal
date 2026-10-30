@@ -9,6 +9,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -50,13 +51,17 @@ class WatchSandbox(unittest.TestCase):
         self.nrest = os.path.join(self.d, "nrest")
         self.inv = os.path.join(self.d, "inv")   # InvocationID: a new one at every start
         self.looping = os.path.join(self.d, "LOOPING")   # crashed, waiting to start again
+        self.stopping = os.path.join(self.d, "STOPPING")   # being stopped (a trade run finishing)
+        self.checking = os.path.join(self.d, "kal-update.checking")   # kal-update judges the bot
         self.run_dir = os.path.join(self.d, "run")       # /run: memory, writable when the disk isn't
         _write(self.nrest, "0\n")
         _write(os.path.join(self.bin, "systemctl"), f"""#!/bin/sh
 if [ "$1" = is-active ]; then
-  [ -e {self.active} ] && exit 0
+  if [ -e {self.active} ]; then s=active; elif [ -e {self.stopping} ]; then s=deactivating; else s=inactive; fi
+  [ "$2" = --quiet ] || echo "$s"
+  [ "$s" = active ] && exit 0
   [ -e {self.coming} ] && touch {self.active}
-  exit 1
+  exit 3
 fi
 if [ "$1 $2 $3" = "show kal -p" ]; then
   case "$4" in
@@ -96,7 +101,7 @@ esac
     def _run(self):
         env = dict(os.environ, APP=os.path.join(self.d, "app"), VENV=self.venv,
                    DATA=self.data, ETC=self.etc, PATH=self.bin + ":/usr/bin:/bin", KAL_WATCH_PAUSE="0",
-                   KAL_WATCH_RUN=self.run_dir)
+                   KAL_WATCH_RUN=self.run_dir, KAL_UPDATE_CHECKING=self.checking)
         # cwd: systemd starts it in /, not in the code folder.
         return subprocess.run(["bash", WATCH], env=env, capture_output=True, text=True, cwd=self.d)
 
@@ -121,6 +126,30 @@ esac
         log = _read(self.curl_log)
         self.assertIn("kal keeps restarting", log)
         self.assertNotIn("not running", log)
+
+    def test_while_an_update_checks_the_bot_it_waits(self):
+        # kal-update restarts and judges the bot, and says what happened itself: a crash it
+        # judges must not use up the day's loop alert.
+        open(self.looping, "w").close()
+        open(self.checking, "w").close()
+        r = self._run()
+        self.assertIn("an update is checking", r.stdout)
+        self.assertEqual(_read(self.curl_log), "")
+
+    def test_a_note_left_by_an_update_that_died_is_ignored(self):
+        open(self.looping, "w").close()
+        open(self.checking, "w").close()
+        old = time.time() - 31 * 60
+        os.utime(self.checking, (old, old))
+        self._run()
+        self.assertIn("kal keeps restarting", _read(self.curl_log))
+
+    def test_a_bot_still_stopping_is_looked_at_next_time(self):
+        # A restart waits for a trade run to finish (up to 5 minutes): not "start it".
+        open(self.stopping, "w").close()
+        r = self._run()
+        self.assertIn("stopping", r.stdout)
+        self.assertEqual(_read(self.curl_log), "")
 
     def test_a_disk_that_cant_take_the_note_still_alerts_once_a_day(self):
         # Read-only after errors: the once-a-day note goes to /run instead. Before, every

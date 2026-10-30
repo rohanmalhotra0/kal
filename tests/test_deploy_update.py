@@ -277,6 +277,7 @@ exit 0
     def _env(self):
         return dict(APP=self.app, VENV=self.venv, DATA=self.data, ETC=self.etc,
                     STAGE_USER="nobody", STAGE_PYTHON=self.fakepy,
+                    KAL_UPDATE_CHECKING=os.path.join(self.d, "kal-update.checking"),
                     PATH=self.bin + ":/usr/bin:/bin")   # real waits: only the fake clock moves
 
     def _run(self):
@@ -830,17 +831,56 @@ exec "$@"
         self.assertIn("try-restart kal", _read(self.sysctl_log))
         self.assertFalse(os.path.exists(os.path.join(self.data, ".research.lock")))
 
+    def _watch(self):
+        """kal-watch, as its timer runs it, on this sandbox's fake systemd."""
+        watch = os.path.join(ROOT, "deploy", "kal-watch.sh")
+        env = dict(os.environ, APP=self.app, VENV=self.venv, DATA=self.data, ETC=self.etc,
+                   KAL_WATCH_PAUSE="0", KAL_WATCH_RUN=os.path.join(self.d, "run"),
+                   KAL_UPDATE_CHECKING=os.path.join(self.d, "kal-update.checking"),
+                   PATH=self.bin + ":/usr/bin:/bin")
+        return subprocess.run(["bash", watch], env=env, capture_output=True, text=True, cwd=self.d)
+
     def test_after_its_verdict_the_update_sets_where_kal_watch_counts_from(self):
-        # A rollback that lands while the bad version waits to restart keeps the restart
-        # count: without this, kal-watch would say the healthy old version keeps restarting.
-        for code in ("x = 2", "x = 'CRASH'"):
-            with self.subTest(code=code):
-                self._active()
-                self._push_code(code=code)
-                self._run()
-                sd = self._sd_now()
-                self.assertEqual(_read(os.path.join(self.data, "watch_nrestarts")).split(),
-                                 [str(sd["nrest"]), "inv%d" % sd["inv"]])
+        # On real systemd the rollback lands while the bad version waits to restart (its
+        # backoff), so the restart count is kept: without this, kal-watch's next look would
+        # say the healthy old version keeps restarting.
+        self._active(restart_delay=6)   # puts the rollback in that wait here too
+        _write(os.path.join(self.data, "watch_nrestarts"), "0 inv1\n")   # its last look
+        self._push_code(code="x = 'CRASH'")
+        self._run()
+        sd = self._sd_now()
+        self.assertGreater(sd["nrest"], 0)   # kept, as on the server
+        self.assertEqual(_read(os.path.join(self.data, "watch_nrestarts")).split(),
+                         [str(sd["nrest"]), "inv%d" % sd["inv"]])
+        self._watch()
+        self.assertNotIn("kal keeps restarting", _read(self.curl_log))
+
+    def test_kal_watch_waits_while_the_update_judges_the_bot(self):
+        # The review's race: kal-watch's timer fires during the check of the rolled-back bot.
+        # It must not say "keeps restarting" (and use up the day's loop alert), or a real
+        # crash loop later that day would be silent.
+        self._active(restart_delay=6)
+        _write(os.path.join(self.data, "watch_nrestarts"), "0 inv1\n")
+        self._push_code(code="x = 'CRASH'")
+        seen = os.path.join(self.d, "watch_during.out")
+        _write(os.path.join(self.bin, "sleep"), f"""#!/bin/sh
+if [ "$1" = 120 ] && [ ! -e {seen} ]; then   # the update's first check: kal-watch's timer fires
+  APP={self.app} VENV={self.venv} DATA={self.data} ETC={self.etc} KAL_WATCH_PAUSE=0 \\
+  KAL_WATCH_RUN={self.d}/run KAL_UPDATE_CHECKING={self.d}/kal-update.checking \\
+    bash {os.path.join(ROOT, "deploy", "kal-watch.sh")} > {seen} 2>&1
+fi
+exec {self.bin}/systemctl sleep "$1"
+""", x=True)
+        self._run()
+        self.assertIn("an update is checking", _read(seen))
+        self.assertIn("kal update rolled back", _read(self.curl_log))
+        self.assertNotIn("kal keeps restarting", _read(self.curl_log))
+        self.assertFalse(os.path.exists(os.path.join(self.d, "kal-update.checking")))   # gone after
+        open(self.all_crash, "w").close()   # later that day: a real crash loop
+        subprocess.run([os.path.join(self.bin, "systemctl"), "person-restart-at", "1"])
+        subprocess.run([os.path.join(self.bin, "systemctl"), "sleep", "60"])
+        self._watch()
+        self.assertIn("kal keeps restarting", _read(self.curl_log))
 
     def test_earlier_crashes_alone_never_roll_back(self):
         self._active(nrest=2)
