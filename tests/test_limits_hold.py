@@ -9,6 +9,7 @@ stop saved during them was missed; and a basket with a leg sold outside the bot 
 as locked in. python -m unittest tests.test_limits_hold
 """
 import sqlite3
+import time
 from unittest import mock
 
 from kal import config, db, engine, ledger, paper
@@ -114,6 +115,24 @@ class MidRunTests(TempHome):
                 self.assertEqual(len(c.orders), 4)
                 self.assertIn(note, " ".join(s["notes"]))
 
+    def test_a_stop_saved_while_the_signals_row_waits_on_the_books_stops_its_order(self):
+        # The review's repro: the last check passed, then the row waited on a lock (sqlite
+        # waits up to 30 s) and OFF was saved meanwhile.
+        c = two_baskets()
+        real_insert, done = db.insert, []
+
+        def insert(table, **row):
+            if table == "signals" and len(c.orders) == 4 and not done:
+                done.append(1)
+                config.turn_off()
+            return real_insert(table, **row)
+        with mock.patch.object(db, "insert", insert):
+            s = engine.run_once(c)
+        self.assertEqual(len(c.orders), 4)
+        self.assertIn("turned off mid-run", " ".join(s["notes"]))
+        self.assertTrue(any(r["status"].startswith("skipped: turned off mid-run")
+                            for r in db.query("SELECT status FROM signals")))
+
     def test_a_looser_setting_mid_run_changes_nothing(self):
         c, s = self.run_editing({"budget": 200, "max_per_arb": 40})
         self.assertEqual(len(baskets_bought(c)), 2)
@@ -194,6 +213,21 @@ class SoldLegTests(TempHome):
         self.assertAlmostEqual(ledger.open_directional(), bought, places=2)
         self.assertGreaterEqual(ledger.open_directional(), left)
 
+    def test_a_fresh_basket_bought_after_a_write_off_on_its_markets_stays_locked_in(self):
+        # The review's repro: the owner closes a whole basket in Kalshi's app; the arb is
+        # still there, so the next run buys a fresh, whole one on the same markets.
+        config.update({"daily_loss_limit": 1.0})   # the write-off reads as a loss: not probed here
+        c = fake_with_arb(balance=1000.0)
+        self.assertTrue(engine.run_once(c)["ok"])
+        first = list(c.orders)
+        for t, *_ in first:
+            c.held[t] = 0
+        time.sleep(0.01)   # the write-off, then the new orders, come later
+        engine.run_once(c)
+        self.assertGreater(len(c.orders), len(first))   # a second, whole basket
+        old = sum(10 * o[3] + fee(10, o[3]) for o in first)
+        self.assertAlmostEqual(ledger.open_directional(), old, places=2)   # the old one only
+
     def test_a_write_off_on_one_basket_leaves_another_basket_locked_in(self):
         c = two_baskets()
         self.assertTrue(engine.run_once(c)["ok"])
@@ -234,6 +268,27 @@ class ErrorStreakTests(TempHome):
         failed, reason = self.failed_runs_until_the_stop(lambda i: i % 2 == 1)
         self.assertEqual(failed, 3)
         self.assertIn("3 failed runs in a row", reason)
+
+    def test_a_good_run_in_another_process_ends_the_streak_held_in_memory(self):
+        # The review's repro: two failed runs the books couldn't count, then `sudo kal run`
+        # (another process) had a good run. One more failure here is 1 in a row, not 3.
+        real_put, locked = db.put, [True]
+
+        def put(key, value):
+            if key == "consecutive_errors" and locked[0]:
+                raise sqlite3.OperationalError("attempt to write a readonly database")
+            return real_put(key, value)
+        db.put("last_ok_run", time.time() - 600)
+        with mock.patch.object(engine.fees, "check", side_effect=ValueError("a bug")), \
+                mock.patch.object(db, "put", put), self.assertLogs("kal", "ERROR"):
+            for _ in range(2):
+                self.assertFalse(engine.run_once(fake_with_arb())["ok"])
+            locked[0] = False
+            db.put("consecutive_errors", 0)   # what the other process's good run writes
+            db.put("last_ok_run", time.time())
+            self.assertFalse(engine.run_once(fake_with_arb())["ok"])
+        self.assertEqual(config.load()["disabled_reason"], "")
+        self.assertEqual(db.get("consecutive_errors"), 1)
 
     def test_a_third_failed_run_the_books_cant_count_still_stops_the_bot(self):
         failed, reason = self.failed_runs_until_the_stop(lambda i: i == 2)

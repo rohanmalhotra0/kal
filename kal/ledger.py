@@ -406,14 +406,16 @@ def _whole(sid, legs):
 def open_directional():
     """Dollars in open bot positions that came from bets, not locked-in arbitrage. The legs
     a half-built basket left are bets now: nothing locks them in any more. That is one
-    marked 'stranded' (and not whole after all), or one with a leg written off, ever (sold
-    outside the bot, say). Like a bet's, a written-off leg still counts until it settles."""
+    marked 'stranded' (and not whole after all), or one with a leg written off after it was
+    bought (sold outside the bot, say). Like a bet's, a written-off leg still counts until
+    it settles."""
     rows = db.query("""SELECT o.signal_id, o.filled, o.price, sg.guaranteed, sg.status, sg.legs
         FROM orders o LEFT JOIN settlements s ON s.ticker = o.ticker
         LEFT JOIN signals sg ON sg.id = o.signal_id
         WHERE o.filled > 0 AND s.ticker IS NULL""")
     broken = {r["signal_id"] for r in db.query("""SELECT DISTINCT o.signal_id FROM orders o
-        JOIN writeoffs w ON w.ticker = o.ticker AND w.side = o.side WHERE o.filled > 0""")}
+        JOIN writeoffs w ON w.ticker = o.ticker AND w.side = o.side AND w.ts >= o.ts
+        WHERE o.filled > 0""")}   # (a write-off takes contracts bought before it)
     whole, total = {}, 0.0
     for r in rows:
         if r["guaranteed"] and r["signal_id"] not in broken:

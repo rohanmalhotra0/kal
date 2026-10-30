@@ -115,10 +115,11 @@ tests/            unittest; tests/fakes.py has FakeKalshi, tests/helpers.py has 
   baskets use) where the best YES buyer bids $0.90 or less. Needed again for a new key
   or exchange, or after Kalshi refuses any order. Until it passes, live strategies trade
   on paper; a failed try waits an hour. If either fills or rests -> trip.
-- Before every live order the settings are read again, last, after the rechecks that read
-  Kalshi: OFF, the strategy leaving live, or any money limit set stricter (`config.LIMITS`)
-  ends the run's real trading, and the next run starts on the new settings. OFF works even
-  with a bad config file.
+- Before every live signal's orders the settings are read again, last, right before the
+  buy (after the rechecks that read Kalshi): OFF, the strategy leaving live, or any money
+  limit set stricter (`config.LIMITS`) ends the run's real trading, and the next run starts
+  on the new settings. A basket's legs go together: it is never split. OFF works even with
+  a bad config file.
 - The legs a half-built basket left count as bets in the open-bets cap (`max_exposure`):
   nothing locks them in any more. So do a basket's legs once any leg was written off (sold
   outside the bot, say).

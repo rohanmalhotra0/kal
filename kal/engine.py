@@ -444,14 +444,20 @@ def _alert_once(key, title, message, every=86400):
         log.warning("alert failed", exc_info=True)
 
 
-_errors_here = {}   # KAL_HOME -> failed runs in a row, counted here when the books can't take it
+_errors_here = {}   # KAL_HOME -> (failed runs the books couldn't count, their last_ok_run then)
+_NOT_READ = object()   # (the books couldn't be read)
 
 
 def _count_error(cfg, e):
     # One streak: the failed runs the books couldn't take are added to the books' count, so
     # books that take some writes and not others still stop the bot at max_consecutive_errors.
-    held, books_n = _errors_here.get(config.home(), 0), 0
+    # A good run since, in another process too (`kal run`), ended that streak.
+    held, seen = _errors_here.get(config.home(), (0, _NOT_READ))
+    last_ok, books_n = _NOT_READ, 0
     try:
+        last_ok = db.get("last_ok_run")
+        if held and seen is not _NOT_READ and last_ok != seen:
+            held = 0
         books_n = db.get("consecutive_errors", 0) or 0
         errors = books_n + held + 1
         db.put("consecutive_errors", errors)
@@ -469,7 +475,7 @@ def _count_error(cfg, e):
                 config.trip(f"the books are damaged ({books}). Nothing can trade. "
                             f"Put a backup back: {config.command('restore')}")
             return
-        _errors_here[config.home()] = held + 1
+        _errors_here[config.home()] = (held + 1, seen if last_ok is _NOT_READ else last_ok)
         n = books_n + held + 1
         if n >= cfg.get("max_consecutive_errors", 3):
             config.trip(f"{n} failed runs in a row, and the books can't be written "
@@ -717,13 +723,6 @@ def _trade(client, cfg, summary):
             if not reason and not sig_live and kind and share is not None:
                 if paper_kinds.get(kind, 0.0) + sig.cost > float(share) * paper_capital + 1e-9:
                     reason = f"over its {float(share):.0%} share of the paper money"
-            if not reason and sig_live:
-                # Again, last: the rechecks above read Kalshi (seconds, at worst), and a stop
-                # or a stricter limit saved meanwhile must still stop this order.
-                stop = _stop_live(cfg, name)
-                if stop:
-                    summary["notes"].append(stop)
-                    return
             sid = db.insert("signals", strategy=name, event=sig.event, title=sig.title,
                             mode="live" if sig_live else "paper",
                             guaranteed=int(sig.guaranteed), cost=sig.cost, payout_min=sig.payout_min,
@@ -743,6 +742,14 @@ def _trade(client, cfg, summary):
                 summary["paper_trades"] += 1
                 held_paper.update(leg.ticker for leg in sig.legs)
                 continue
+            # Again, last, right before the buy: the rechecks above read Kalshi (seconds, at
+            # worst) and the signal's row may have waited on the books. A stop or a stricter
+            # limit saved meanwhile stops this basket too. (Its legs go together.)
+            stop = _stop_live(cfg, name)
+            if stop:
+                db.execute("UPDATE signals SET status = ? WHERE id = ?", f"skipped: {stop}", sid)
+                summary["notes"].append(stop)
+                return
             try:
                 spent = execute(client, sig, sid)
             except (LegFailed, OrderUnknown, Halted) as e:
