@@ -11,8 +11,8 @@ import json
 import time
 
 from . import db
-from .client import (BOT_MARK, UnknownSettlement, every_fill, every_order, fee, fill_count, num, outcome_side,
-                     price, resting, ts, yes_payout)
+from .client import (BOT_MARK, KalshiError, UnknownSettlement, every_fill, every_order, fee, fill_count, num,
+                     outcome_side, price, resting, ts, yes_payout)
 
 OPEN = ("active", "open")
 
@@ -414,11 +414,26 @@ RECOVER_SLACK = 3600   # seconds: orders from just before the last check are loo
 
 def _events(client, tickers):
     """{ticker: event} for orders put back without their signal, from Kalshi's market data
-    (the live list, then its historical store). The ticker alone doesn't say: player-prop
-    and negative-threshold tickers carry extra hyphens. A market Kalshi doesn't return
-    keeps its own ticker as its event, as before."""
-    found = client.markets_by_ticker(sorted(tickers)) if tickers else {}
-    return {t: (found.get(t) or {}).get("event_ticker") or t for t in tickers}
+    (the market, then its historical store). The ticker alone doesn't say: player-prop and
+    negative-threshold tickers carry extra hyphens. Only a market Kalshi has no record of
+    (404) keeps its own ticker as its event. Any other failure (an outage, a rate limit)
+    raises, so the run writes nothing and tries again: an order filed under its ticker is
+    one the per-event cap can't see until its market settles."""
+    out = {}
+    for t in sorted(tickers):
+        for archive in (False, True):
+            try:
+                m = client.market(t, archive=archive)
+            except KalshiError as e:
+                if e.status != 404:
+                    raise
+                m = None
+            if m and m.get("event_ticker"):
+                out[t] = m["event_ticker"]
+                break
+        else:
+            out[t] = t
+    return out
 
 
 def _stand_in(c, strategy, event, ticker, side, n, p, when):
@@ -471,7 +486,9 @@ def recover(client):
     way). Each order's writes go in one transaction: a run killed part way redoes it.
     Looks back to the last check (kv 'orders_checked') less RECOVER_SLACK, or over the
     whole account if the books don't say. Orders sent before the mark existed can't be
-    found. Returns how many it put back. Raises CatchUpError if one can't be read."""
+    found. Returns how many it put back. Every order is read and checked before any is
+    written: one it can't read raises CatchUpError (the bot stops) with nothing written,
+    and the first good run after puts them all back."""
     start = time.time()
     since = db.get("orders_checked") or None   # one meaning for "no check yet", whatever was stored
     ids = {r["order_id"] for r in db.query("SELECT DISTINCT order_id FROM orders WHERE order_id != ''")}
