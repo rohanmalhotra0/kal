@@ -393,16 +393,39 @@ def catch_up(client):
         o["n"] += n
         o["p"] = max(o["p"], p)
         o["ts"] = min(o["ts"], when)
+    events = _events(client, {o["ticker"] for o in found.values()})
     for oid, o in found.items():
-        db.insert("orders", ts=o["ts"], strategy="restored", ticker=o["ticker"], side=o["side"],
-                  count=o["n"], price=o["p"], filled=o["n"], status="imported", order_id=oid,
-                  client_order_id="")
+        with db.connect() as c:   # the order and its stand-in signal, or neither
+            sid = _stand_in(c, "restored", events[o["ticker"]], o["ticker"], o["side"], o["n"], o["p"], o["ts"])
+            c.execute("INSERT INTO orders (ts, signal_id, strategy, ticker, side, count, price, filled, status, "
+                      "order_id, client_order_id) VALUES (?, ?, 'restored', ?, ?, ?, ?, ?, 'imported', ?, '')",
+                      (o["ts"], sid, o["ticker"], o["side"], o["n"], o["p"], o["n"], oid))
     db.put("restore_check", True)   # strangers() gets one look at Kalshi's positions next
     db.execute("DELETE FROM kv WHERE key = 'restored'")
     return len(found)
 
 
 RECOVER_SLACK = 3600   # seconds: orders from just before the last check are looked at again
+
+
+def _events(client, tickers):
+    """{ticker: event} for orders put back without their signal, from Kalshi's market data
+    (the live list, then its historical store). The ticker alone doesn't say: player-prop
+    and negative-threshold tickers carry extra hyphens. A market Kalshi doesn't return
+    keeps its own ticker as its event, as before."""
+    found = client.markets_by_ticker(sorted(tickers)) if tickers else {}
+    return {t: (found.get(t) or {}).get("event_ticker") or t for t in tickers}
+
+
+def _stand_in(c, strategy, event, ticker, side, n, p, when):
+    """A signal row for an order put back without its own, so the per-event limit counts it.
+    Filed under the bare ticker, put-back orders hid from max_per_event: after a lost disk or
+    a rollback a live bet strategy staked twice the cap in one event (cross-PR audit). Its
+    status keeps it out of the basket and trade-alert checks; guaranteed=0 counts it as a bet."""
+    return c.execute("INSERT INTO signals (ts, strategy, event, title, mode, guaranteed, cost, payout_min, "
+                     "exp_profit, legs, status) VALUES (?, ?, ?, ?, 'live', 0, ?, 0, 0, ?, 'put back')",
+                     (when, strategy, event, f"{ticker} (put back from Kalshi)", n * p + fee(n, p),
+                      json.dumps([{"ticker": ticker, "side": side, "price": p, "count": n}]))).lastrowid
 
 
 def _bought_count(o):
@@ -451,7 +474,7 @@ def recover(client):
     rows = {r["client_order_id"]: r for r in db.query(
         "SELECT id, client_order_id, status, ticker, side, signal_id FROM orders WHERE client_order_id != ''")}
     settled = {r["ticker"] for r in db.query("SELECT ticker FROM settlements")}
-    back = 0
+    todo = []
     for o in every_order(client, min_ts=since - RECOVER_SLACK if since else None):
         coid, oid = str(o.get("client_order_id") or ""), str(o.get("order_id") or "")
         row = rows.get(coid)
@@ -473,6 +496,10 @@ def recover(client):
         if row and (row["ticker"], row["side"]) != (ticker, side):
             raise CatchUpError(f"order {coid}: Kalshi says {side} on {ticker}, the books {row['side']} "
                                f"on {row['ticker']}")
+        ids.add(oid)
+        todo.append((coid, oid, ticker, row, n, side, p, when))
+    events = _events(client, {t for _, _, t, row, *_ in todo if not row})
+    for coid, oid, ticker, row, n, side, p, when in todo:
         with db.connect() as c:   # all of this order's writes, or none of them
             if row:   # the books said never placed, but it filled
                 c.execute("UPDATE orders SET filled = ?, status = 'recovered', order_id = ? WHERE id = ?",
@@ -485,17 +512,17 @@ def recover(client):
                               ("failed: a leg Kalshi shows filled after all" if many else "executed",
                                row["signal_id"]))
             else:
-                c.execute("INSERT INTO orders (ts, strategy, ticker, side, count, price, filled, status, order_id, "
-                          "client_order_id) VALUES (?, ?, ?, ?, ?, ?, ?, 'recovered', ?, ?)",
-                          (when, "restored" if since is None else "recovered", ticker, side, n, p, n, oid, coid))
+                strategy = "restored" if since is None else "recovered"
+                sid = _stand_in(c, strategy, events[ticker], ticker, side, n, p, when)
+                c.execute("INSERT INTO orders (ts, signal_id, strategy, ticker, side, count, price, filled, status, "
+                          "order_id, client_order_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'recovered', ?, ?)",
+                          (when, sid, strategy, ticker, side, n, p, n, oid, coid))
             if ticker in settled:
                 c.execute("INSERT INTO writeoffs (ts, ticker, side, count, cost, note) VALUES (?, ?, ?, ?, ?, ?)",
                           (time.time(), ticker, side, n, n * p + fee(n, p),
                            "found after its market was booked without it: counted as lost"))
-        ids.add(oid)
-        back += 1
     db.put("orders_checked", start)
-    return back
+    return len(todo)
 
 
 def strangers(positions):
