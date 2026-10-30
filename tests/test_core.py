@@ -47,8 +47,61 @@ class ClientTests(unittest.TestCase):
         self.assertEqual(client.fee(10, 0.95), 0.04)
         self.assertEqual(client.price({"yes_ask_dollars": "0.9300"}, "yes_ask"), 0.93)
         self.assertEqual(client.price({"yes_ask": 93}, "yes_ask"), 0.93)
-        self.assertEqual(client.filled({"fill_count_fp": "3.00"}, 5), 3)
-        self.assertEqual(client.filled({"status": "executed"}, 5), 5)
+        self.assertEqual(client.fill_count({"fill_count_fp": "3.00"}, 5), 3)
+        self.assertEqual(client.fill_count({"status": "executed"}, 5), 5)
+
+    def test_initial_less_remaining_counts_only_for_an_order_done_in_full(self):
+        # Kalshi zeroes "remaining" when it cancels the rest of an order.
+        cancelled = {"status": "canceled", "initial_count_fp": "10.00", "remaining_count_fp": "0.00"}
+        self.assertIsNone(client.fill_count(cancelled, 10))      # looked up, never guessed
+        done = dict(cancelled, status="executed")
+        self.assertEqual(client.fill_count(done, 10), 10)
+        self.assertEqual(client.fill_count(dict(cancelled, fill_count_fp="3.00"), 10), 3)
+
+    def test_fill_count_reads_every_real_shape_and_guesses_none(self):
+        fc = client.fill_count
+        # What Kalshi sends: the V2 create reply, a GET order (done, cancelled part fill, resting).
+        self.assertEqual(fc({"order_id": "o", "fill_count": "5.00", "remaining_count": "0.00", "ts_ms": 1}), 5)
+        self.assertEqual(fc({"status": "executed", "fill_count_fp": "10.00", "initial_count_fp": "10.00",
+                             "remaining_count_fp": "0.00"}), 10)
+        self.assertEqual(fc({"status": "canceled", "fill_count_fp": "3.00", "initial_count_fp": "10.00",
+                             "remaining_count_fp": "0.00"}), 3)
+        self.assertEqual(fc({"status": "resting", "fill_count_fp": "2.00", "remaining_count_fp": "3.00"}), 2)
+        self.assertEqual(fc({"fill_count_fp": None, "fill_count": 9}), 9)          # legacy when _fp is null
+        self.assertEqual(fc({"status": "executed", "initial_count_fp": None}, 7), 7)  # all of what was asked
+        # Says nothing, or contradicts itself: None, never a number.
+        for order in ({"fill_count": None, "remaining_count": "0.00"}, {"fill_count_fp": ""},
+                      {"status": "executed", "initial_count_fp": "10.00", "remaining_count_fp": "1.13"},
+                      {"status": "executed", "fill_count_fp": "0.00", "initial_count_fp": "10.00"},
+                      {"fill_count_fp": "12.00", "initial_count_fp": "10.00"},
+                      {"fill_count": True}, {"fill_count_fp": "nan"}, {"fill_count_fp": "inf"},
+                      {"fill_count": 10 ** 400}, {"fill_count_fp": "-1.00"}, {"fill_count_fp": "lots"},
+                      {"status": "executed", "fill_count_fp": "0.00"},         # "executed", nothing bought
+                      {"fill_count_fp": "12.00"},                               # more than was asked
+                      {"fill_count_fp": "5.00", "remaining_count_fp": "-1.00"},
+                      {"fill_count": "10.00", "remaining_count": "abc"}, "not a dict"):
+            with self.subTest(order=order):
+                self.assertIsNone(fc(order, 10))
+        self.assertIsNone(fc({"status": "executed"}))   # nothing says how much: not even what was asked
+
+    def test_a_reply_shows_a_fill_even_when_it_contradicts_itself(self):
+        for order in ({"status": "executed"}, {"status": "executed", "fill_count_fp": "0.00"},
+                      {"fill_count_fp": "12.00", "initial_count_fp": "10.00"}, {"fill_count": "lots"},
+                      {"fill_count": True}, {"status": "canceled", "fill_count_fp": "0.01"}):
+            with self.subTest(order=order):
+                self.assertTrue(client.shows_fill(order))
+        for order in ({"status": "canceled"}, {"status": "canceled", "fill_count_fp": "0.00"},
+                      {"fill_count_fp": None}, {"remaining_count": "abc"}, "not a dict"):
+            with self.subTest(order=order):
+                self.assertFalse(client.shows_fill(order))
+
+    def test_a_cancelled_test_order_without_a_fill_count_is_no_false_alarm(self):
+        from kal import gate
+        ok, why, alarming = gate.judge("T-1", 0.10, {"status": "canceled", "initial_count_fp": "1.00",
+                                                      "remaining_count_fp": "0.00"})
+        self.assertFalse(ok)
+        self.assertFalse(alarming, why)   # it was "FILLED": a stop for an order that bought nothing
+        self.assertIn("can't tell", why)
 
     def test_price_shapes_seen_on_the_real_api(self):
         self.assertEqual(client.price({"yes_bid_dollars": "0.0500"}, "yes_bid"), 0.05)
@@ -103,7 +156,28 @@ class ClientTests(unittest.TestCase):
         self.assertTrue(client.resting({"order_id": "o", "fill_count": 2, "remaining_count": 3}))
         self.assertTrue(client.resting({"status": "resting"}))
         self.assertFalse(client.resting({"status": "executed"}))
-        self.assertEqual(client.filled({"fill_count": 4, "remaining_count": 1}, 5), 4)
+        self.assertEqual(client.fill_count({"fill_count": 4, "remaining_count": 1}, 5), 4)
+
+    def test_a_remaining_count_it_cant_read_never_crashes_the_check(self):
+        # It raised ValueError, after the order's row was written as done with 0 bought: a fill
+        # never looked up again (review of the shared fill reader). Now it's no answer: the
+        # fill count is unknown too, so the order is looked up.
+        for order in ({"fill_count": "10.00", "remaining_count": "abc"}, {"remaining_count_fp": [3]},
+                      {"remaining_count_fp": "nan"}, {"remaining_count": None}, "not a dict"):
+            with self.subTest(order=order):
+                self.assertFalse(client.resting(order))
+                self.assertIsNone(client.fill_count(order, 10))
+
+    def test_buy_always_returns_an_order_dict(self):
+        k = client.Kalshi()
+
+        class Reply:
+            status_code, text = 200, '{"order": null}'
+
+            def json(self):
+                return {"order": None}
+        k._req = lambda method, path, params=None, body=None: Reply()
+        self.assertEqual(k.buy("KX-1", "yes", 1, 0.5), {})   # read as "doesn't say", never a crash
 
     def test_rejected_order_raises_as_rejected(self):
         k, sent = self._capture({"error": {"code": "invalid_price"}})
