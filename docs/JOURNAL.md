@@ -2,6 +2,26 @@
 
 Newest first. Each 2-hour check-in adds one entry: what it checked, what it found, links.
 
+## 2026-10-30 02:55 UTC — check-in: install-check race fixed; order memory through 3 reviews
+
+- Checked: CI green on main adabb58; market-check green on 6f9cd89 (all 11 strategies ran, 0
+  trades found; self-test passed). No status report yet: `kal-status` doesn't exist or isn't
+  shared with Claude.
+- Watch: "Research (quick)" took 5 minutes on today's 01:45-02:05 UTC runs, 17 s at 23:30. Not
+  today's code (#40 only changed request signing, and research runs without a key); same 3
+  series and results. Likely Kalshi or runner latency. Research runs in its own process, so
+  trade runs don't wait on it.
+- Fix: [PR #44](https://github.com/rohanmalhotra0/kal/pull/44). `install-check` failed once on
+  [PR #43](https://github.com/rohanmalhotra0/kal/pull/43): after a crash, a stop before the new
+  process beat once left the crashed one's heartbeat behind. In real use, `kal health` would
+  call a stopped bot alive for up to 5 minutes. The scheduler now beats at once, and the check
+  waits for the new process's own heartbeat.
+- [PR #43](https://github.com/rohanmalhotra0/kal/pull/43) (the bot's orders carry a mark Kalshi
+  keeps, so lost books get them back) went through 3 independent reviews, none blocking. All
+  their fixes are in, with tests: one transaction per order, new books count only losses,
+  null or negative counts stop the bot. CI running.
+- Research: no idea can be built now. Only #18 is left, and it needs 4+ weeks of server data.
+
 ## 2026-10-30 02:00 UTC — Kalshi API changes: three fixes merged, one in review
 
 Checked Kalshi's live docs and API for changes the bot hadn't caught up with. Found three, each
