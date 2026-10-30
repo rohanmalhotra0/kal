@@ -412,10 +412,13 @@ def _bought_count(o):
     if not (has("fill_count") or (has("initial_count") and has("remaining_count"))):
         raise CatchUpError(f"order {o.get('client_order_id')} doesn't say how much it bought (fields: "
                            f"{', '.join(sorted(o))[:200]})")
-    n = filled(o, float("inf"))
-    if not math.isfinite(n) or n < 0:
-        raise CatchUpError(f"order {o.get('client_order_id')} reads as {n} contracts")
-    return n
+    try:   # the raw count, before filled() clamps a negative to 0: that's a misread, not "none"
+        raw = num(o, "fill_count") if has("fill_count") else num(o, "initial_count") - num(o, "remaining_count")
+    except (TypeError, ValueError):
+        raw = float("nan")
+    if not math.isfinite(raw) or raw < 0:
+        raise CatchUpError(f"order {o.get('client_order_id')} reads as {raw} contracts")
+    return filled(o, float("inf"))
 
 
 def _bought_side(o):
@@ -436,10 +439,14 @@ def recover(client):
     """Put back the bot's own orders that its books don't have: a lost or replaced disk, a
     reinstall, or books rolled back to an older copy without `kal restore`. Every order the
     bot sends carries a marked client_order_id (client.new_order_id), and Kalshi keeps it, so
-    a marked order is the bot's for sure: it goes back in with its full result, as the books
-    had it ("recovered"). One the books call never placed, found filled inside the look-back,
-    is corrected in its own row, and a basket it belongs to is checked again. One whose
-    market the books already settled without it counts as lost in full (the safe way).
+    a marked order is the bot's for sure. Books with an earlier check (rolled back to an
+    older copy) still hold what came before, so it goes back with its full result
+    ("recovered"). Books with no check yet (a new disk) can't see losses from before the
+    mark, so there only its losses count, never its gains ("restored"), and the budget
+    can't grow from a lost disk. One the books call never placed, found filled inside the
+    look-back, is corrected in its own row, and a basket it belongs to is checked again.
+    One whose market the books already settled without it counts as lost in full (the safe
+    way). Each order's writes go in one transaction: a run killed part way redoes it.
     Looks back to the last check (kv 'orders_checked') less RECOVER_SLACK, or over the
     whole account if the books don't say. Orders sent before the mark existed can't be
     found. Returns how many it put back. Raises CatchUpError if one can't be read."""
@@ -468,23 +475,28 @@ def recover(client):
             when = ts(o["created_time"]) if o.get("created_time") else start
         except (TypeError, ValueError, AttributeError):
             raise CatchUpError(f"order {coid} has an unreadable time: {o.get('created_time')!r}")
-        if row:   # the books said never placed, but it filled
-            if (row["ticker"], row["side"]) != (ticker, side):
-                raise CatchUpError(f"order {coid}: Kalshi says {side} on {ticker}, the books {row['side']} "
-                                   f"on {row['ticker']}")
-            db.execute("UPDATE orders SET filled = ?, status = 'recovered', order_id = ? WHERE id = ?",
-                       n, oid, row["id"])
-            sig = db.query("SELECT legs FROM signals WHERE id = ?", row["signal_id"]) if row["signal_id"] else []
-            if sig:   # a basket with a leg after all: stranded_baskets() looks at it again this run
-                many = len(json.loads(sig[0]["legs"] or "[]")) > 1
-                db.execute("UPDATE signals SET status = ? WHERE id = ?",
-                           "failed: a leg Kalshi shows filled after all" if many else "executed", row["signal_id"])
-        else:
-            db.insert("orders", ts=when, strategy="recovered", ticker=ticker, side=side, count=n, price=p,
-                      filled=n, status="recovered", order_id=oid, client_order_id=coid)
-        if ticker in settled:
-            db.insert("writeoffs", ticker=ticker, side=side, count=n, cost=n * p + fee(n, p),
-                      note="found after its market was booked without it: counted as lost")
+        if row and (row["ticker"], row["side"]) != (ticker, side):
+            raise CatchUpError(f"order {coid}: Kalshi says {side} on {ticker}, the books {row['side']} "
+                               f"on {row['ticker']}")
+        with db.connect() as c:   # all of this order's writes, or none of them
+            if row:   # the books said never placed, but it filled
+                c.execute("UPDATE orders SET filled = ?, status = 'recovered', order_id = ? WHERE id = ?",
+                          (n, oid, row["id"]))
+                sig = c.execute("SELECT legs FROM signals WHERE id = ?", (row["signal_id"],)).fetchone() \
+                    if row["signal_id"] else None
+                if sig:   # a basket with a leg after all: stranded_baskets() looks at it again this run
+                    many = len(json.loads(sig["legs"] or "[]")) > 1
+                    c.execute("UPDATE signals SET status = ? WHERE id = ?",
+                              ("failed: a leg Kalshi shows filled after all" if many else "executed",
+                               row["signal_id"]))
+            else:
+                c.execute("INSERT INTO orders (ts, strategy, ticker, side, count, price, filled, status, order_id, "
+                          "client_order_id) VALUES (?, ?, ?, ?, ?, ?, ?, 'recovered', ?, ?)",
+                          (when, "restored" if since is None else "recovered", ticker, side, n, p, n, oid, coid))
+            if ticker in settled:
+                c.execute("INSERT INTO writeoffs (ts, ticker, side, count, cost, note) VALUES (?, ?, ?, ?, ?, ?)",
+                          (time.time(), ticker, side, n, n * p + fee(n, p),
+                           "found after its market was booked without it: counted as lost"))
         ids.add(oid)
         back += 1
     db.put("orders_checked", start)

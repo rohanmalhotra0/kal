@@ -4,6 +4,7 @@ marked order that bought something and that the books don't have, so the budget 
 counts its losses after a lost, replaced or rolled-back disk."""
 import time
 import uuid
+from unittest import mock
 
 from kal import client, config, db, engine, ledger
 from kal.client import BOT_MARK, KalshiError, new_order_id
@@ -84,14 +85,20 @@ class RecoverTests(TempHome):
         self.assertTrue(any("back in" in n for n in s["notes"]), s)
         self.assertAlmostEqual(ledger.realized(), -(5 + client.fee(10, 0.5)))
         row = db.query("SELECT strategy, status, client_order_id FROM orders")[0]
-        self.assertEqual((row["strategy"], row["status"], row["client_order_id"]), ("recovered", "recovered", self.mine))
+        self.assertEqual((row["strategy"], row["status"], row["client_order_id"]), ("restored", "recovered", self.mine))
         self.assertEqual(config.load()["disabled_reason"], "")
 
-    def test_a_win_put_back_counts_like_any_of_the_bots(self):
-        # A marked order is the bot's for sure: its full result comes back, as the books had
-        # it. Counting only losses would leave a winning bot looking like a loser after a
-        # lost disk (review of this change).
+    def test_on_new_books_a_win_put_back_never_grows_the_budget(self):
+        # New books can't see losses from before the mark, so only losses count there.
         self.c.order_list = [order(self.mine)]
+        self.settled(result="yes")
+        engine.run_once(self.c)
+        self.assertAlmostEqual(ledger.realized(), 0)
+
+    def test_on_rolled_back_books_a_win_counts_in_full(self):
+        # An older copy still holds what came before: the bot's own order counts as it was.
+        db.put("orders_checked", time.time() - 3 * DAY)
+        self.c.order_list = [order(self.mine, ago=DAY)]
         self.settled(result="yes")
         engine.run_once(self.c)
         self.assertAlmostEqual(ledger.realized(), 10 - (5 + client.fee(10, 0.5)))
@@ -237,3 +244,52 @@ class RecoverReviewTests(TempHome):
         o = order(self.mine)
         o["order_id"] = ""
         self.assertStops(o, "no order id")
+
+
+class RecoverAtomicTests(TempHome):
+    """Each order's writes go in one transaction: a run killed part way redoes all of it
+    (second review of this change)."""
+
+    def setUp(self):
+        super().setUp()
+        config.update({"enabled": True, "budget": 300, "strategies": _all_off()})
+        self.c = FakeKalshi(balance=1000)
+        self.c.cutoffs = {"orders_updated_ts": time.time() - 15 * DAY, "trades_created_ts": time.time() - 60 * DAY}
+        self.mine = new_order_id()
+        db.put("orders_checked", time.time() - 600)
+
+    def test_a_write_off_that_fails_leaves_nothing_half_done(self):
+        db.insert("settlements", ticker="M-1", settled_ts=time.time(), result="yes", revenue=0, cost=0, pnl=0)
+        self.c.order_list = [order(self.mine, ago=1800)]
+        with mock.patch.object(ledger, "fee", side_effect=OSError("database is locked")):
+            with self.assertRaises(OSError):
+                ledger.recover(self.c)
+        self.assertEqual(db.query("SELECT COUNT(*) AS n FROM orders")[0]["n"], 0)   # rolled back
+        self.assertEqual(ledger.recover(self.c), 1)                                    # done again, whole
+        self.assertAlmostEqual(ledger.realized(), -(5 + client.fee(10, 0.5)))
+
+    def test_a_basket_check_that_fails_leaves_the_leg_unbooked(self):
+        legs = [{"ticker": f"B-{i}", "side": "no", "price": 0.5, "count": 10} for i in range(2)]
+        sid = db.insert("signals", strategy="basket_arb", event="B", title="t", mode="live", guaranteed=1,
+                        cost=10, payout_min=10, exp_profit=0.5, legs=legs, status="missed (no fill)")
+        db.insert("orders", signal_id=sid, strategy="basket_arb", ticker="B-0", side="no", count=10, price=0.5,
+                  filled=0, status="never_placed", client_order_id=self.mine, ts=time.time() - 1800)
+        self.c.order_list = [order(self.mine, ticker="B-0", outcome="no", ago=1800)]
+        broken = mock.Mock(loads=mock.Mock(side_effect=OSError("killed")))
+        with mock.patch.object(ledger, "json", broken):
+            with self.assertRaises(OSError):
+                ledger.recover(self.c)
+        self.assertEqual(db.query("SELECT status FROM orders")[0]["status"], "never_placed")   # rolled back
+        ledger.recover(self.c)
+        self.assertEqual(db.query("SELECT status FROM signals")[0]["status"], "failed: a leg Kalshi shows filled after all")
+
+    def test_a_negative_count_is_a_misread_not_nothing(self):
+        for fields in ({"fill_count_fp": "-10.00"},
+                       {"fill_count_fp": None, "initial_count_fp": "5.00", "remaining_count_fp": "9.00"}):
+            o = order(new_order_id())
+            o.update(fields)
+            if fields.get("fill_count_fp", 0) is None:
+                del o["fill_count_fp"]
+            self.c.order_list = [o]
+            with self.assertRaises(ledger.CatchUpError):
+                ledger.recover(self.c)
