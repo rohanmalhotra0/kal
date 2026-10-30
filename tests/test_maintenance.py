@@ -541,12 +541,12 @@ class TripLogTests(Base):
 # ---------- health / daily ----------
 
 class HealthTests(Base):
-    def test_checks_disk_clock_and_trading_and_saves_them(self):
+    def test_checks_disk_clock_books_and_trading_and_saves_them(self):
         with free_disk(50_000), kalshi_clock(0):
             out = maintenance.health()
         self.assertTrue(out["ok"], out)
-        self.assertEqual([r["check"] for r in out["checks"]], ["disk", "clock", "trading"])
-        self.assertEqual([r["check"] for r in db.get("health")["checks"]], ["disk", "clock", "trading"])
+        self.assertEqual([r["check"] for r in out["checks"]], ["disk", "clock", "books", "trading"])
+        self.assertEqual([r["check"] for r in db.get("health")["checks"]], ["disk", "clock", "books", "trading"])
 
     def test_a_hard_failure_trips_and_is_logged_for_the_summary(self):
         config.update({"enabled": True, "budget": 300})

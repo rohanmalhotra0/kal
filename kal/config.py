@@ -192,18 +192,110 @@ def trip(reason):
 
     The phone alert is "high", not "urgent": a stop already ends all trading, so it is
     news to read when awake, not an alarm for 3 AM."""
-    with _locked():
-        try:
-            data = _raw()
-        except (OSError, ValueError):
-            data = {}
-        data.update(enabled=False, disabled_reason=str(reason) or "stopped")
-        _write(data)
+    reason = str(reason) or "stopped"
+    failed = token = None
     try:
         from . import notify
-        notify.send("kal stopped itself", f"{reason}\n\n{STOPPED_HELP}", priority="high", tags=("no_entry",))
+        alerts = notify.enabled()
+    except Exception:
+        alerts = False
+    try:
+        with _locked():
+            if alerts:
+                try:
+                    token = _owe()   # first: owed until it gets through, even if kal dies mid-send
+                except Exception:
+                    pass   # the stop itself still gets saved
+            try:
+                data = _raw()
+            except (OSError, ValueError):
+                data = {}
+            data.update(enabled=False, disabled_reason=reason)
+            _write(data)
+    except Exception as e:   # a full disk, a read-only folder: still say so, then raise
+        failed = e   # (its note stays: resend_stop sends what the bot is stopped for, if anything)
+    try:
+        if alerts and failed is None:
+            if notify.send("kal stopped itself", f"{reason}\n\n{STOPPED_HELP}", priority="high",
+                           tags=("no_entry",)):
+                _settle_owed(token)
+        elif alerts and time.monotonic() - _unsaved_sent.get(home(), -UNSAVED_EVERY) >= UNSAVED_EVERY:
+            # Every run trips again while the disk is full: say it once an hour, not every run.
+            if notify.send("kal stopped itself", f"{reason}\n\nThis stop couldn't be saved "
+                           f"({failed}), so the bot may run again. Look now: {command('health')}",
+                           priority="high", tags=("no_entry",)):
+                _unsaved_sent[home()] = time.monotonic()
     except Exception:
         pass  # an alert must never block a trip
+    if failed is not None:
+        raise failed
+
+
+UNSENT_STOP = "unsent_stop.txt"   # holds a token while a stop alert is owed (not yet delivered)
+UNSAVED_EVERY = 3600              # seconds between "this stop couldn't be saved" alerts
+_unsaved_sent = {}                # home -> time.monotonic() when the last of those went
+_delivered = set()                # tokens of alerts that went, but whose note couldn't be removed
+
+
+def _owed():
+    """The token of the owed stop alert, or None."""
+    try:
+        with open(os.path.join(home(), UNSENT_STOP), newline="") as f:
+            return f.read()
+    except OSError:
+        return None
+
+
+def _owe():
+    """Note that a stop alert is owed, with a fresh token, so only this stop's own delivery
+    can settle it. The caller holds _locked(). Returns the token."""
+    p = os.path.join(home(), UNSENT_STOP)
+    token = f"{time.time_ns()}-{os.getpid()}-{threading.get_ident()}"
+    tmp = f"{p}.{os.getpid()}.{threading.get_ident()}.tmp"
+    with open(tmp, "w") as f:
+        f.write(token)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, p)
+    return token
+
+
+def _settle_owed(token):
+    """The alert owed under `token` got through (or is no longer needed): it is owed no more,
+    unless a newer stop was noted since. Never raises."""
+    if token is None:
+        return
+    try:
+        with _locked():
+            if _owed() == token:
+                os.remove(os.path.join(home(), UNSENT_STOP))
+    except Exception:   # a read-only disk: remember it here, so it isn't sent every 10 minutes
+        _delivered.add(token)
+
+
+def resend_stop():
+    """A stop alert is owed: while the bot is stopped, send what it is stopped for now (the
+    owed one may be older); once it is back on, nothing is owed. The health job calls this
+    every 10 minutes. True if one went now. Never raises."""
+    try:
+        token = _owed()
+        if token is None or token in _delivered:
+            return False
+        try:
+            reason = _raw().get("disabled_reason") or ""
+        except Exception:
+            reason = "kal stopped itself, and its settings can't be read now."   # still owed
+        if not reason:
+            _settle_owed(token)
+            return False
+        from . import notify
+        if notify.send("kal stopped itself", f"{reason}\n\n{STOPPED_HELP}", priority="high",
+                       tags=("no_entry",)):
+            _settle_owed(token)
+            return True
+    except Exception:
+        pass
+    return False
 
 
 def turn_off():
@@ -218,7 +310,7 @@ def turn_off():
 
 
 def clear_trip():
-    update({"disabled_reason": ""})
+    update({"disabled_reason": ""})   # (an alert still owed is dropped by the next resend_stop)
 
 
 def command(rest):
