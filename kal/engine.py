@@ -247,11 +247,22 @@ def reconcile(client):
     return fixed
 
 
+def _mark(sid, status):
+    """Mark a half-built basket reported. Called only once its stop is written, so a write
+    that fails here (a locked database) just means it's reported once more after Reset:
+    never an error that could hide the stop's reason."""
+    try:
+        db.execute("UPDATE signals SET status = ? WHERE id = ?", status, sid)
+    except Exception:
+        log.warning("couldn't mark basket %s reported; the next run reports it again", sid, exc_info=True)
+
+
 def stranded_baskets():
     """Live baskets an earlier run left part-bought: some legs filled, the rest didn't or
-    were never sent (a lost reply, or the process dying between legs). Each is marked
-    'stranded' so it's reported once. Call after reconcile(), so every order is resolved.
-    Returns their events."""
+    were never sent (a lost reply, or the process dying between legs). Call after
+    reconcile(), so every order is resolved. Returns (signal id, event, status) for each:
+    the caller stops the bot, then marks them with that 'stranded' status, so each is
+    reported once. Marked first, a process killed before the stop left one never reported."""
     out = []
     for s in db.query("SELECT id, event, legs, status FROM signals WHERE mode = 'live' "
                       "AND (status = 'accepted' OR status LIKE 'failed:%')"):
@@ -260,9 +271,7 @@ def stranded_baskets():
         bought = bool(fills) and max(fills) > 0
         whole = len(fills) == len(legs) and bought and min(fills) == max(fills)
         if len(legs) > 1 and bought and not whole:
-            db.execute("UPDATE signals SET status = ? WHERE id = ?",
-                       f"stranded: {sum(f > 0 for f in fills)} of {len(legs)} legs bought", s["id"])
-            out.append(s["event"])
+            out.append((s["id"], s["event"], f"stranded: {sum(f > 0 for f in fills)} of {len(legs)} legs bought"))
         elif s["status"] == "accepted":   # a run died after its last order: just finish the record
             db.execute("UPDATE signals SET status = ? WHERE id = ?",
                        "executed" if bought else "missed (no fill)", s["id"])
@@ -361,7 +370,7 @@ def _run_once(client, cfg, t0):
             log.warning("run waiting on an order: %s", e)
         else:
             log.error("run stopped: %s", traceback.format_exc())
-            if isinstance(e, LegFailed):
+            if isinstance(e, LegFailed):   # _trade stops for these itself; this is only a fallback
                 config.trip(f"basket left half-built: {e}. Check open positions on Kalshi.")
             elif not isinstance(e, Halted):
                 _count_error(cfg, e)
@@ -515,9 +524,11 @@ def _trade(client, cfg, summary):
             summary["notes"].append(f"added {added} order(s) from Kalshi that the restored books were missing")
         stranded = stranded_baskets()
         if stranded:
-            reason = (f"basket left half-built on {', '.join(stranded)} (an earlier run stopped between "
-                      f"legs). Check open positions on Kalshi.")
+            reason = (f"basket left half-built on {', '.join(event for _, event, _ in stranded)} (an earlier "
+                      f"run stopped between legs). Check open positions on Kalshi.")
             config.trip(reason)
+            for sid, _, status in stranded:   # only after the stop is written
+                _mark(sid, status)
             summary["notes"].append(f"STOPPED: {reason}")
             return
     try:
@@ -679,9 +690,13 @@ def _trade(client, cfg, summary):
             try:
                 spent = execute(client, sig, sid)
             except (LegFailed, OrderUnknown, Halted) as e:
-                # 'stranded' is already reported (the trip); 'failed' gets checked next run.
-                kind = "stranded" if isinstance(e, LegFailed) else "failed"
-                db.execute("UPDATE signals SET status = ? WHERE id = ?", f"{kind}: {e}", sid)
+                if isinstance(e, LegFailed):
+                    # Stop first, then mark 'stranded' (reported once). A process killed in
+                    # between leaves it unmarked, so the next run finds it and stops again.
+                    config.trip(f"basket left half-built: {e}. Check open positions on Kalshi.")
+                    _mark(sid, f"stranded: {e}")
+                    raise Halted(str(e)) from e
+                db.execute("UPDATE signals SET status = ? WHERE id = ?", f"failed: {e}", sid)   # checked next run
                 raise
             limits.spend(sig, spent)
             db.execute("UPDATE signals SET status = ? WHERE id = ?",
