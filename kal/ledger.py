@@ -77,10 +77,16 @@ def made_up(until=None):
     count net. Counting only each one's losses booked every past basket as a loss (one leg
     loses, the others win): after a lost disk the bot stopped, its capital "used up", while
     the account was up (cross-PR money-path audit)."""
+    return min(*_held(until))
+
+
+def _held(until=None):
+    """(gains held back, losses) of the bot's own put-back orders on markets settled before
+    `until` (None: all)."""
     where, args = (" WHERE ts < ?", [until]) if until is not None else ("", [])
     h = db.query("SELECT COALESCE(SUM(gain), 0) AS g, COALESCE(SUM(loss), 0) AS l FROM held_gains" + where,
                  *args)[0]
-    return min(h["g"], h["l"])
+    return h["g"], h["l"]
 
 
 def settle(client):
@@ -102,14 +108,18 @@ def settle(client):
         if _write_off_sold_outside(client, ticker, legs, markets.get(ticker, {}).get("open_time")):
             legs = [r for r in open_positions() if r["ticker"] == ticker]
         revenue = sum(r["count"] * (paid if r["side"] == "yes" else 1 - paid) for r in legs)
-        held = min(revenue, _restored_gain(ticker, paid))   # restored orders' gains never count here
+        restored = _restored_gain(ticker, paid)
+        held = min(revenue, restored)   # restored orders' gains never count here
         cost = sum(r["cost"] for r in legs)
         result = "yes" if paid == 1 else "no" if paid == 0 else f"{paid:.4f}"
-        db.insert("settlements", ticker=ticker, settled_ts=time.time(), result=result,
-                  revenue=revenue - held, cost=cost, pnl=revenue - held - cost)
         gain, loss = _own_restored(ticker, paid)
-        if gain or loss:   # after the settlement: a stop in between only counts less (made_up)
-            db.insert("held_gains", ticker=ticker, gain=min(gain, held), loss=loss)
+        with db.connect() as c:   # the settlement and what it held back, or neither
+            now = time.time()
+            c.execute("INSERT OR IGNORE INTO settlements (ticker, settled_ts, result, revenue, cost, pnl) "
+                      "VALUES (?, ?, ?, ?, ?, ?)", (ticker, now, result, revenue - held, cost, revenue - held - cost))
+            if gain or loss:
+                c.execute("INSERT OR IGNORE INTO held_gains (ticker, ts, gain, loss) VALUES (?, ?, ?, ?)",
+                          (ticker, now, _own_share(gain, held, restored), loss))
         n += 1
     return n
 
@@ -173,18 +183,27 @@ def _restored_gain(ticker, paid, side=None):
     return gain
 
 
-def _own_restored(ticker, paid):
+def _own_restored(ticker, paid, side=None):
     """(gain, loss) of the bot's own orders recover() put back on new books ('restored' with a
-    marked id) on a market, at a YES value of `paid`. catch_up()'s restored orders may be the
-    owner's trades: their gains never make up anything."""
+    marked id) on a market, at a YES value of `paid`, or on one side of it."""
     gain = loss = 0.0
     for r in db.query("SELECT side, filled, price FROM orders WHERE ticker = ? AND strategy = 'restored' "
                       "AND filled > 0 AND client_order_id LIKE ?", ticker, BOT_MARK + "%"):
+        if side and r["side"] != side:
+            continue
         net = r["filled"] * (paid if r["side"] == "yes" else 1 - paid) - r["filled"] * r["price"] \
             - fee(r["filled"], r["price"])
         gain += max(0.0, net)
         loss += max(0.0, -net)
     return gain, loss
+
+
+def _own_share(gain, held, restored):
+    """The part of `held` (restored orders' gains a market held back, of `restored` in all)
+    that the bot's own put-back orders may make up their losses with: what's left once
+    catch_up()'s rows have theirs. Those may be the owner's trades, so their gains never
+    make up anything, even when the bot's contracts there were sold outside."""
+    return min(gain, max(0.0, held - (restored - gain)))
 
 
 def payout_of(result, side):
@@ -291,14 +310,24 @@ def equity(client, cfg):
     if not rows:
         return capital(cfg)
     markets = client.markets_by_ticker({r["ticker"] for r in rows})
-    value = 0.0
+    value = own_gain = own_loss = 0.0
     for r in rows:
         bid = price(markets.get(r["ticker"], {}), f"{r['side']}_bid")
         if bid > 0:
             yes = bid if r["side"] == "yes" else 1 - bid
-            value += max(0.0, r["count"] * bid - _restored_gain(r["ticker"], yes, r["side"]))
+            worth, restored = r["count"] * bid, _restored_gain(r["ticker"], yes, r["side"])
+            held = min(worth, restored)
+            value += worth - held
+            gain, loss = _own_restored(r["ticker"], yes, r["side"])   # as settle() would book them
+            own_gain += _own_share(gain, held, restored)
+            own_loss += loss
         else:
             value += r["cost"]
+    if own_gain or own_loss:
+        # made_up() with the open ones too: else a put-back win settling another day would make
+        # up an older loss that day, and hide a real loss from the daily stop (review of this).
+        g, l = _held()
+        value += min(g + own_gain, l + own_loss) - min(g, l)
     return capital(cfg) - open_cost() + value
 
 
