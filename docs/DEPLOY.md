@@ -434,8 +434,9 @@ Each morning (about 09:30 UTC) it fetches `main` and then, to stay safe:
   its tests" (once per bad version).
 - After the restart it **checks the bot is really alive**: running, not restarting by
   itself, and no check failing that passed before. If not, it puts the old code and
-  packages back and sends "kal update rolled back". A bot already crash-looping gets the
-  same check.
+  packages back and sends "kal update rolled back". If the bot was already crash-looping
+  before the update, it still rolls back, but tries that version again the next day. If
+  you stop the bot during the check, it keeps the new code and says it wasn't checked.
 
 See what it did: `sudo journalctl -u kal-update`. Turn it off:
 `sudo systemctl disable --now kal-update.timer`

@@ -76,6 +76,9 @@ class UpdateSandbox(unittest.TestCase):
         self.nrest = os.path.join(self.d, "nrest")
         self.loop = os.path.join(self.d, "LOOP")
         self.waiting = os.path.join(self.d, "WAITING")   # crashed, waiting to restart ("activating")
+        self.stopping = os.path.join(self.d, "STOPPING")   # a stop or restart in progress
+        self.stop_after = os.path.join(self.d, "STOP_AFTER")   # a person stops it right after the restart
+        self.inv = os.path.join(self.d, "inv")
         _write(self.nrest, "0\n")
         self._stubs()
         self._repo()
@@ -95,23 +98,41 @@ class UpdateSandbox(unittest.TestCase):
     def _stubs(self):
         _write(os.path.join(self.bin, "systemctl"), f"""#!/bin/sh
 echo "$*" >> {self.sysctl_log}
+crashing() {{ [ -e {self.waiting} ] || {{ [ -e {self.loop} ] && [ -e {self.data}/.restarted ]; }}; }}
+st() {{
+  if crashing; then echo activating
+  elif [ -e {self.stopping} ]; then echo deactivating
+  elif [ -e {self.active} ]; then echo active
+  else echo inactive; fi
+}}
 if [ "$1" = is-active ]; then
-  if [ -e {self.waiting} ]; then st=activating; elif [ -e {self.active} ]; then st=active; else st=inactive; fi
-  [ "$2" = --quiet ] || echo "$st"
-  [ "$st" = active ] && exit 0 || exit 3
+  s=$(st); [ "$2" = --quiet ] || echo "$s"
+  [ "$s" = active ] && exit 0 || exit 3
 fi
 if [ "$1 $2 $3" = "show kal -p" ]; then
-  n=$(cat {self.nrest} 2>/dev/null || echo 0)
-  # A new version that crash-loops: each look finds one more automatic restart.
-  if [ -e {self.loop} ] && [ -e {self.data}/.restarted ]; then n=$((n+1)); echo $n > {self.nrest}; fi
-  echo $n; exit 0
+  case "$4" in
+    NRestarts)
+      n=$(cat {self.nrest} 2>/dev/null || echo 0)
+      # A new version that crash-loops: each look finds one more automatic restart.
+      if [ -e {self.loop} ] && [ -e {self.data}/.restarted ]; then n=$((n+1)); echo $n > {self.nrest}; fi
+      echo $n ;;
+    InvocationID) cat {self.inv} 2>/dev/null || echo 1 ;;
+    SubState) if crashing; then echo auto-restart; elif [ -e {self.active} ]; then echo running; else echo dead; fi ;;
+  esac
+  exit 0
 fi
 if [ "$1" = try-restart ]; then
-  # Like systemd 255: a restart of a running bot counts automatic restarts from 0 again;
-  # one that lands while it waits to restart after a crash keeps the count.
-  if [ -e {self.waiting} ]; then rm -f {self.waiting}; touch {self.active}
-  elif [ -e {self.active} ]; then echo 0 > {self.nrest}; fi
+  # Like systemd 255: a restart of a running (or stopping) bot counts automatic restarts
+  # from 0 again; one that lands while it waits to restart after a crash keeps the count;
+  # a stopped bot isn't started. Every start is a new InvocationID.
+  case "$(st)" in
+    activating) rm -f {self.waiting}; touch {self.active} ;;
+    active|deactivating) rm -f {self.stopping}; touch {self.active}; echo 0 > {self.nrest} ;;
+    *) exit 0 ;;
+  esac
+  i=$(cat {self.inv} 2>/dev/null || echo 1); echo $((i+1)) > {self.inv}
   touch {self.data}/.restarted
+  [ -e {self.stop_after} ] && rm -f {self.active}
   exit 0
 fi
 exit 0
@@ -464,6 +485,8 @@ exit 0
         self.assertEqual(r.returncode, 1)
         self.assertEqual(self._head(), before)
         self.assertIn("rolled back", _read(self.curl_log))
+        self.assertIn("crashed", _read(self.curl_log))
+        self.assertTrue(os.path.exists(os.path.join(self.data, "update_failed")))   # to blame
 
     def test_a_crash_after_earlier_crashes_still_rolls_back(self):
         # Two crashes since the last manual start, then the new version crashes once: the
@@ -491,7 +514,8 @@ exit 0
 
     def test_a_crash_looping_bot_still_gets_the_check(self):
         # It reads "activating" while it waits to restart: before, the new code went live
-        # unchecked ("left it stopped").
+        # unchecked ("left it stopped"). It crashed before the update too (a port taken, say),
+        # so the rollback doesn't blame the new version: it is tried again tomorrow.
         open(self.waiting, "w").close()
         open(self.loop, "w").close()
         before = self._head()
@@ -499,7 +523,8 @@ exit 0
         r = self._run()
         self.assertEqual(r.returncode, 1)
         self.assertEqual(self._head(), before)
-        self.assertIn("rolled back", _read(self.curl_log))
+        self.assertIn("as it did before the update", _read(self.curl_log))
+        self.assertFalse(os.path.exists(os.path.join(self.data, "update_failed")))
 
     def test_a_check_that_failed_before_the_update_never_rolls_it_back(self):
         # Damaged books (say) fail the check before and after: not the new version's fault.
@@ -510,19 +535,25 @@ exit 0
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("kal updated", _read(self.curl_log))
 
-    def test_a_new_version_that_doesnt_come_up_rolls_back(self):
+    def test_a_person_stopping_it_during_the_check_is_no_verdict(self):
+        # Stopped (not crashed) during the check: the new code stays, unchecked, not blamed.
         self._active()
-        before = self._head()
+        open(self.stop_after, "w").close()
         self._push_code()
-        real = os.path.join(self.bin, "systemctl")
-        os.rename(real, real + ".real")
-        _write(real, f"""#!/bin/sh
-if [ "$1" = try-restart ]; then rm -f {self.active}; fi
-exec {real}.real "$@"
-""", x=True)
         r = self._run()
-        self.assertEqual(r.returncode, 1)
-        self.assertEqual(self._head(), before)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(self._head(), self._git(self.app, "rev-parse", "origin/main"))
+        self.assertIn("wasn't checked", _read(self.curl_log))
+        self.assertFalse(os.path.exists(os.path.join(self.data, "update_failed")))
+
+    def test_a_bot_being_stopped_when_the_update_starts_still_gets_the_check(self):
+        self._active()
+        open(self.stopping, "w").close()   # "deactivating": a restart in progress
+        self._push_code()
+        r = self._run()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("try-restart kal", _read(self.sysctl_log))
+        self.assertIn("kal updated", _read(self.curl_log))
 
     def test_earlier_crashes_alone_never_roll_back(self):
         self._active()

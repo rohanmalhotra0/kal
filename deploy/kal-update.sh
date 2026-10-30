@@ -146,10 +146,14 @@ health_ok() {  # the same check the /usr/local/bin/kal wrapper uses, run as the 
   runuser -u "$KAL_USER" -- env KAL_HOME="$DATA" "$VENV/bin/python" -m kal health --alive >/dev/null 2>&1
 }
 
-# A bot waiting to restart after a crash reads "activating", not "active". It runs the new
-# code within minutes either way, so it gets the same restart and check.
-was_active=0
-case "$(systemctl is-active kal 2>/dev/null)" in active|activating|reloading) was_active=1 ;; esac
+# A bot waiting to restart after a crash reads "activating", and one being stopped or
+# restarted "deactivating". It may run the new code within minutes, so it gets the restart
+# and the check. One crash-looping already ("activating") can't prove the new version bad.
+was_active=0 looping=0 note=""
+case "$(systemctl is-active kal 2>/dev/null)" in
+  active|reloading|deactivating|activating) was_active=1 ;;
+esac
+case "$(systemctl show kal -p SubState --value 2>/dev/null)" in auto-restart*) looping=1 ;; esac
 # Read now, on the old code: a check that already fails (damaged books, say) is not the new
 # version's fault, so only a check that passes now and fails after the update rolls it back.
 ok_before=0
@@ -209,33 +213,54 @@ restart() {
   [ -e "$RESEARCH_LOCK" ] || runuser -u "$KAL_USER" -- touch "$RESEARCH_LOCK" 2>/dev/null
   flock -w "$RESEARCH_WAIT" "$RESEARCH_LOCK" systemctl try-restart kal || systemctl try-restart kal
 }
-roll_back() {
+roll_back() {  # why ; "blame": the new version is to blame (don't try it again)
   git reset --quiet --hard "$before"
   "$VENV/bin/pip" install --quiet -r requirements.txt
   [ -s "$freeze" ] && "$VENV/bin/pip" install --quiet -r "$freeze"   # exact old versions
   chmod -R a+rX "$APP"
   chmod -R go-w "$APP" "$VENV"
   [ "$was_active" = 1 ] && restart
-  echo "$after" > "$failed"   # don't try the same version again tomorrow
-  alert high "kal update rolled back" "The new version wasn't healthy. Back on ${before:0:7}."
-  say "rolled back ${after:0:7} -> ${before:0:7}"
+  if [ "${2:-}" = blame ]; then
+    echo "$after" > "$failed"   # don't try the same version again tomorrow
+  fi
+  alert high "kal update rolled back" "$1 Back on ${before:0:7}."
+  say "rolled back ${after:0:7} -> ${before:0:7}: $1"
 }
 
 if [ "$was_active" = 1 ]; then
+  inv0=$(systemctl show kal -p InvocationID --value 2>/dev/null || true)
   restart
   # NRestarts counts automatic restarts. A restart of a running bot starts it again from 0;
   # one that lands while the bot waits to restart after a crash doesn't (systemd 255). So
-  # read it once the new version is up, and look for a rise from there. (Comparing with the
-  # count from before missed a crash after earlier ones; "any above 0" rolled a good
-  # version back.) A crash also leaves it not running for a while before the count moves:
-  # after repeated crashes the next restart waits up to 5 minutes.
+  # read it once the new version is up, and look for a rise from there. A crash also leaves
+  # it waiting to restart ("activating") for a while before the count moves: after repeated
+  # crashes the next restart waits up to 5 minutes. InvocationID changes at every start.
   for _ in $(seq "$UP_WAIT"); do systemctl is-active --quiet kal && break; sleep 1; done
+  inv1=$(systemctl show kal -p InvocationID --value 2>/dev/null || true)
   nbase=$(systemctl show kal -p NRestarts --value 2>/dev/null || echo 0)
   [ "$WAIT" -gt 0 ] 2>/dev/null && sleep "$WAIT"
   nafter=$(systemctl show kal -p NRestarts --value 2>/dev/null || echo 0)
-  if ! systemctl is-active --quiet kal || { [ "$nafter" -gt "$nbase" ] 2>/dev/null; } \
-     || { [ "$ok_before" = 1 ] && ! health_ok; }; then
-    roll_back
+  state=$(systemctl is-active kal 2>/dev/null || true)
+  crashed=0
+  case "$(systemctl show kal -p SubState --value 2>/dev/null)" in auto-restart*) crashed=1 ;; esac
+  [ "$nafter" -gt "$nbase" ] 2>/dev/null && crashed=1
+  if [ -n "$inv0" ] && [ "$inv1" = "$inv0" ]; then
+    # It never restarted (someone stopped it meanwhile): the new code runs when it starts.
+    note="It was stopped during the update, so the new code wasn't checked."
+    say "the bot didn't restart ($state); updated the code, unchecked"
+  elif [ "$crashed" = 1 ]; then
+    if [ "$looping" = 1 ]; then   # it crashed before the update too: not proof against it
+      roll_back "The bot keeps crashing, as it did before the update. Look: sudo kal logs."
+    else
+      roll_back "The new version crashed." blame
+    fi
+    exit 1
+  elif [ "$state" != active ]; then
+    # Stopped or restarted by a person during the check: no verdict either way.
+    note="It was stopped during the check, so the new code wasn't checked."
+    say "the bot was stopped during the check ($state); kept the new code, unchecked"
+  elif [ "$ok_before" = 1 ] && ! health_ok; then
+    roll_back "The new version wasn't healthy." blame
     exit 1
   fi
 else
@@ -244,4 +269,4 @@ fi
 
 rm -f "$failed"
 say "updated ${before:0:7} -> ${after:0:7}"
-alert low "kal updated" "Now running $(git log -1 --format='%h %s')."
+alert low "kal updated" "Now on $(git log -1 --format='%h %s'). $note"
