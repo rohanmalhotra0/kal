@@ -214,11 +214,14 @@ roll_back() {
 }
 
 if [ "$was_active" = 1 ]; then
-  nbefore=$(systemctl show kal -p NRestarts --value 2>/dev/null || echo 0)
   restart
   [ "$WAIT" -gt 0 ] 2>/dev/null && sleep "$WAIT"
+  # NRestarts counts automatic restarts since the last manual start, and our try-restart is
+  # one (systemd 254+, which kal.service needs): it starts again from 0. So any restart now
+  # is the new version crashing. (Comparing with the count before missed it: two earlier
+  # crashes and one new one read as "fewer".)
   nafter=$(systemctl show kal -p NRestarts --value 2>/dev/null || echo 0)
-  if ! health_ok || { [ "$nafter" -gt "$nbefore" ] 2>/dev/null; }; then
+  if ! health_ok || { [ "$nafter" -gt 0 ] 2>/dev/null; }; then
     roll_back
     exit 1
   fi

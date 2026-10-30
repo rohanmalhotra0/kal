@@ -96,7 +96,8 @@ echo "$*" >> {self.sysctl_log}
 if [ "$1" = is-active ]; then [ -e {self.active} ] && exit 0 || exit 1; fi
 if [ "$1 $2 $3" = "show kal -p" ]; then cat {self.nrest} 2>/dev/null || echo 0; exit 0; fi
 if [ "$1" = try-restart ]; then
-  if [ -e {self.loop} ]; then n=$(cat {self.nrest} 2>/dev/null || echo 0); echo $((n+1)) > {self.nrest}; fi
+  # Like systemd: a manual (re)start counts automatic restarts from 0 again.
+  if [ -e {self.loop} ]; then echo 1 > {self.nrest}; else echo 0 > {self.nrest}; fi
   exit 0
 fi
 exit 0
@@ -448,6 +449,27 @@ exit 0
         self.assertEqual(r.returncode, 1)
         self.assertEqual(self._head(), before)
         self.assertIn("rolled back", _read(self.curl_log))
+
+    def test_a_crash_after_earlier_crashes_still_rolls_back(self):
+        # Two crashes since the last manual start, then the new version crashes once: the
+        # count reads 1 after the update's own restart, fewer than the 2 before it.
+        self._active()
+        _write(self.nrest, "2\n")
+        open(self.loop, "w").close()
+        before = self._head()
+        self._push_code()
+        r = self._run()
+        self.assertEqual(r.returncode, 1)
+        self.assertEqual(self._head(), before)
+        self.assertIn("rolled back", _read(self.curl_log))
+
+    def test_earlier_crashes_alone_never_roll_back(self):
+        self._active()
+        _write(self.nrest, "2\n")
+        self._push_code()
+        r = self._run()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("kal updated", _read(self.curl_log))
 
     def test_a_long_research_run_delays_the_restart_but_never_skips_it(self):
         import fcntl
