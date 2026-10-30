@@ -44,6 +44,8 @@ def send(title, message, priority="default", tags=()):
             "Priority": priority,
             "Tags": ",".join(tags),
         })
+        if r.status_code >= 300:
+            log.warning("alert not sent: HTTP %s", r.status_code)
         return r.status_code < 300
     except Exception as e:
         # Only the kind of error: its text quotes the URL, and the URL holds the secret topic.

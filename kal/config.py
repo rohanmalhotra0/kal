@@ -201,9 +201,53 @@ def trip(reason):
         _write(data)
     try:
         from . import notify
-        notify.send("kal stopped itself", f"{reason}\n\n{STOPPED_HELP}", priority="high", tags=("no_entry",))
+        if notify.enabled() and not notify.send("kal stopped itself", f"{reason}\n\n{STOPPED_HELP}",
+                                                priority="high", tags=("no_entry",)):
+            _keep_unsent(reason)
     except Exception:
         pass  # an alert must never block a trip
+
+
+UNSENT_STOP = "unsent_stop.txt"
+
+
+def _keep_unsent(reason):
+    """A stop alert that didn't get through (ntfy down, no network). resend_stop() tries it
+    again: it is the one alert that says the bot stopped trading."""
+    try:
+        with open(os.path.join(home(), UNSENT_STOP), "w") as f:
+            f.write(str(reason))
+    except OSError:
+        pass
+
+
+def resend_stop():
+    """Send the stop alert again if it didn't get through, while the bot is still stopped.
+    The health job calls this every 10 minutes. True if it went now. Never raises."""
+    p = os.path.join(home(), UNSENT_STOP)
+    try:
+        with open(p) as f:
+            reason = f.read()
+    except OSError:
+        return False
+    try:
+        stopped = bool(_raw().get("disabled_reason"))
+    except Exception:
+        stopped = True   # can't tell: a repeat is better than silence
+    sent = False
+    if stopped:
+        try:
+            from . import notify
+            sent = notify.send("kal stopped itself", f"{reason}\n\n{STOPPED_HELP}",
+                               priority="high", tags=("no_entry",))
+        except Exception:
+            sent = False
+    if sent or not stopped:
+        try:
+            os.remove(p)
+        except OSError:
+            pass
+    return sent
 
 
 def turn_off():

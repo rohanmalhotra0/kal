@@ -131,6 +131,10 @@ tests/            unittest; tests/fakes.py has FakeKalshi, tests/helpers.py has 
   Fewer, on a market still trading (someone sold them outside the bot) -> those are
   written off as lost, so the books never earn on contracts they don't hold.
 - Account lists (positions, orders, fills) missing their key -> error, not "empty".
+- Damaged books (`kal.db` fails SQLite's check, or a run can't read its error count) ->
+  trip. The health check (every 10 minutes) and the watchdog both look, since a run
+  can't buy on them and the heartbeat stays fresh. Alerts still go with the books
+  unreadable, and a stop alert that didn't get through is sent again until it does.
 - After `kal restore`, the next live run adds the buys Kalshi shows since the backup's
   day before it trades (`ledger.catch_up`). It puts back the bot's own marked orders
   first (`ledger.recover`), so a sale outside the bot is never read as the bot's buy of

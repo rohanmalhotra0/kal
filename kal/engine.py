@@ -444,8 +444,15 @@ def _alert_once(key, title, message, every=86400):
 
 
 def _count_error(cfg, e):
-    errors = (db.get("consecutive_errors", 0) or 0) + 1
-    db.put("consecutive_errors", errors)
+    try:
+        errors = (db.get("consecutive_errors", 0) or 0) + 1
+        db.put("consecutive_errors", errors)
+    except Exception as books:
+        # The books can't be read or written, so no order can be recorded (none is sent),
+        # and every run fails the same way. Stop and say so: else it fails quietly forever.
+        config.trip(f"the books ({os.path.basename(db.path())}) can't be used: {books}. "
+                    f"Last error: {e}. See: {config.command('health')}")
+        return
     if errors >= cfg.get("max_consecutive_errors", 3):
         config.trip(f"{errors} failed runs in a row. Last error: {e}")
 
