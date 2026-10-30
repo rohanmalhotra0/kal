@@ -208,5 +208,106 @@ class LongOutageTests(TempHome):
         self.assertAlmostEqual(ledger.open_cost(), 0)
 
 
+class ReviewFollowUpTests(TempHome):
+    """From the independent review: the open time never filters, "never placed" always looks
+    in the store first, the cutoff is read after the live list, and store errors stop a run."""
+
+    def setUp(self):
+        super().setUp()
+        config.update({"enabled": True, "budget": 300, "strategies": _all_off()})
+        self.now = time.time()
+        self.c = FakeKalshi(balance=1000)
+        self.c.cutoffs = _cut(self.now)
+        self.c.honor_min_ts = True
+
+    def lost(self, ago, ticker="OLD-1", coid="lost-1"):
+        db.insert("orders", strategy="favorites", ticker=ticker, side="yes", count=5, price=0.5,
+                  filled=0, status="unknown", client_order_id=coid, ts=self.now - ago)
+
+    def test_a_live_sale_dated_before_the_open_time_still_counts(self):
+        # A market's open_time is only a hint for the store. If a fill ever predates it (a
+        # wrong or moved open_time), the owner's sale must still be seen.
+        db.insert("orders", ticker="S-3", side="no", count=20, price=0.9, filled=20,
+                  status="executed", order_id="o1", client_order_id="c1")
+        cost = 18 + client.fee(20, 0.9)
+        self.c.fill_list = [{"trade_id": "t1", "order_id": "owner-1", "ticker": "S-3", "side": "no",
+                             "action": "sell", "count_fp": "20.00", "no_price_dollars": "0.9000",
+                             "created_time": _iso(self.now - 7 * DAY)}]
+        self.c.position_list = []
+        self.c.market_info["S-3"] = {"ticker": "S-3", "status": "finalized", "result": "no",
+                                     "settlement_value_dollars": "0.0000", "open_time": _iso(self.now - 5 * DAY)}
+        engine.run_once(self.c)
+        self.assertAlmostEqual(ledger.realized(), -cost)
+
+    def test_never_placed_only_after_the_store_says_so_too(self):
+        # The cutoff says a 20-minute-old order is still live, but it isn't there. Before
+        # calling it never placed (for good), the store is read anyway: here it is.
+        self.lost(20 * 60)
+        self.c.archived_orders = [{"client_order_id": "lost-1", "order_id": "o9", "status": "executed",
+                                   "fill_count_fp": "5.00", "ticker": "OLD-1"}]
+        self.c.position_list = [{"ticker": "OLD-1", "position": 5, "exposure": 2.5}]
+        self.c.market_info["OLD-1"] = {"ticker": "OLD-1", "status": "active", "yes_bid_dollars": "0.5000"}
+        engine.run_once(self.c)
+        row = db.query("SELECT status, filled FROM orders")[0]
+        self.assertEqual((row["status"], row["filled"]), ("reconciled:executed", 5))
+
+    def test_a_young_order_is_never_looked_for_in_the_store(self):
+        self.lost(30)   # inside the grace: it may just not be visible yet
+        s = engine.run_once(self.c)
+        self.assertTrue(s.get("waiting"), s)
+        self.assertEqual(self.c.archive_reads, 0)
+
+    def test_the_cutoff_is_read_after_the_live_list(self):
+        seen = []
+        c = FakeKalshi()
+        live, cut = c.fills, c.cutoff
+        c.fills = lambda min_ts=None, ticker=None, archive=False: seen.append("store" if archive else "live") or []
+        c.cutoff = lambda: seen.append("cutoff") or _cut(self.now)
+        every_fill(c, min_ts=self.now - 90 * DAY)
+        self.assertEqual(seen, ["live", "cutoff", "store"])
+
+    def test_a_store_outage_waits_and_changes_nothing(self):
+        self.lost(20 * DAY)
+        self.c.archive_error = KalshiError("GET /historical/orders -> 503: down", 503)
+        s = engine.run_once(self.c)
+        self.assertTrue(s.get("transient"), s)
+        self.assertEqual(db.query("SELECT status FROM orders")[0]["status"], "unknown")
+        self.assertEqual(db.get("consecutive_errors", 0), 0)
+
+    def test_a_store_error_or_odd_reply_is_an_error_not_a_guess(self):
+        for err in (KalshiError("GET /historical/orders -> 400: bad limit", 400),
+                    KalshiError("/historical/orders: reply has no 'orders' (got: data)")):
+            self.lost(20 * DAY, coid=f"lost-{err.status}")
+            self.c.archive_error = err
+            s = engine.run_once(self.c)
+            self.assertFalse(s["ok"], s)
+            self.assertFalse(s.get("transient"), s)
+            self.assertNotIn("never_placed", {r["status"] for r in db.query("SELECT status FROM orders")})
+            db.execute("DELETE FROM orders")
+        self.assertEqual(db.get("consecutive_errors", 0), 2)
+
+    def test_a_store_outage_holds_an_old_settlement(self):
+        db.insert("orders", ticker="S-4", side="no", count=10, price=0.9, filled=10,
+                  status="executed", order_id="o4", client_order_id="c4")
+        self.c.market_info["S-4"] = {"ticker": "S-4", "status": "finalized", "result": "no",
+                                     "settlement_value_dollars": "0.0000", "open_time": _iso(self.now - 90 * DAY)}
+        self.c.position_list = []
+        self.c.archive_error = KalshiError("GET /historical/fills -> 502", 502)
+        s = engine.run_once(self.c)
+        self.assertTrue(s.get("transient"), s)
+        self.assertEqual(db.query("SELECT COUNT(*) AS n FROM settlements")[0]["n"], 0)   # booked next time
+
+    def test_setup_checks_the_key_can_read_the_store(self):
+        from kal import selftest
+        from tests.test_ops import GoodFake, rows_by_check
+        good = GoodFake()
+        self.assertTrue(rows_by_check(selftest.run(good))["history store"]["ok"])
+        bad = GoodFake()
+        bad.archive_error = KalshiError("GET /historical/fills -> 403: forbidden", 403)
+        row = rows_by_check(selftest.run(bad))["history store"]
+        self.assertFalse(row["ok"])
+        self.assertIn("403", row["detail"])
+
+
 if __name__ == "__main__":
     unittest.main()

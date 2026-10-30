@@ -101,7 +101,8 @@ def _write_off_sold_outside(client, ticker, legs, opened=None):
     sees that in Kalshi's positions only while the market trades, so a sale while the bot
     was stopped, or just before the close, would be booked as paid. Fills only ever lower
     the books. Every fill since the market opened (`opened`, its open_time; None: all of
-    them) counts, from Kalshi's historical store too. Returns True if it wrote anything off."""
+    them) counts, from Kalshi's historical store too: the open time only decides whether the
+    store is read. Returns True if it wrote anything off."""
     try:
         since = ts(opened) - 3600 if opened else None   # no fills before a market opens
     except (AttributeError, TypeError, ValueError):
@@ -110,7 +111,7 @@ def _write_off_sold_outside(client, ticker, legs, opened=None):
                                             "AND order_id != ''", ticker)}
     toward_yes = 0.0   # how much everyone else's fills moved the account's position to YES
     try:
-        for f in every_fill(client, min_ts=since, ticker=ticker):
+        for f in every_fill(client, ticker=ticker, earliest=since):
             oid, t, side, action, n, _, _ = _parse_fill(f)
             if t == ticker and oid not in mine:
                 toward_yes += n if (side == "yes") == (action == "buy") else -n

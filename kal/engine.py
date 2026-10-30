@@ -218,8 +218,12 @@ def reconcile(client):
     rows = ledger.unresolved_orders()
     fixed = 0
     for r in rows:
-        found = [o for o in every_order(client, ticker=r["ticker"], min_ts=r["ts"] - 60)
-                 if o.get("client_order_id") == r["client_order_id"]]
+        def lookup(store=None):
+            return [o for o in every_order(client, ticker=r["ticker"], min_ts=r["ts"] - 60, store=store)
+                    if o.get("client_order_id") == r["client_order_id"]]
+        found = lookup()
+        if not found and time.time() - r["ts"] > RECONCILE_GRACE:
+            found = lookup(store=True)   # "never placed" can't be taken back: read the store whatever its cutoff says
         if found:
             o = found[0]
             if resting(o):

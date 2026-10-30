@@ -5,6 +5,7 @@ Kalshi moved to fixed-point fields in 2026 (`*_dollars` price strings,
 integer fields, so a schema change can't silently zero out a price.
 """
 import base64
+import logging
 import math
 import os
 import threading
@@ -19,6 +20,8 @@ from cryptography.hazmat.primitives.asymmetric import padding
 API = "/trade-api/v2"
 BASES = {"prod": "https://api.elections.kalshi.com", "demo": "https://demo-api.kalshi.co"}
 FEE_RATE = 0.07  # taker fee: ceil(0.07 * C * P * (1-P)) to the cent
+
+log = logging.getLogger(__name__)
 
 
 class KalshiError(RuntimeError):
@@ -237,7 +240,7 @@ class Kalshi:
             try:
                 out[k] = ts(v)
             except (AttributeError, TypeError, ValueError):
-                pass
+                log.warning("historical cutoff: can't read %s=%r, so the store gets read every time", k, v)
         return out
 
     def events(self, limit=None, **params):
@@ -397,22 +400,25 @@ def _order_ids(o):
     return out or [("raw", repr(sorted(o.items())))]
 
 
-def every_fill(client, min_ts=None, ticker=None):
+def every_fill(client, min_ts=None, ticker=None, earliest=None, store=None):
     """The account's fills from min_ts on (None: all of them), each once: the live list,
     plus Kalshi's historical store when some may have moved there (fills older than about 2
-    months, Oct 2026). Reading only the live list would miss those."""
+    months, Oct 2026). Reading only the live list would miss those. `earliest`: no fill
+    asked for is older than this (say, the market's open time); it only decides whether
+    the store is read, never filters. store=True reads the store whatever the cutoff says."""
     live = list(client.fills(min_ts=min_ts, ticker=ticker))
-    if not _archived_since(client, "trades_created_ts", min_ts):
+    if not store and not _archived_since(client, "trades_created_ts", earliest or min_ts):
         return live
     return _merged(live, list(client.fills(min_ts=min_ts, ticker=ticker, archive=True)), _fill_ids)
 
 
-def every_order(client, ticker=None, min_ts=None):
+def every_order(client, ticker=None, min_ts=None, store=None):
     """The account's orders from min_ts on (None: all of them), each once: the live list,
     plus Kalshi's historical store when some may have moved there (orders done more than
-    about 15 days ago, Oct 2026). Resting orders always stay in the live list."""
+    about 15 days ago, Oct 2026). Resting orders always stay in the live list. store=True
+    reads the store whatever the cutoff says."""
     live = list(client.orders(ticker=ticker, min_ts=min_ts))
-    if not _archived_since(client, "orders_updated_ts", min_ts):
+    if not store and not _archived_since(client, "orders_updated_ts", min_ts):
         return live
     return _merged(live, list(client.orders(ticker=ticker, min_ts=min_ts, archive=True)), _order_ids)
 

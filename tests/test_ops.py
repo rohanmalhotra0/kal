@@ -631,7 +631,7 @@ class SelftestTests(TempHome):
         self.assertEqual(bad, [])
         self.assertEqual({r["check"] for r in rows},
                          {"markets", "market fields", "events", "order book", "candlesticks", "series",
-                          "clock", "balance", "positions"})
+                          "clock", "balance", "positions", "history store"})
         for r in rows:
             self.assertEqual(set(r), {"check", "ok", "detail"})
         self.assertIn("skipped", rows_by_check(rows)["clock"]["detail"])   # a fake has no clock to ask
@@ -828,6 +828,8 @@ class OrderProbeTests(TempHome):
             "/portfolio/balance": {"balance_dollars": "12.3400"},
             "/portfolio/positions": {"market_positions": [{"ticker": "KXA-1", "position_fp": "3.00",
                                                            "market_exposure_dollars": "1.4000"}]},
+            "/historical/fills": {"fills": [], "cursor": ""},
+            "/historical/orders": {"orders": [], "cursor": ""},
         }
         posts = []
 
