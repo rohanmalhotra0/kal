@@ -113,8 +113,9 @@ class RunCache:
     All open events with their markets is 350 MB of JSON (2026-10-29), over 700 MB in
     Python, and research runs alongside within the same cap (deploy/kal.service). So the run
     keeps only the events a strategy can act on (scope()), read a page at a time, and slimmed
-    (_lean): on 2026-10-30, 11,433 of 16,345 events, 209 MB in Python. A run peaks near
-    320 MB and gives it back when it ends (scheduler.give_back_memory)."""
+    (_lean): on 2026-10-30, 11,433 of 16,345 events, about 170 MB in Python (209 MB before
+    _lean made each market a compact copy). A run peaks near 320 MB and gives it back when
+    it ends (scheduler.give_back_memory)."""
 
     CACHED = ("events", "markets", "series")
 

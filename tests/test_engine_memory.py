@@ -4,9 +4,11 @@
 reads them a page at a time, and slims each market, without changing what a strategy sees
 in the events it keeps. python -m unittest tests.test_engine_memory
 """
+import copy
 import glob
 import json
 import os
+import platform
 import re
 import sys
 import time
@@ -48,7 +50,7 @@ class Pages(FakeKalshi):
         self.event_list = [ev for p in pages for ev in p]
 
     def event_pages(self, **params):
-        yield from self.page_list
+        yield from copy.deepcopy(self.page_list)
 
 
 class ScopeTests(TempHome):
@@ -362,7 +364,8 @@ class SameTradesTests(TempHome):
 
 class GiveBackTests(TempHome):
     """A trade run frees its events at the end, but glibc keeps the pages: after each job the
-    scheduler hands them back (give_back_memory), so research has room under the cap."""
+    scheduler hands them back (give_back_memory), so research has more headroom under the
+    cap on a server with no swap."""
 
     def sched(self, **jobs):
         return scheduler.Scheduler(jobs=jobs, clock=lambda: 1_000_000.0, threaded=False)
@@ -380,11 +383,19 @@ class GiveBackTests(TempHome):
 
     def test_no_libc_never_stops_a_job(self):
         s = self.sched(trade=lambda: {"ok": True})
-        with mock.patch.object(scheduler.ctypes, "CDLL", side_effect=OSError("no libc here")):
+        with mock.patch("ctypes.CDLL", side_effect=OSError("no libc here")):
             self.assertFalse(scheduler.give_back_memory())
             self.assertEqual(s.tick(), ["trade"])
         self.assertTrue(s.state()["trade"]["ok"])
 
-    def test_the_real_call_is_safe_here(self):
-        # No mocks: on the server (glibc) it trims; anywhere else it does nothing.
-        self.assertIn(scheduler.give_back_memory(), (True, False))
+    def test_it_really_gives_memory_back_on_glibc(self):
+        # No mocks. A renamed symbol or a broken call would quietly return False, and the bot
+        # would sit at a run's peak again with every test green. Free 40 MB of heap held
+        # below newer blocks (so glibc can't trim it by itself), then it must go back.
+        if platform.libc_ver()[0] != "glibc":
+            self.skipTest("malloc_trim is glibc's")
+        junk = [bytes(2048) for _ in range(20000)]
+        keep = [bytes(600) for _ in range(2000)]
+        del junk
+        self.assertTrue(scheduler.give_back_memory())
+        self.assertEqual(len(keep), 2000)

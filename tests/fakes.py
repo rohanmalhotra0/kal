@@ -1,4 +1,6 @@
 """An in-memory stand-in for kal.client.Kalshi. Tests set its fields directly."""
+import copy
+
 from kal.client import ts as _ts
 
 
@@ -49,7 +51,8 @@ class FakeKalshi:
         self.fill = lambda ticker, side, count, price: count  # override to simulate partial fills
 
     def events(self, **params):
-        return self.event_list
+        # A copy, as the real API sends: the run slims what it gets (engine._lean).
+        return copy.deepcopy(self.event_list)
 
     def markets(self, limit=None, **params):
         return self.market_list

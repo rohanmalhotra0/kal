@@ -15,7 +15,6 @@ and if it grows too big, the kernel stops it, not trading. After every job, what
 freed goes back to the system too (give_back_memory).
 At most one copy of each job runs at a time.
 """
-import ctypes
 import importlib
 import json
 import logging
@@ -49,13 +48,14 @@ STOP_WAIT = 300               # how long stop() waits for a trade run to finish
 
 def give_back_memory():
     """Hand the memory a job freed back to the system. A trade run holds every open event a
-    strategy can act on (11,433 events, 209 MB in Python on 2026-10-30) and frees it at the
-    end, but glibc keeps the pages for reuse, spread over its arenas: the process sat near
-    560 MB between runs, which research, in its own process, then lacked under the cap
-    (deploy/kal.service). Given back, it sits near 185 MB, and the next run peaks lower too
-    (about 320 MB, with engine._lean). True if any went back. Not glibc (macOS, musl):
-    nothing to do. Never raises."""
+    strategy can act on (11,433 events, about 170 MB in Python on 2026-10-30) and frees it at
+    the end, but glibc keeps the pages for reuse, spread over its arenas: the process sat near
+    560 MB between runs, leaving research, in its own process, that much less headroom under
+    the cap (deploy/kal.service) on a server with no swap. Given back, it sits near 185 MB,
+    and the next run peaks lower too (about 320 MB). True if any went back. Not glibc
+    (macOS, musl) or no ctypes: nothing to do. Never raises."""
     try:
+        import ctypes
         trim = ctypes.CDLL(None).malloc_trim
         trim.argtypes, trim.restype = [ctypes.c_size_t], ctypes.c_int
         return bool(trim(0))
