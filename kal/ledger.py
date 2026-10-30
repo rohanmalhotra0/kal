@@ -378,15 +378,47 @@ def unresolved_orders():
     return db.query("SELECT * FROM orders WHERE status IN ('sending', 'unknown')")
 
 
+def open_by_ticker():
+    """Dollars in open bot positions per ticker."""
+    rows = db.query("""SELECT o.ticker, o.filled, o.price FROM orders o
+        LEFT JOIN settlements s ON s.ticker = o.ticker
+        WHERE o.filled > 0 AND s.ticker IS NULL""")
+    out = {}
+    for r in rows:
+        out[r["ticker"]] = out.get(r["ticker"], 0.0) + r["filled"] * r["price"] + fee(r["filled"], r["price"])
+    return out
+
+
+def _whole(sid, legs):
+    """True if every leg of a basket filled alike after all (engine.stranded_baskets' rule):
+    a lost reply can mark one stranded that reconcile later finds whole, so locked in."""
+    try:
+        n = len(json.loads(legs or "[]"))
+    except (TypeError, ValueError):
+        return False
+    fills = [r["filled"] or 0 for r in db.query("SELECT filled FROM orders WHERE signal_id = ?", sid)]
+    return n > 1 and len(fills) == n and min(fills) == max(fills) > 0
+
+
 def open_directional():
     """Dollars in open bot positions that came from bets, not locked-in arbitrage. The legs
-    a half-built basket left ('stranded') are bets now: nothing locks them in any more."""
-    rows = db.query("""SELECT o.filled, o.price FROM orders o
-        LEFT JOIN settlements s ON s.ticker = o.ticker
+    a half-built basket left ('stranded', and not whole after all) are bets now: nothing
+    locks them in any more."""
+    rows = db.query("""SELECT o.signal_id, o.filled, o.price, sg.guaranteed, sg.status, sg.legs
+        FROM orders o LEFT JOIN settlements s ON s.ticker = o.ticker
         LEFT JOIN signals sg ON sg.id = o.signal_id
-        WHERE o.filled > 0 AND s.ticker IS NULL
-          AND (COALESCE(sg.guaranteed, 0) = 0 OR sg.status LIKE 'stranded%')""")
-    return sum(r["filled"] * r["price"] + fee(r["filled"], r["price"]) for r in rows)
+        WHERE o.filled > 0 AND s.ticker IS NULL""")
+    whole, total = {}, 0.0
+    for r in rows:
+        if r["guaranteed"]:
+            if not str(r["status"] or "").startswith("stranded"):
+                continue
+            if r["signal_id"] not in whole:
+                whole[r["signal_id"]] = _whole(r["signal_id"], r["legs"])
+            if whole[r["signal_id"]]:
+                continue
+        total += r["filled"] * r["price"] + fee(r["filled"], r["price"])
+    return total
 
 
 def peak_equity():

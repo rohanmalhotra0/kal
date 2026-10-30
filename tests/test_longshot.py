@@ -434,9 +434,9 @@ def open_event(c, et, series="KXHIGHNY", hours=5.5, longshots=((0.07, 0.08),), c
     return markets
 
 
-def ctx_for(c, cells, bankroll=1000.0, budget=1000.0, held=(), open_exposure=0.0, **cfg_kw):
+def ctx_for(c, cells, bankroll=1000.0, budget=1000.0, held=(), open_exposure=0.0, held_cost=None, **cfg_kw):
     return Context(c, cfg(**cfg_kw), "paper", budget, bankroll, set(held), {"longshot": cells}, {},
-                   open_exposure=open_exposure)
+                   open_exposure=open_exposure, held_cost=dict(held_cost or {}))
 
 
 class StrategyTests(TempHome):
@@ -603,6 +603,12 @@ class StrategyTests(TempHome):
         held = {f"KXHIGHNY-{i}-M0" for i in range(3)}
         self.assertEqual(self.scan(bankroll=300.0, held=held), [])
         self.assertTrue(self.scan(bankroll=300.0, held=set(list(held)[:2])))   # $10 of room left
+        # Lowering max_per_trade later can't shrink them: they count what the books say they cost.
+        cost = {tk: 10.0 for tk in held}
+        for lower in (5.0, 3.0):
+            self.assertEqual(self.scan(bankroll=300.0, held=held, held_cost=cost, max_per_trade=lower), [])
+        # And a small bet held there counts small.
+        self.assertTrue(self.scan(bankroll=300.0, held=held, held_cost={tk: 2.0 for tk in held}))
 
     def test_recheck_before_a_live_order(self):
         ctx = ctx_for(self.c, [cell("live")])

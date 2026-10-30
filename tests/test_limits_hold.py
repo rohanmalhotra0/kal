@@ -7,6 +7,7 @@ money path found (each finding checked by a separate skeptic):
 """
 from kal import config, db, engine, ledger
 from kal.client import fee
+from kal.strategies.base import Context, held_dollars
 from tests.helpers import TempHome, orders_proven
 from tests.test_core import arb_event, fake_with_arb
 
@@ -26,6 +27,15 @@ def two_baskets():
 
 def baskets_bought(c):
     return {o[0].split("-")[0] for o in c.orders}
+
+
+def assert_one_whole_basket(test, c):
+    """The run stopped between baskets, never inside one, and nothing tripped."""
+    test.assertEqual(len(baskets_bought(c)), 1)
+    test.assertEqual(len(c.orders), 4)   # all 4 legs of the first basket
+    cfg = config.load()
+    test.assertTrue(cfg["enabled"])
+    test.assertEqual(cfg["disabled_reason"], "")
 
 
 class MidRunTests(TempHome):
@@ -52,12 +62,12 @@ class MidRunTests(TempHome):
     def test_a_budget_cut_mid_run_stops_real_orders(self):
         # The skeptic's repro: both baskets were bought, $57.60, with the budget cut to $10.
         c, s = self.run_editing({"budget": 10})
-        self.assertEqual(len(baskets_bought(c)), 1)
+        assert_one_whole_basket(self, c)
         self.assertIn("budget set stricter mid-run", " ".join(s["notes"]))
 
     def test_a_lower_cap_mid_run_stops_real_orders(self):
         c, s = self.run_editing({"max_per_arb": 5})
-        self.assertEqual(len(baskets_bought(c)), 1)
+        assert_one_whole_basket(self, c)
 
     def test_a_strategy_moved_off_live_mid_run_stops_its_real_orders(self):
         for mode in ("paper", "off"):
@@ -66,7 +76,7 @@ class MidRunTests(TempHome):
                 db.execute("DELETE FROM orders")
                 db.execute("DELETE FROM signals")
                 c, s = self.run_editing({"strategies": {"basket_arb": {"mode": mode}}})
-                self.assertEqual(len(baskets_bought(c)), 1)
+                assert_one_whole_basket(self, c)
                 self.assertIn("basket_arb left live mid-run", " ".join(s["notes"]))
 
     def test_a_looser_setting_mid_run_changes_nothing(self):
@@ -92,3 +102,33 @@ class StrandedLegTests(TempHome):
         stranded = self.signal("stranded: leg 2/4 EV1-1 filled 0/10; basket incomplete")
         self.order(stranded, "EV1-0", 10)
         self.assertAlmostEqual(ledger.open_directional(), 10 * 0.45 + fee(10, 0.45))
+
+    def test_a_basket_marked_stranded_but_whole_after_all_stays_locked_in(self):
+        # A lost reply on the last leg marks it stranded; reconcile then finds that leg filled.
+        legs = [{"ticker": f"EV2-{i}"} for i in range(2)]
+        sid = db.insert("signals", strategy="basket_arb", event="EV2", title="basket", mode="live",
+                        guaranteed=1, cost=9.0, payout_min=10.0, exp_profit=1.0, legs=legs,
+                        status="stranded: leg 2/2 EV2-1: no clear reply")
+        self.order(sid, "EV2-0", 10)
+        self.order(sid, "EV2-1", 10)
+        self.assertEqual(ledger.open_directional(), 0)
+
+
+class HeldDollarsTests(TempHome):
+    def ctx(self, held_cost, **cfg):
+        return Context(None, dict(config.DEFAULTS, **cfg), "live", 0, 300.0, set(held_cost), {}, {},
+                       held_cost=held_cost)
+
+    def test_a_held_ticker_counts_what_the_books_say_it_cost(self):
+        ctx = self.ctx({"A": 10.0}, max_per_trade=3)
+        self.assertEqual(held_dollars(ctx, "A"), 10.0)   # a later, lower max_per_trade can't shrink it
+        self.assertEqual(held_dollars(ctx, "OWNERS"), 3)   # unknown to the books: the most one bet can be
+
+    def test_open_cost_per_ticker_leaves_settled_ones_out(self):
+        for tk, filled in (("A-1", 10), ("A-1", 5), ("B-1", 4)):
+            db.insert("orders", signal_id=0, strategy="favorites", ticker=tk, side="yes", count=filled,
+                      price=0.5, filled=filled, status="executed", order_id=f"o{tk}{filled}")
+        db.insert("settlements", ticker="B-1", settled_ts=1.0, result="yes", revenue=4.0, cost=2.0, pnl=2.0)
+        self.assertEqual(set(ledger.open_by_ticker()), {"A-1"})
+        self.assertAlmostEqual(ledger.open_by_ticker()["A-1"], 7.5 + fee(10, 0.5) + fee(5, 0.5))
+
