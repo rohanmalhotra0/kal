@@ -2,7 +2,7 @@
 
 Newest first. Each 2-hour check-in adds one entry: what it checked, what it found, links.
 
-## 2026-10-30 08:50 UTC — check-in: memory cut by 43% at the peak; fix in review
+## 2026-10-30 08:50 UTC — check-in: memory cut by 43% at the peak; fix merged
 
 - Checked: CI green on main 3eae68e; market-check green on e876e50 (today, 06:42). No
   status report yet: the private `kal-status` repo isn't shared with Claude.
@@ -11,9 +11,13 @@ Newest first. Each 2-hour check-in adds one entry: what it checked, what it foun
   the memory wasn't handed back to the system, so the bot sat near 560 MB between runs. No
   leak: memory stayed flat over 20 runs. Also, slimmed markets kept tables sized for 43+
   fields: 40 MB wasted.
-- Fix: [PR #52](https://github.com/rohanmalhotra0/kal/pull/52). Hand memory back after every
-  job; copy each slimmed market into a right-sized table. On live data: peak 312-343 MB (was
-  556-567), about 185 MB between runs (was about 560). Independent review and CI running.
+- Fix: [PR #52](https://github.com/rohanmalhotra0/kal/pull/52), merged. Hand memory back
+  after every job; copy each slimmed market into a right-sized table. On live data: peak
+  312-343 MB (was 556-567), about 185 MB between runs (was about 560). The real install test
+  agrees: 443 MB peak with research running (was 515). Independent review: no blockers; its
+  five small items fixed (one test could never fail; now it can).
+- Started: a 5-hour paper soak of the merged code, long enough for a research run to finish
+  inside the real scheduler, with memory sampled every minute.
 - Research: only idea #18 is left, and it needs weeks of paper trades from the server.
 - Waiting on the owner: update the server, `sudo kal setup`, `sudo kal doctor`.
 
