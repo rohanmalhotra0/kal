@@ -2,6 +2,30 @@
 
 Newest first. Each 2-hour check-in adds one entry: what it checked, what it found, links.
 
+## 2026-10-30 06:30 UTC — audit fixes merged: restore, lost disk, per-event cap, baskets, backups
+
+The cross-PR audit (3 finders, each finding checked by a separate verifier) found 6 issues in
+how today's changes combine. 1 was refuted (needs a reply Kalshi never sends). The other 5
+are fixed and merged, each with tests that fail on the old code and its own independent
+review:
+
+- [PR #46](https://github.com/rohanmalhotra0/kal/pull/46): after `kal restore`, fills with no
+  time could book a payout on contracts already sold (+$9.53 where the truth is -$8.34).
+- [PR #47](https://github.com/rohanmalhotra0/kal/pull/47): a half-built basket is now stopped
+  for before it is marked, so a crash in between can't hide it.
+- [PR #48](https://github.com/rohanmalhotra0/kal/pull/48): orders put back after a lost disk
+  or a restore count toward their event's cap ($37.84 staked against a $20 cap before). Their
+  event comes from Kalshi: a probe found most open tickers can't be cut down to it.
+- [PR #49](https://github.com/rohanmalhotra0/kal/pull/49): after a lost disk, past baskets
+  net out instead of reading as losses (65 profitable baskets booked -$517 and the bot
+  stopped for good). The review found the add-back could hide a day's loss from the daily
+  stop; fixed. Fuzz: 0 of 3,000 random histories count more than the strictest truth.
+- [PR #50](https://github.com/rohanmalhotra0/kal/pull/50): the daily backup waits for a
+  trade run, so a copy never lands between a basket's legs.
+- Next: the daily stop values a position at cost once its market closes and before it
+  settles, so a winner's gain drops out for a while (a false stop, or a later day's loss
+  partly hidden). Older than today's work; fixing it next.
+
 ## 2026-10-30 05:00 UTC — check-in: audit found a restore bug; fix in review
 
 - Checked: CI green on main 1360f8e; market-check green on 79b7b9e (self-test passed, scan
