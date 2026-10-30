@@ -333,7 +333,7 @@ class NullCountTests(TempHome):
     def test_counts_that_say_nothing_stop_it(self):
         for counts in ({"fill_count_fp": ""}, {"fill_count_fp": None},
                        {"initial_count_fp": None, "remaining_count_fp": "0.00"},
-                       {"initial_count_fp": "10.00", "remaining_count_fp": ""}):
+                       {"initial_count_fp": "10.00", "remaining_count_fp": "", "status": "canceled"}):
             with self.subTest(counts=counts):
                 self.shape(**counts)
                 with self.assertRaises(ledger.CatchUpError):
@@ -341,7 +341,7 @@ class NullCountTests(TempHome):
                 self.assertIsNone(db.get("orders_checked"))   # never looked past
 
     def test_plain_numbers_and_fractions_still_read(self):
-        self.shape(fill_count=3, initial_count_fp="7.50", remaining_count_fp="4.50")
+        self.shape(fill_count=3, initial_count_fp="7.50", remaining_count_fp="0.00", status="canceled")
         self.assertEqual(ledger.recover(self.c), 1)
         self.shape(fill_count_fp="2.25")
         self.assertEqual(ledger.recover(self.c), 1)

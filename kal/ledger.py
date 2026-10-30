@@ -8,11 +8,10 @@ deposit, a manual trade, or a schema change in Kalshi's settlement feed can't
 inflate it. Kalshi's fills are read only to lower it (contracts sold outside the bot).
 """
 import json
-import math
 import time
 
 from . import db
-from .client import (BOT_MARK, UnknownSettlement, every_fill, every_order, fee, num, outcome_side,
+from .client import (BOT_MARK, UnknownSettlement, every_fill, every_order, fee, fill_count, num, outcome_side,
                      price, resting, ts, yes_payout)
 
 OPEN = ("active", "open")
@@ -407,34 +406,14 @@ RECOVER_SLACK = 3600   # seconds: orders from just before the last check are loo
 
 
 def _bought_count(o):
-    """How many contracts a bot order bought. Kalshi must give the counts: "executed" alone
-    is no number (with no size asked for, it once read as infinity). Raises CatchUpError."""
-    def value(field):   # a null or empty count says nothing: never read it as 0
-        for k in (f"{field}_fp", field):
-            if o.get(k) not in (None, ""):
-                return o[k]
-        return None
-
-    def number(v):
-        if v is None:
-            return None
-        if isinstance(v, bool):   # True isn't one contract
-            return float("nan")
-        try:
-            return float(v)
-        except (TypeError, ValueError, OverflowError):
-            return float("nan")
-    got, start, left = (number(value(f)) for f in ("fill_count", "initial_count", "remaining_count"))
-    if got is None:
-        # Initial less remaining is what filled only once the order is done in full: Kalshi
-        # zeroes "remaining" when it cancels the rest, so on a cancelled order it reads as all.
-        if start is None or left is None or o.get("status") != "executed":
-            raise CatchUpError(f"order {o.get('client_order_id')} doesn't say how much it bought (fields: "
-                               f"{', '.join(sorted(o))[:200]})")
-        got = start - left
-    if not math.isfinite(got) or got < 0 or (start is not None and math.isfinite(start) and got > start + 1e-9):
-        raise CatchUpError(f"order {o.get('client_order_id')} reads as {got} contracts of {start}")
-    return round(got, 2)
+    """How many contracts a bot order bought: client.fill_count, with no size to fall back on
+    ("executed" alone is no number). Raises CatchUpError if Kalshi's reply doesn't say for
+    sure: a count null, empty or unreadable, or counts that contradict each other."""
+    n = fill_count(o)
+    if n is None:
+        raise CatchUpError(f"order {o.get('client_order_id')} doesn't say how much it bought (fields: "
+                           f"{', '.join(sorted(o))[:200]})")
+    return n
 
 
 def _bought_side(o):
