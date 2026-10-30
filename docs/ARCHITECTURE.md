@@ -147,6 +147,11 @@ tests/            unittest; tests/fakes.py has FakeKalshi, tests/helpers.py has 
   stop is noted as owed before its alert goes, so a restart mid-send still sends it, and
   only that alert's delivery settles it. A stop that can't be saved says so, at most
   once an hour.
+- A disk that takes no new file (read-only after errors, or out of inodes) -> trip; it
+  trips at 5,000 inodes left, while the stop can still be saved. A read-only disk can't
+  save its stop, nor remove the heartbeat at shutdown. The heartbeat holds the boot id,
+  so a start that finds one from an earlier boot (no clean stop) trips before its first
+  run: the reboot that fixes the disk doesn't turn the bot back on.
 - After `kal restore`, the next live run adds the buys Kalshi shows since the backup's
   day before it trades (`ledger.catch_up`). It puts back the bot's own marked orders
   first (`ledger.recover`), so a sale outside the bot is never read as the bot's buy of

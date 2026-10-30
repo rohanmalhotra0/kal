@@ -43,6 +43,7 @@ KEEP_DAYS = 14
 PRUNE_DAYS = 180
 DISK_TRIP_MB = 200
 DISK_WARN_MB = 1024
+DISK_TRIP_FILES = 5000  # room for this few more files (inodes) trips it, while the stop can still be saved
 CLOCK_WARN = 5          # seconds off Kalshi's clock before we say so
 CLOCK_TRIP = 30         # seconds off, on two checks in a row, before the bot stops
 CLOCK_TRIES = 3         # readings when the first looks off (a cached reply can look old)
@@ -59,6 +60,7 @@ DAY = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 BOOKS = ("orders", "settlements", "signals", "paper")   # tables a real kal db always has
 TRIPS = "trips.jsonl"
 HEARTBEAT = ".heartbeat"
+BOOT_ID = "/proc/sys/kernel/random/boot_id"   # new at every boot (Linux)
 
 log = logging.getLogger(__name__)
 _trip_log = threading.Lock()
@@ -531,6 +533,16 @@ def _write_error(path):
         return e
 
 
+def _free_files(path):
+    """How many more files (inodes) the disk can take, or None where it has no fixed count
+    (btrfs says 0 of 0)."""
+    try:
+        st = os.statvfs(path)
+    except (OSError, AttributeError):   # AttributeError: no statvfs here (Windows)
+        return None
+    return st.f_favail if st.f_files else None
+
+
 def disk_ok(trip=True):
     """Free space where the books live. Under 200 MB the bot trips; under 1 GB, a warning.
     A read-only disk trips too: every run fails before it can stop the bot itself."""
@@ -558,6 +570,14 @@ def disk_ok(trip=True):
         tripped = trip and _trip_once(f"Disk almost full: {free:,} MB free. Free up space, then press Reset.")
         return _row("disk", "fail", f"only {free:,} MB free. The bot stops under {DISK_TRIP_MB} MB.",
                     free_mb=free, tripped=tripped)
+    files = _free_files(config.home())
+    if files is not None and files < DISK_TRIP_FILES:
+        # Before none are left: at none, the stop can't be saved and freeing files would
+        # turn the bot back on.
+        tripped = trip and _trip_once(f"Disk almost out of files: room for {files:,} more (too many files). "
+                                      "Delete some, then press Reset.")
+        return _row("disk", "fail", f"room for only {files:,} more files. The bot stops under {DISK_TRIP_FILES:,}.",
+                    free_mb=free, tripped=tripped, title="kal warning: disk full of files")
     if free < DISK_WARN_MB:
         return _row("disk", "warn", f"{free:,} MB free. The bot stops itself under {DISK_TRIP_MB} MB.",
                     free_mb=free)
@@ -707,13 +727,53 @@ def trips(start, end):
 
 # ---------- heartbeat ----------
 
+def boot_id():
+    """This boot's id, or "" where there is none."""
+    try:
+        with open(BOOT_ID) as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
 def beat():
     """The scheduler loop touches this file about once a minute. Its age tells `kal health`
-    (and Docker's health check) whether the loop is still running."""
+    (and Docker's health check) whether the loop is still running. It holds this boot's id,
+    for clean_stop_check."""
     path = os.path.join(config.home(), HEARTBEAT)
-    with open(path, "a"):
-        pass
+    boot = boot_id()
+    try:
+        with open(path, errors="replace") as f:   # garbled by disk damage: written again
+            same = f.read() == boot
+    except OSError:
+        same = False
+    if not same:
+        with open(path, "w") as f:
+            f.write(boot)
     os.utime(path, None)
+
+
+def clean_stop_check():
+    """Before the first run: stop the bot if it didn't stop cleanly before the server went
+    down. Its heartbeat, which a clean stop removes, is then from an earlier boot.
+    A disk that went read-only can't save its stop, nor remove the heartbeat. Without this,
+    the reboot that fixes the disk turns the bot back on, and it trades within seconds."""
+    try:
+        with open(os.path.join(config.home(), HEARTBEAT), errors="replace") as f:
+            then = f.read().strip()
+    except OSError:
+        return False   # none: the last run stopped cleanly (or none ran here)
+    now = boot_id()
+    if not then or not now or then == now:
+        return False   # from an older kal, no way to tell, or a crash this boot (systemd restarts it)
+    try:
+        if not config.load().get("enabled"):
+            return False   # it was off: it wasn't trading, so it missed nothing
+    except Exception:
+        pass   # can't tell: stop it
+    return _trip_once("kal didn't shut down cleanly before the server restarted (a disk error, a power "
+                      "cut, or a forced restart), so its last steps may not have been saved. "
+                      "Look at your positions on Kalshi.")
 
 
 def unbeat():
@@ -860,15 +920,19 @@ def daily(now=None):
     out["disk"] = disk["detail"]
     if disk["level"] == "fail":
         problems.append(f"disk: {disk['detail']}")
-    try:
-        b = backup(now)
-        out["backup"] = (f"{', '.join(b['files'])} to backups/{b['day']}, {len(b['days'])} days kept"
-                         if b["files"] else "nothing to back up yet")
-    except Exception as e:
-        b = None
-        problems.append(f"backup failed: {e}")
-        log.error("backup failed", exc_info=True)
-        _alert("backup", "kal backup failed", f"{e}\n\nTry it by hand: sudo kal backup")
+    b = None
+    if disk.get("readonly"):
+        out["backup"] = "skipped: the disk takes nothing"   # its stop says so: no second alert
+    else:
+        try:
+            b = backup(now)
+            out["backup"] = (f"{', '.join(b['files'])} to backups/{b['day']}, {len(b['days'])} days kept"
+                             if b["files"] else "nothing to back up yet")
+        except Exception as e:
+            b = None
+            problems.append(f"backup failed: {e}")
+            log.error("backup failed", exc_info=True)
+            _alert("backup", "kal backup failed", f"{e}\n\nTry it by hand: sudo kal backup")
     if b is None:
         out["pruned"] = "skipped: no fresh backup"
     else:

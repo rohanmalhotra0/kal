@@ -409,6 +409,13 @@ class Scheduler:
     # ---------- the loop ----------
 
     def _loop(self):
+        # A heartbeat from before a restart means the bot didn't stop cleanly (a read-only
+        # disk can't save its stop): stop it before the first tick can trade.
+        try:
+            from . import maintenance
+            maintenance.clean_stop_check()
+        except Exception:
+            log.error("could not check for an unclean stop: %s", traceback.format_exc())
         # Beat at once, before the first tick (which can take a while): until then the
         # heartbeat on disk may be a crashed process's, and a clean stop must take it away.
         self._beat()

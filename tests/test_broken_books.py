@@ -6,11 +6,14 @@ import errno
 import os
 import re
 import sqlite3
+import time
+import unittest
 from contextlib import ExitStack
 from types import SimpleNamespace
 from unittest import mock
 
 from kal import config, db, engine, maintenance, notify
+from kal.scheduler import Scheduler
 from tests.helpers import TempHome, orders_proven
 from tests.test_core import fake_with_arb
 from tests.test_maintenance import free_disk, kalshi_clock
@@ -266,20 +269,29 @@ class StopAlertTests(Base):
             maintenance.health()
         self.assertEqual(self.phone.titles, ["kal stopped itself"])
 
+def read_only_disk():
+    """As on a real read-only disk: no new file, and the books (WAL needs its -shm file)
+    can't be opened either, so the books and trading checks fail too."""
+    stack = ExitStack()
+    stack.enter_context(mock.patch.object(maintenance.tempfile, "mkstemp",
+                                          side_effect=OSError(errno.EROFS, "Read-only file system")))
+    cant = sqlite3.OperationalError("unable to open database file")
+    stack.enter_context(mock.patch.object(maintenance, "_open", side_effect=cant))
+    stack.enter_context(mock.patch.object(db, "connect", side_effect=cant))
+    return stack
+
+
+def files_left(n, total=3_000_000):
+    """The disk has room for `n` more files (inodes) of `total`."""
+    return mock.patch.object(maintenance.os, "statvfs", return_value=SimpleNamespace(f_files=total, f_favail=n))
+
+
 class ReadOnlyDiskTests(Base):
     """A disk remounted read-only after errors: every run fails before it can stop the bot,
     so the health check stops it, by name."""
 
     def read_only(self):
-        """As on a real read-only disk: no new file, and the books (WAL needs its -shm file)
-        can't be opened either, so the books and trading checks fail too."""
-        stack = ExitStack()
-        stack.enter_context(mock.patch.object(maintenance.tempfile, "mkstemp",
-                                              side_effect=OSError(errno.EROFS, "Read-only file system")))
-        cant = sqlite3.OperationalError("unable to open database file")
-        stack.enter_context(mock.patch.object(maintenance, "_open", side_effect=cant))
-        stack.enter_context(mock.patch.object(db, "connect", side_effect=cant))
-        return stack
+        return read_only_disk()
 
     def test_a_read_only_disk_stops_the_bot_and_says_so_once(self):
         with self.read_only(), free_disk(50_000), kalshi_clock(0), self.assertLogs("kal", "WARNING"):
@@ -298,14 +310,48 @@ class ReadOnlyDiskTests(Base):
             maintenance.health()
         self.assertEqual(self.phone.titles, ["kal warning: disk read-only"])   # its own DEPLOY.md row
 
-    def test_a_disk_that_cant_take_one_more_file_stops_the_bot(self):
-        # No free inodes: plenty of bytes, but nothing new can be written (the books' journal).
-        with mock.patch.object(maintenance.tempfile, "mkstemp",
-                               side_effect=OSError(errno.ENOSPC, "No space left on device")), \
+    def test_a_disk_that_cant_take_one_more_file_says_so_once(self):
+        # No free inodes: plenty of bytes, but no new file, so the stop can't be saved either.
+        full = OSError(errno.ENOSPC, "No space left on device")
+        with mock.patch.object(maintenance.tempfile, "mkstemp", side_effect=full), \
+                mock.patch.object(config, "_write", side_effect=full), files_left(0), \
                 free_disk(50_000), kalshi_clock(0):
-            row = maintenance.disk_ok()
-        self.assertEqual(row["level"], "fail")
-        self.assertIn("can't take one more file", config.load()["disabled_reason"])
+            out = maintenance.health()
+        disk = [r for r in out["checks"] if r["check"] == "disk"][0]
+        self.assertEqual(disk["level"], "fail")
+        self.assertEqual(self.phone.titles, ["kal stopped itself"])
+        self.assertIn("can't take one more file", self.phone.bodies[0])
+        self.assertIn("couldn't be saved", self.phone.bodies[0])
+
+    def test_a_disk_almost_out_of_files_stops_the_bot_while_it_can_save_it(self):
+        # At none left the stop can't be saved, and freeing files would turn the bot back on.
+        with files_left(maintenance.DISK_TRIP_FILES - 1), free_disk(50_000), kalshi_clock(0):
+            out = maintenance.health()
+        disk = [r for r in out["checks"] if r["check"] == "disk"][0]
+        self.assertEqual(disk["level"], "fail")
+        self.assertIn("almost out of files", config.load()["disabled_reason"])   # saved
+        self.assertEqual(self.phone.titles, ["kal stopped itself"])
+
+    def test_almost_out_of_files_when_already_stopped_says_so_by_name(self):
+        config.trip("lost too much today")
+        self.phone.titles.clear()
+        with files_left(10), free_disk(50_000), kalshi_clock(0):
+            maintenance.health()
+        self.assertEqual(self.phone.titles, ["kal warning: disk full of files"])   # its own DEPLOY.md row
+
+    def test_enough_files_left_or_no_fixed_count_is_fine(self):
+        for n, total in ((maintenance.DISK_TRIP_FILES, 3_000_000), (0, 0)):   # (0, 0): btrfs
+            with self.subTest(n=n, total=total), files_left(n, total), free_disk(50_000):
+                self.assertEqual(maintenance.disk_ok()["level"], "ok")
+        self.assertEqual(config.load()["disabled_reason"], "")
+
+    def test_on_a_read_only_disk_the_daily_chores_add_no_backup_alert(self):
+        # The stop says the disk takes nothing: a backup can't be made, and "try it by hand"
+        # wouldn't help.
+        with self.read_only(), free_disk(50_000), self.assertLogs("kal", "WARNING"):
+            out = maintenance.daily()
+        self.assertEqual(self.phone.titles, ["kal stopped itself"])
+        self.assertIn("skipped", out["backup"])
 
     def test_when_the_stop_cant_be_saved_either_it_says_so_at_most_hourly(self):
         cant = OSError(errno.EROFS, "Read-only file system")
@@ -325,6 +371,115 @@ class ReadOnlyDiskTests(Base):
         self.assertEqual(row["level"], "warn")
         self.assertEqual(row["title"], "kal warning: disk can't be written")   # not "getting full"
         self.assertTrue(config.load()["enabled"])   # no stop
+
+
+class UncleanStopTests(Base):
+    """A stop on a read-only disk can't be saved. The reboot that fixes the disk must not turn
+    the bot back on: the heartbeat, which a clean stop removes, is then from an earlier boot."""
+
+    def boot(self, boot):
+        return mock.patch.object(maintenance, "boot_id", return_value=boot)
+
+    def first_trade(self):
+        """Start the scheduler as kal.service does; return after its first trade run."""
+        ran = []
+        s = Scheduler(jobs={"trade": lambda: ran.append(engine.run_once(self.client))}, tick=0.01,
+                      intervals=lambda cfg: {"trade": 3600}, hours=lambda cfg: {})
+        s.start()
+        try:
+            deadline = time.time() + 5
+            while not ran and time.time() < deadline:
+                time.sleep(0.01)
+        finally:
+            s.stop(wait=5)
+        self.assertTrue(ran)
+
+    def test_after_a_read_only_disk_and_a_reboot_it_stays_stopped(self):
+        cant = OSError(errno.EROFS, "Read-only file system")
+        with self.boot("boot-1"):
+            maintenance.beat()   # the bot runs
+            with read_only_disk(), mock.patch.object(config, "_write", side_effect=cant), \
+                    mock.patch.object(maintenance.os, "remove", side_effect=cant), \
+                    free_disk(50_000), kalshi_clock(0), self.assertLogs("kal", "WARNING"):
+                maintenance.health()    # its stop can't be saved...
+                maintenance.unbeat()    # ...nor its heartbeat taken away, at the reboot's stop
+        self.assertEqual(config.load()["disabled_reason"], "")
+        self.phone.titles.clear()
+        bought = len(self.client.orders)
+        with self.boot("boot-2"):       # rebooted: the disk works again
+            self.first_trade()
+        self.assertEqual(len(self.client.orders), bought)   # it traded within seconds, before
+        self.assertIn("didn't shut down cleanly", config.load()["disabled_reason"])
+        self.assertEqual(self.phone.titles, ["kal stopped itself"])
+
+    def test_a_crash_that_systemd_restarts_is_not_judged(self):
+        with self.boot("boot-1"):
+            maintenance.beat()          # then killed: the heartbeat stays
+            self.first_trade()
+        self.assertEqual(config.load()["disabled_reason"], "")
+
+    def test_a_clean_stop_then_a_reboot_is_fine(self):
+        with self.boot("boot-1"):
+            maintenance.beat()
+            maintenance.unbeat()        # what a clean stop does
+        with self.boot("boot-2"):
+            self.assertFalse(maintenance.clean_stop_check())
+        self.assertEqual(config.load()["disabled_reason"], "")
+
+    def test_no_way_to_tell_is_not_judged(self):
+        path = os.path.join(config.home(), maintenance.HEARTBEAT)
+        open(path, "w").close()         # an older kal's heartbeat: no boot id in it
+        with self.boot("boot-2"):
+            self.assertFalse(maintenance.clean_stop_check())
+        with open(path, "w") as f:
+            f.write("boot-1")
+        with self.boot(""):             # no boot id here (not Linux)
+            self.assertFalse(maintenance.clean_stop_check())
+        self.assertEqual(config.load()["disabled_reason"], "")
+
+    def test_a_bot_that_was_off_missed_nothing(self):
+        with self.boot("boot-1"):
+            maintenance.beat()
+        config.update({"enabled": False})
+        with self.boot("boot-2"):
+            self.assertFalse(maintenance.clean_stop_check())
+        self.assertEqual(config.load()["disabled_reason"], "")
+
+    def test_a_bot_already_stopped_keeps_its_first_reason(self):
+        with self.boot("boot-1"):
+            maintenance.beat()
+        config.trip("lost too much today")   # stopped reads as off: it wasn't trading
+        with self.boot("boot-2"):
+            self.assertFalse(maintenance.clean_stop_check())
+        self.assertEqual(config.load()["disabled_reason"], "lost too much today")
+
+    def test_the_heartbeat_holds_this_boots_id(self):
+        path = os.path.join(config.home(), maintenance.HEARTBEAT)
+        with self.boot("boot-1"):
+            maintenance.beat()
+        with self.boot("boot-2"):
+            maintenance.beat()
+        with open(path) as f:
+            self.assertEqual(f.read(), "boot-2")
+
+    def test_a_garbled_heartbeat_still_beats_and_counts_as_unclean(self):
+        path = os.path.join(config.home(), maintenance.HEARTBEAT)
+        with open(path, "wb") as f:
+            f.write(b"\xff\xfe\x00 disk damage")
+        with self.boot("boot-2"):
+            self.assertTrue(maintenance.clean_stop_check())
+            maintenance.beat()   # it can't stop the heartbeat for good
+        with open(path) as f:
+            self.assertEqual(f.read(), "boot-2")
+
+    @unittest.skipUnless(os.path.exists(maintenance.BOOT_ID), "Linux only")
+    def test_the_boot_id_is_read(self):
+        self.assertRegex(maintenance.boot_id(), r"^[0-9a-f-]{36}$")
+
+    def test_a_check_that_fails_never_stops_the_loop(self):
+        with mock.patch.object(maintenance, "clean_stop_check", side_effect=RuntimeError("boom")), \
+                self.assertLogs("kal.scheduler", "ERROR"):
+            self.first_trade()
 
 
 class BusyBooksTests(Base):
