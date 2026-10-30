@@ -13,11 +13,11 @@ permissions:
 jobs:
   probe:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 55
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
-      - run: pip install requests pyyaml
-      - run: python tools/docs_probe.py
+      - run: pip install -r requirements.txt
+      - run: bash tools/soak.sh
