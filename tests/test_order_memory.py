@@ -293,3 +293,42 @@ class RecoverAtomicTests(TempHome):
             self.c.order_list = [o]
             with self.assertRaises(ledger.CatchUpError):
                 ledger.recover(self.c)
+
+
+class NullCountTests(TempHome):
+    """A count that is there but null or empty says nothing: never "bought nothing" (third
+    review of this change). Read as 0, the order was skipped and looked past for good."""
+
+    def setUp(self):
+        super().setUp()
+        self.c = FakeKalshi(balance=1000)
+        self.c.cutoffs = {"orders_updated_ts": time.time() - 15 * DAY}
+
+    def shape(self, **counts):
+        o = order(new_order_id())
+        for k in ("fill_count_fp", "remaining_count_fp", "initial_count_fp"):
+            del o[k]
+        o.update(counts)
+        self.c.order_list = [o]
+
+    def test_a_null_fill_count_falls_back_to_initial_less_remaining(self):
+        self.shape(fill_count_fp=None, initial_count_fp="10.00", remaining_count_fp="0.00")
+        self.assertEqual(ledger.recover(self.c), 1)
+        self.assertEqual(db.query("SELECT filled FROM orders")[0]["filled"], 10)
+
+    def test_counts_that_say_nothing_stop_it(self):
+        for counts in ({"fill_count_fp": ""}, {"fill_count_fp": None},
+                       {"initial_count_fp": None, "remaining_count_fp": "0.00"},
+                       {"initial_count_fp": "10.00", "remaining_count_fp": ""}):
+            with self.subTest(counts=counts):
+                self.shape(**counts)
+                with self.assertRaises(ledger.CatchUpError):
+                    ledger.recover(self.c)
+                self.assertIsNone(db.get("orders_checked"))   # never looked past
+
+    def test_plain_numbers_and_fractions_still_read(self):
+        self.shape(fill_count=3, initial_count_fp="7.50", remaining_count_fp="7.50")
+        self.assertEqual(ledger.recover(self.c), 1)
+        self.shape(fill_count_fp="2.25")
+        self.assertEqual(ledger.recover(self.c), 1)
+        self.assertEqual(sorted(r["filled"] for r in db.query("SELECT filled FROM orders")), [2.25, 3])

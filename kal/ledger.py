@@ -12,7 +12,7 @@ import math
 import time
 
 from . import db
-from .client import (BOT_MARK, UnknownSettlement, every_fill, every_order, fee, filled, num, outcome_side,
+from .client import (BOT_MARK, UnknownSettlement, every_fill, every_order, fee, num, outcome_side,
                      price, resting, ts, yes_payout)
 
 OPEN = ("active", "open")
@@ -144,7 +144,9 @@ def _restored_gain(ticker, paid, side=None):
     """What orders added after a restore (catch_up) are worth over their cost on a market,
     at a YES value of `paid` (its payout, or for one side, that side's bid as 1 - paid on NO).
     Some may be the owner's own trades, so only their losses count, never their gains: at
-    settlement and in equity alike, so a win settling never reads as a loss."""
+    settlement and in equity alike, so a win settling never reads as a loss. recover() adds
+    'restored' rows too, on new books: there losses from before the order mark can't be
+    seen, so gains mustn't grow the budget either."""
     gain = 0.0
     for r in db.query("SELECT side, filled, price FROM orders WHERE ticker = ? AND strategy = 'restored' "
                       "AND filled > 0", ticker):
@@ -407,18 +409,22 @@ RECOVER_SLACK = 3600   # seconds: orders from just before the last check are loo
 def _bought_count(o):
     """How many contracts a bot order bought. Kalshi must give the counts: "executed" alone
     is no number (with no size asked for, it once read as infinity). Raises CatchUpError."""
-    def has(field):
-        return f"{field}_fp" in o or field in o
-    if not (has("fill_count") or (has("initial_count") and has("remaining_count"))):
+    def value(field):   # a null or empty count says nothing: never read it as 0
+        for k in (f"{field}_fp", field):
+            if o.get(k) not in (None, ""):
+                return o[k]
+        return None
+    got, start, left = value("fill_count"), value("initial_count"), value("remaining_count")
+    if got is None and (start is None or left is None):
         raise CatchUpError(f"order {o.get('client_order_id')} doesn't say how much it bought (fields: "
                            f"{', '.join(sorted(o))[:200]})")
-    try:   # the raw count, before filled() clamps a negative to 0: that's a misread, not "none"
-        raw = num(o, "fill_count") if has("fill_count") else num(o, "initial_count") - num(o, "remaining_count")
+    try:   # a negative count is a misread, not "none"
+        raw = float(got) if got is not None else float(start) - float(left)
     except (TypeError, ValueError):
         raw = float("nan")
     if not math.isfinite(raw) or raw < 0:
         raise CatchUpError(f"order {o.get('client_order_id')} reads as {raw} contracts")
-    return filled(o, float("inf"))
+    return round(raw, 2)
 
 
 def _bought_side(o):
@@ -451,7 +457,7 @@ def recover(client):
     whole account if the books don't say. Orders sent before the mark existed can't be
     found. Returns how many it put back. Raises CatchUpError if one can't be read."""
     start = time.time()
-    since = db.get("orders_checked")
+    since = db.get("orders_checked") or None   # one meaning for "no check yet", whatever was stored
     ids = {r["order_id"] for r in db.query("SELECT DISTINCT order_id FROM orders WHERE order_id != ''")}
     rows = {r["client_order_id"]: r for r in db.query(
         "SELECT id, client_order_id, status, ticker, side, signal_id FROM orders WHERE client_order_id != ''")}
