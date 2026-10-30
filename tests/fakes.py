@@ -10,8 +10,11 @@ class _OrderLog(list):
         super().__init__()
         self._owner = owner
 
-    def __call__(self, ticker=None, min_ts=None):
-        return [o for o in self._owner.order_list if ticker in (None, o.get("ticker"))]
+    def __call__(self, ticker=None, min_ts=None, archive=False):
+        if archive:
+            self._owner._store()
+        found = self._owner.archived_orders if archive else self._owner.order_list
+        return [o for o in found if ticker in (None, o.get("ticker")) and self._owner._since(o, min_ts)]
 
 
 class FakeKalshi:
@@ -27,6 +30,13 @@ class FakeKalshi:
         self.position_list = None     # what positions() returns; None = what buy() bought
         self.held = {}                # ticker -> net contracts bought (+ YES, - NO)
         self.fill_list = []           # what fills() returns
+        self.archived_fills = []      # what fills(archive=True) returns: Kalshi's historical store
+        self.archived_orders = []     # what the orders(archive=True) lookup returns
+        self.archived_markets = {}    # ticker -> market, for market(archive=True)
+        self.cutoffs = {}             # what cutoff() returns (an exception: raised); {}: unknown
+        self.archive_reads = 0        # how many times the historical store was read
+        self.archive_error = None     # an exception reading the store raises
+        self.honor_min_ts = False     # True: fills and order lookups keep only records from min_ts on
         self.settled = {}             # series -> [market dicts]
         self.candle_data = {}         # ticker -> [candles]
         self.series_list = []
@@ -57,8 +67,13 @@ class FakeKalshi:
     def markets_by_ticker(self, tickers):
         return {t: self.market_info[t] for t in tickers if t in self.market_info}
 
-    def market(self, ticker):
-        return self.market_info.get(ticker, {})
+    def market(self, ticker, archive=False):
+        return (self.archived_markets if archive else self.market_info).get(ticker, {})
+
+    def cutoff(self):
+        if isinstance(self.cutoffs, Exception):
+            raise self.cutoffs
+        return dict(self.cutoffs)
 
     def orderbook(self, ticker):
         return self.books.get(ticker, {"yes": [], "no": []})
@@ -92,8 +107,20 @@ class FakeKalshi:
     def settlements(self, min_ts=None):
         return []
 
-    def fills(self, min_ts=None, ticker=None):
-        return [f for f in self.fill_list if ticker is None or f.get("ticker") == ticker]
+    def _store(self):
+        self.archive_reads += 1
+        if self.archive_error:
+            raise self.archive_error
+
+    def _since(self, record, min_ts):
+        return not (self.honor_min_ts and min_ts and record.get("created_time")
+                    and _ts(record["created_time"]) < min_ts)
+
+    def fills(self, min_ts=None, ticker=None, archive=False):
+        if archive:
+            self._store()
+        found = self.archived_fills if archive else self.fill_list
+        return [f for f in found if (ticker is None or f.get("ticker") == ticker) and self._since(f, min_ts)]
 
     def buy(self, ticker, side, count, limit_price, client_order_id=None):
         n = self.fill(ticker, side, count, limit_price)
