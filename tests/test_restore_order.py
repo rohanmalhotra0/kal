@@ -48,7 +48,8 @@ class RestoreThenRecoverTests(TempHome):
         self.now = time.time()
         self.cost = 20 * 0.40 + client.fee(20, 0.40)   # 8.34: what the bot paid for contracts sold outside it
 
-    def restore_then_run(self, buy_time=True, sale_time=True, same_second=False, books_checked=True):
+    def restore_then_run(self, buy_time=True, sale_time=True, same_second=False, books_checked=True,
+                         sold=True, bad_order=False):
         backup_at, buy_at, sale_at = self.now - 3 * DAY, self.now - 2 * DAY, self.now - DAY
         if same_second:
             buy_at = int(buy_at) + 0.1
@@ -69,17 +70,20 @@ class RestoreThenRecoverTests(TempHome):
         config.update({"enabled": True})
         c = FakeKalshi(balance=1000)
         c.honor_min_ts = True
-        c.fill_list = [fill("own-1", "T-2", "ask", 20, 0.90, sale_at if sale_time else None),   # newest first
-                       fill("b1", "T-2", "bid", 20, 0.40, buy_at if buy_time else None),
-                       fill("o1", "T-1", "bid", 20, 0.40, backup_at - DAY)]
-        c.order_list = [order("b1", coid_b1, "T-2", 0.40, 20, buy_at),
-                        order("o1", coid_o1, "T-1", 0.40, 20, backup_at - DAY)]
+        c.fill_list = ([fill("own-1", "T-2", "ask", 20, 0.90, sale_at if sale_time else None)] if sold else []) + [
+            fill("b1", "T-2", "bid", 20, 0.40, buy_at if buy_time else None),     # newest first
+            fill("o1", "T-1", "bid", 20, 0.40, backup_at - DAY)]
+        b1 = order("b1", coid_b1, "T-2", 0.40, 20, buy_at)
+        if bad_order:
+            b1["fill_count_fp"] = "lots"   # a reply recover() can't read
+        c.order_list = [b1, order("o1", coid_o1, "T-1", 0.40, 20, backup_at - DAY)]
         c.market_info["T-1"] = {"ticker": "T-1", "status": "active", "yes_bid_dollars": "0.4000",
                                 "open_time": iso(self.now - 10 * DAY)}
         c.market_info["T-2"] = {"ticker": "T-2", "status": "finalized", "result": "yes",
                                 "settlement_value_dollars": "1.0000", "open_time": iso(self.now - 10 * DAY)}
         c.position_list = [{"ticker": "T-1", "position": 20, "exposure": 8}]
         engine.run_once(c)
+        return c
 
     def check(self):
         sides = {r["side"] for r in db.query("SELECT side FROM orders WHERE ticker = 'T-2' AND filled > 0")}
@@ -107,3 +111,31 @@ class RestoreThenRecoverTests(TempHome):
         # and still never lets the sale in as the bot's buy.
         self.restore_then_run(buy_time=False, sale_time=False, books_checked=False)
         self.check()
+
+    def test_a_win_in_the_gap_counts_in_full_when_the_books_have_a_check(self):
+        # Books rolled back to a copy with an order check hold everything before it: the
+        # bot's own win after it is booked in full ('recovered').
+        self.restore_then_run(sold=False)
+        self.assertEqual([r["strategy"] for r in db.query("SELECT strategy FROM orders WHERE ticker = 'T-2'")],
+                         ["recovered"])
+        self.assertAlmostEqual(ledger.realized(), 20 - self.cost)
+
+    def test_a_win_in_the_gap_never_counts_on_books_with_no_check(self):
+        # A copy from before the books' first check can't see every earlier loss: only losses
+        # count from it ('restored'), so a win adds nothing.
+        self.restore_then_run(sold=False, books_checked=False)
+        self.assertEqual([r["strategy"] for r in db.query("SELECT strategy FROM orders WHERE ticker = 'T-2'")],
+                         ["restored"])
+        self.assertAlmostEqual(ledger.realized(), 0)
+
+    def test_an_order_it_cant_read_stops_and_the_restore_waits_for_it(self):
+        c = self.restore_then_run(sold=False, bad_order=True)
+        self.assertIn("can't read the bot's own orders", config.load()["disabled_reason"])
+        self.assertTrue(db.get("restored"))                     # the catch-up still waits
+        c.order_list[0]["fill_count_fp"] = "20.00"              # Kalshi's reply reads again
+        config.clear_trip()
+        config.update({"enabled": True})
+        engine.run_once(c)
+        self.assertEqual(config.load()["disabled_reason"], "")
+        self.assertFalse(db.get("restored"))                    # caught up, marker cleared
+        self.assertAlmostEqual(ledger.realized(), 20 - self.cost)

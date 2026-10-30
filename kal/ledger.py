@@ -375,7 +375,9 @@ def catch_up(client):
     Added as a buy, it would hide that, and the payout would be booked. Fills go in time
     order, so a buy and its sale inside the gap work out too. Run recover() first: the
     bot's own marked orders are then in the books, so a sale is never read before the buy
-    it nets, whatever the fills' times say."""
+    it nets, whatever the fills' times say. The one case that gets wrong needs a bot order
+    from before the mark (an unmarked buy, sold, then a marked buy of the other side):
+    the bot first traded live with the mark, so it has none."""
     gap = db.get("restored")
     if not gap:
         return 0
