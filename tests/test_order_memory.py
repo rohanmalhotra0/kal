@@ -311,10 +311,24 @@ class NullCountTests(TempHome):
         o.update(counts)
         self.c.order_list = [o]
 
-    def test_a_null_fill_count_falls_back_to_initial_less_remaining(self):
-        self.shape(fill_count_fp=None, initial_count_fp="10.00", remaining_count_fp="0.00")
+    def test_a_null_fill_count_falls_back_to_initial_less_remaining_once_done(self):
+        self.shape(fill_count_fp=None, initial_count_fp="10.00", remaining_count_fp="0.00", status="executed")
         self.assertEqual(ledger.recover(self.c), 1)
         self.assertEqual(db.query("SELECT filled FROM orders")[0]["filled"], 10)
+
+    def test_on_a_cancelled_order_initial_less_remaining_is_no_count(self):
+        # Kalshi zeroes "remaining" when it cancels the rest: 10 less 0 isn't 10 bought (fourth review).
+        self.shape(fill_count_fp=None, initial_count_fp="10.00", remaining_count_fp="0.00", status="canceled")
+        with self.assertRaises(ledger.CatchUpError):
+            ledger.recover(self.c)
+
+    def test_odd_numbers_are_misreads(self):
+        for counts in ({"fill_count": True}, {"fill_count": False}, {"fill_count": 10 ** 400},
+                       {"fill_count_fp": "12.00", "initial_count_fp": "10.00"}):
+            with self.subTest(counts=counts):
+                self.shape(**counts)
+                with self.assertRaises(ledger.CatchUpError):
+                    ledger.recover(self.c)
 
     def test_counts_that_say_nothing_stop_it(self):
         for counts in ({"fill_count_fp": ""}, {"fill_count_fp": None},
@@ -327,7 +341,7 @@ class NullCountTests(TempHome):
                 self.assertIsNone(db.get("orders_checked"))   # never looked past
 
     def test_plain_numbers_and_fractions_still_read(self):
-        self.shape(fill_count=3, initial_count_fp="7.50", remaining_count_fp="7.50")
+        self.shape(fill_count=3, initial_count_fp="7.50", remaining_count_fp="4.50")
         self.assertEqual(ledger.recover(self.c), 1)
         self.shape(fill_count_fp="2.25")
         self.assertEqual(ledger.recover(self.c), 1)

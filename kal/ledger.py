@@ -414,17 +414,27 @@ def _bought_count(o):
             if o.get(k) not in (None, ""):
                 return o[k]
         return None
-    got, start, left = value("fill_count"), value("initial_count"), value("remaining_count")
-    if got is None and (start is None or left is None):
-        raise CatchUpError(f"order {o.get('client_order_id')} doesn't say how much it bought (fields: "
-                           f"{', '.join(sorted(o))[:200]})")
-    try:   # a negative count is a misread, not "none"
-        raw = float(got) if got is not None else float(start) - float(left)
-    except (TypeError, ValueError):
-        raw = float("nan")
-    if not math.isfinite(raw) or raw < 0:
-        raise CatchUpError(f"order {o.get('client_order_id')} reads as {raw} contracts")
-    return round(raw, 2)
+
+    def number(v):
+        if v is None:
+            return None
+        if isinstance(v, bool):   # True isn't one contract
+            return float("nan")
+        try:
+            return float(v)
+        except (TypeError, ValueError, OverflowError):
+            return float("nan")
+    got, start, left = (number(value(f)) for f in ("fill_count", "initial_count", "remaining_count"))
+    if got is None:
+        # Initial less remaining is what filled only once the order is done in full: Kalshi
+        # zeroes "remaining" when it cancels the rest, so on a cancelled order it reads as all.
+        if start is None or left is None or o.get("status") != "executed":
+            raise CatchUpError(f"order {o.get('client_order_id')} doesn't say how much it bought (fields: "
+                               f"{', '.join(sorted(o))[:200]})")
+        got = start - left
+    if not math.isfinite(got) or got < 0 or (start is not None and math.isfinite(start) and got > start + 1e-9):
+        raise CatchUpError(f"order {o.get('client_order_id')} reads as {got} contracts of {start}")
+    return round(got, 2)
 
 
 def _bought_side(o):
