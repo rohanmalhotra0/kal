@@ -1265,7 +1265,8 @@ class DeployFileTests(unittest.TestCase):
         self.assertIn("-m kal app", unit)
         self.assertNotIn("0.0.0.0", unit)
         for line in ("User=kal", "Restart=always", "NoNewPrivileges=true", "ProtectSystem=strict",
-                     "ReadWritePaths=/var/lib/kal", "PrivateTmp=true", "MemoryMax=60%", "StartLimitIntervalSec=0"):
+                     "ReadWritePaths=/var/lib/kal", "PrivateTmp=true", "MemoryMax=60%", "StartLimitIntervalSec=0",
+                     'Environment="KAL_CMD=sudo kal"'):   # alerts from the bot say what to type
             self.assertIn(line, lines)
         restart = [int(x.split("=")[1]) for x in lines if x.startswith("RestartSec=")]
         self.assertTrue(restart and restart[0] <= 10)

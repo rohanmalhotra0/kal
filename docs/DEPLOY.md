@@ -314,6 +314,10 @@ To change it (the hour is in UTC): `sudo kal set summary_hour_utc 14`
 | **kal warning: clock** | The server clock is off. Kalshi may refuse orders. | `timedatectl`. If it says not synchronized: `sudo systemctl restart chrony` |
 | **kal warning: trading** | Trade runs keep failing. Kalshi or the internet is down. It keeps trying. | Usually nothing. If it lasts a day: `sudo kal logs` |
 | **kal warning: books** | The books (`kal.db`) are damaged and the bot is stopped. | Put a backup back: see "Restore" below. |
+| **kal warning: books busy** | The books couldn't be read for a moment (locked, or the disk). Not damaged. | Nothing. Don't restore. If it lasts an hour: `sudo kal health` |
+| **kal warning: disk read-only** | The server's disk had errors and went read-only. Nothing can be saved, so the bot can't trade. | Reboot the server: `sudo reboot` (it checks the disk). The bot stays off after it (see the next table). If it happens again, ask DigitalOcean support. |
+| **kal warning: disk full of files** | Almost no room for more files, though there is space left (too many files). | Delete some files (see "Too many files" below). |
+| **kal warning: disk can't be written** | kal can't write to its folder (`/var/lib/kal`). | `sudo kal health`. |
 | **kal warning: report** | The status report can't reach GitHub. Usually the token ran out (they last 90 days). | Make a new token: step 10 below. Until then the check-in can't see the bot. |
 | **kal backup failed** | Last night's backup didn't work. | `sudo kal backup` shows why. |
 
@@ -332,6 +336,9 @@ It stays stopped until a person says so. `sudo kal health` shows why.
 | basket left half-built, or an order stayed on the book | Look at your open positions on Kalshi. |
 | capital is used up | The $300 is gone. Stop and think before you add more. |
 | Disk almost full | Free some space (below). |
+| Disk almost out of files, or the disk can't take one more file | Delete some files (see "Too many files" below). |
+| The disk is read-only | Reboot the server: `sudo reboot`. If it happens again, ask DigitalOcean support. After the reboot it stops itself again, as below. |
+| kal didn't shut down cleanly | The server restarted while the bot ran (a disk error, a power cut, a forced restart). Its last steps may not have been saved. Look at your open positions on Kalshi, and `sudo kal health`. |
 | The server clock is ... Kalshi's clock | Fix the clock: `sudo systemctl restart chrony`, then `timedatectl`. |
 | Books restored from the ... backup | See "Restore" below. |
 | the books are damaged | `kal.db` is corrupt, so nothing can trade. See "Restore" below. (A lock or a full disk is not damage: those say "can't be written" and need no restore.) |
@@ -345,6 +352,16 @@ sudo journalctl --vacuum-size=100M
 sudo apt clean
 df -h /
 ```
+
+**Too many files** (space left, but no room for more files):
+
+```bash
+df -i /var/lib/kal                          # IFree near 0: too many files
+sudo du --inodes -xS / | sort -n | tail -3  # the folders with the most files in them
+```
+
+The last line is the folder with the most files. Delete what you know is junk there
+(often something filling `/tmp`). Never delete anything in `/var/lib/kal`.
 
 ## Backups
 

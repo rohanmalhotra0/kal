@@ -28,6 +28,9 @@ UP_WAIT="${KAL_UPDATE_UP_WAIT:-60}"  # longest wait for the new version to be up
 STOP_WAIT="${KAL_UPDATE_STOP_WAIT:-360}"  # longest wait for a stop under way (TimeoutStopSec=330)
 RESEARCH_LOCK="$DATA/.research.lock" # the file kal/research holds while a research run works
 RESEARCH_WAIT="${KAL_RESEARCH_WAIT:-3600}"  # longest wait for that run before restarting anyway
+# While this exists, kal-watch leaves the bot to this update: it restarts and judges the bot,
+# and says what happened itself.
+CHECKING="${KAL_UPDATE_CHECKING:-/run/kal-update.checking}"
 
 say() { echo "kal-update: $*"; }     # goes to the journal: journalctl -u kal-update
 
@@ -166,7 +169,7 @@ ok_before=0
 # a separate folder only root can open, so nothing the tests leave behind can steer root.
 stage=$(mktemp -d)
 work=$(mktemp -d)
-cleanup() { rm -rf "$stage" "$work"; }
+cleanup() { rm -rf "$stage" "$work"; rm -f "$CHECKING"; }
 trap cleanup EXIT
 git archive "$after" | tar -x -C "$stage"
 cat > "$stage/.stage-run.sh" <<RUN
@@ -208,6 +211,12 @@ chmod -R a+rX "$APP"
 chmod -R go-w "$APP" "$VENV"
 
 inv() { systemctl show kal -p InvocationID --value 2>/dev/null || true; }   # new at every start
+# kal-watch alerts when the restart count moved since its last look. Once this update has
+# judged the restart (and rolled back if needed), the crashes it judged are told: start
+# kal-watch from here, or it would say the bot keeps restarting about a bot that is fine.
+watch_from_here() {
+  echo "$(systemctl show kal -p NRestarts --value 2>/dev/null || echo 0) $(inv)" > "$DATA/watch_nrestarts" 2>/dev/null || true
+}
 # try-restart does nothing to a bot that is being stopped or restarted (by a person, say). Let
 # that finish first: a restart under way would start the new code later, with no check.
 settle() {
@@ -216,14 +225,14 @@ settle() {
     sleep 1
   done
 }
+go() { settle; touch "$CHECKING" 2>/dev/null; systemctl try-restart kal; }
 restart() {
   # Wait (up to an hour) for a research run to finish, so the restart doesn't kill it. The
   # lock file must belong to the kal user: research opens it to write, and couldn't if root
   # made it. Still running after an hour: restart anyway, research retries after a restart.
   [ -e "$RESEARCH_LOCK" ] || runuser -u "$KAL_USER" -- touch "$RESEARCH_LOCK" 2>/dev/null
   # (9< never creates the file: one made by root here would lock research out for good.)
-  ( flock -w "$RESEARCH_WAIT" 9; settle; systemctl try-restart kal ) 9<"$RESEARCH_LOCK" \
-    || { settle; systemctl try-restart kal; }
+  ( flock -w "$RESEARCH_WAIT" 9; go ) 9<"$RESEARCH_LOCK" || go
 }
 # After restart(): wait (up to UP_WAIT) for the bot to be up, let it run WAIT seconds, then
 # set `seen`: "same" if it still runs as InvocationID $1 (the restart didn't happen), "crashed"
@@ -285,6 +294,7 @@ roll_back() {  # why ; "blame": the new version failed (don't try it again, unle
     fi
   fi
   [ -n "$blame" ] && echo "$after" > "$failed"   # don't try the same version again tomorrow
+  [ "$was_active" = 1 ] && watch_from_here
   alert high "kal update rolled back" "$why Back on ${before:0:7}."
   say "rolled back ${after:0:7} -> ${before:0:7}: $why"
 }
@@ -314,5 +324,6 @@ else
 fi
 
 rm -f "$failed" "$retry"
+[ "$was_active" = 1 ] && watch_from_here
 say "updated ${before:0:7} -> ${after:0:7}"
 alert low "kal updated" "Now on $(git log -1 --format='%h %s').${note:+ $note}"

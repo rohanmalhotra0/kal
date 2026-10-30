@@ -19,12 +19,14 @@ that stop the bot before either can hurt it.
 
 A check result is a row: {"check", "ok", "level" ("ok" / "warn" / "fail"), "detail"}.
 """
+import errno
 import json
 import logging
 import os
 import re
 import shutil
 import sqlite3
+import tempfile
 import threading
 import time
 from contextlib import ExitStack, contextmanager
@@ -41,6 +43,7 @@ KEEP_DAYS = 14
 PRUNE_DAYS = 180
 DISK_TRIP_MB = 200
 DISK_WARN_MB = 1024
+DISK_TRIP_FILES = 5000  # room for this few more files (inodes) trips it, while the stop can still be saved
 CLOCK_WARN = 5          # seconds off Kalshi's clock before we say so
 CLOCK_TRIP = 30         # seconds off, on two checks in a row, before the bot stops
 CLOCK_TRIES = 3         # readings when the first looks off (a cached reply can look old)
@@ -57,6 +60,7 @@ DAY = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 BOOKS = ("orders", "settlements", "signals", "paper")   # tables a real kal db always has
 TRIPS = "trips.jsonl"
 HEARTBEAT = ".heartbeat"
+BOOT_ID = "/proc/sys/kernel/random/boot_id"   # new at every boot (Linux)
 
 log = logging.getLogger(__name__)
 _trip_log = threading.Lock()
@@ -203,7 +207,8 @@ def books_ok(trip=True, quick=False):
             got = ["ok"] if quick else [r[0] for r in c.execute("PRAGMA quick_check")]
     except sqlite3.Error as e:
         if not db.damaged(e):
-            return _row("books", "warn", f"couldn't check {name}: {e}")
+            return _row("books", "warn", f"couldn't check {name}: {e}. Not damaged: don't restore. "
+                        f"It looks again in 10 minutes.", title="kal warning: books busy")
         got = [str(e)]
     if got == ["ok"]:
         return _row("books", "ok", f"{name} reads fine")
@@ -516,13 +521,63 @@ def _room_for_vacuum(path):
 
 # ---------- disk / clock ----------
 
+def _write_error(path):
+    """None if a new file can be made in `path`, else the OSError. A disk remounted read-only
+    after errors takes nothing: no order record, no heartbeat, no stop."""
+    try:
+        fd, p = tempfile.mkstemp(prefix=".write-check-", dir=path)
+        os.close(fd)
+        os.remove(p)
+        return None
+    except OSError as e:
+        return e
+
+
+def _free_files(path):
+    """How many more files (inodes) the disk can take, or None where it has no fixed count
+    (btrfs says 0 of 0)."""
+    try:
+        st = os.statvfs(path)
+    except (OSError, AttributeError):   # AttributeError: no statvfs here (Windows)
+        return None
+    return st.f_favail if st.f_files else None
+
+
 def disk_ok(trip=True):
-    """Free space where the books live. Under 200 MB the bot trips; under 1 GB, a warning."""
+    """Free space where the books live. Under 200 MB the bot trips; under 1 GB, a warning.
+    A read-only disk trips too: every run fails before it can stop the bot itself."""
+    err = _write_error(config.home())
     free = shutil.disk_usage(config.home()).free // MB
+    if err is not None and (err.errno == errno.EROFS or (err.errno == errno.ENOSPC and free >= DISK_TRIP_MB)):
+        # Read-only after errors, or no room for one more file with space left (all inodes
+        # used): nothing can be saved, so no run can trade, and none can stop the bot itself.
+        if err.errno == errno.EROFS:
+            what, title = "is read-only (it had errors)", "kal warning: disk read-only"
+        else:
+            what, title = "can't take one more file (too many files)", "kal warning: disk full of files"
+        reason = (f"The disk {what}, so nothing can be saved and trading has stopped. Look: "
+                  f"{config.command('health')}")
+        try:
+            tripped = trip and _trip_once(reason)
+        except OSError:
+            tripped = True   # it couldn't be saved; trip() said so (at most once an hour)
+        return _row("disk", "fail", f"{what}: nothing can be saved, so trading has stopped",
+                    tripped=tripped, readonly=True, title=title, free_mb=free)
+    if err is not None and err.errno != errno.ENOSPC:   # (a full disk is told below)
+        return _row("disk", "warn", f"can't write to {config.home()} here: {err.strerror or err}",
+                    title="kal warning: disk can't be written", free_mb=free)
     if free < DISK_TRIP_MB:
         tripped = trip and _trip_once(f"Disk almost full: {free:,} MB free. Free up space, then press Reset.")
         return _row("disk", "fail", f"only {free:,} MB free. The bot stops under {DISK_TRIP_MB} MB.",
                     free_mb=free, tripped=tripped)
+    files = _free_files(config.home())
+    if files is not None and files < DISK_TRIP_FILES:
+        # Before none are left: at none, the stop can't be saved and freeing files would
+        # turn the bot back on.
+        tripped = trip and _trip_once(f"Disk almost out of files: room for {files:,} more (too many files). "
+                                      "Delete some, then press Reset.")
+        return _row("disk", "fail", f"room for only {files:,} more files. The bot stops under {DISK_TRIP_FILES:,}.",
+                    free_mb=free, tripped=tripped, title="kal warning: disk full of files")
     if free < DISK_WARN_MB:
         return _row("disk", "warn", f"{free:,} MB free. The bot stops itself under {DISK_TRIP_MB} MB.",
                     free_mb=free)
@@ -672,13 +727,56 @@ def trips(start, end):
 
 # ---------- heartbeat ----------
 
+def boot_id():
+    """This boot's id, or "" where there is none."""
+    try:
+        with open(BOOT_ID) as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
 def beat():
     """The scheduler loop touches this file about once a minute. Its age tells `kal health`
-    (and Docker's health check) whether the loop is still running."""
+    (and Docker's health check) whether the loop is still running. It holds this boot's id,
+    for clean_stop_check."""
     path = os.path.join(config.home(), HEARTBEAT)
-    with open(path, "a"):
-        pass
+    boot = boot_id()
+    try:
+        with open(path, errors="replace") as f:   # garbled by disk damage: written again
+            same = f.read() == boot
+    except OSError:
+        same = False
+    if not same:
+        with open(path, "w") as f:
+            f.write(boot)
+            f.flush()
+            os.fsync(f.fileno())   # ext4 writes it up to ~30 s later: a disk error by then lost it
+        config.sync_dir(config.home())
     os.utime(path, None)
+
+
+def clean_stop_check():
+    """Before the first run: stop the bot if it didn't stop cleanly before the server went
+    down. Its heartbeat, which a clean stop removes, is then from an earlier boot.
+    A disk that went read-only can't save its stop, nor remove the heartbeat. Without this,
+    the reboot that fixes the disk turns the bot back on, and it trades within seconds."""
+    try:
+        with open(os.path.join(config.home(), HEARTBEAT), errors="replace") as f:
+            then = f.read().strip()
+    except OSError:
+        return False   # none: the last run stopped cleanly (or none ran here)
+    now = boot_id()
+    if not then or not now or then == now:
+        return False   # from an older kal, no way to tell, or a crash this boot (systemd restarts it)
+    try:
+        if not config.load().get("enabled"):
+            return False   # it was off: it wasn't trading, so it missed nothing
+    except Exception:
+        pass   # can't tell: stop it
+    return _trip_once("kal didn't shut down cleanly before the server restarted (a disk error, a power "
+                      "cut, or a forced restart), so its last steps may not have been saved. "
+                      "Look at your positions on Kalshi.")
 
 
 def unbeat():
@@ -791,15 +889,19 @@ def health(trip=True, client=None):
         config.resend_stop()
     except Exception:
         log.warning("could not resend the stop alert", exc_info=True)
-    broken = any(r["check"] == "books" and r["level"] == "fail" for r in rows)
+    # One alert for one cause. Damaged or busy books: the books row says it, not each check
+    # that couldn't read them. A disk that takes nothing: its stop says it, books too.
+    books_bad = any(r["check"] == "books" and r["level"] != "ok" for r in rows)
+    readonly = any(r.get("readonly") for r in rows)
     for r in rows:
-        if r["level"] == "ok" or r.get("unknown") or (broken and r.get("books")):
-            continue   # (a check that couldn't read the damaged books: the books alert says it)
+        if r["level"] == "ok" or r.get("unknown") or ((books_bad or readonly) and r.get("books")) \
+                or (readonly and r["check"] == "books"):
+            continue
         key = f"{r['check']}:{r['level']}"
         if r.get("tripped"):
             _note_sent(key)   # its stop alert just went: no second one about it for a day
         else:
-            _alert(key, f"kal warning: {r['check']}", r["detail"],
+            _alert(key, r.get("title") or f"kal warning: {r['check']}", r["detail"],
                    priority="high" if r["level"] == "fail" else "default")
     try:
         db.put("health", {"ts": time.time(), "checks": rows})
@@ -821,15 +923,19 @@ def daily(now=None):
     out["disk"] = disk["detail"]
     if disk["level"] == "fail":
         problems.append(f"disk: {disk['detail']}")
-    try:
-        b = backup(now)
-        out["backup"] = (f"{', '.join(b['files'])} to backups/{b['day']}, {len(b['days'])} days kept"
-                         if b["files"] else "nothing to back up yet")
-    except Exception as e:
-        b = None
-        problems.append(f"backup failed: {e}")
-        log.error("backup failed", exc_info=True)
-        _alert("backup", "kal backup failed", f"{e}\n\nTry it by hand: sudo kal backup")
+    b = None
+    if disk.get("readonly"):
+        out["backup"] = "skipped: the disk takes nothing"   # its stop says so: no second alert
+    else:
+        try:
+            b = backup(now)
+            out["backup"] = (f"{', '.join(b['files'])} to backups/{b['day']}, {len(b['days'])} days kept"
+                             if b["files"] else "nothing to back up yet")
+        except Exception as e:
+            b = None
+            problems.append(f"backup failed: {e}")
+            log.error("backup failed", exc_info=True)
+            _alert("backup", "kal backup failed", f"{e}\n\nTry it by hand: sudo kal backup")
     if b is None:
         out["pruned"] = "skipped: no fresh backup"
     else:

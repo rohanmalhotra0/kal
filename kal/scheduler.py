@@ -409,6 +409,13 @@ class Scheduler:
     # ---------- the loop ----------
 
     def _loop(self):
+        # A heartbeat from before a restart means the bot didn't stop cleanly (a read-only
+        # disk can't save its stop): stop it before the first tick can trade.
+        try:
+            from . import maintenance
+            maintenance.clean_stop_check()
+        except Exception:
+            log.error("could not check for an unclean stop: %s", traceback.format_exc())
         # Beat at once, before the first tick (which can take a while): until then the
         # heartbeat on disk may be a crashed process's, and a clean stop must take it away.
         self._beat()
@@ -453,7 +460,11 @@ class Scheduler:
         trade = self._workers.get("trade")
         if trade and trade.is_alive():
             trade.join(timeout=wait)
-        if self._beat_at or self._thread:   # this process ran the loop: a clean stop takes the heartbeat away
+        if trade and trade.is_alive():
+            # It outlasted the wait: it ends with the process, cut off. Not a clean stop, so
+            # the heartbeat stays (a reboot next is caught: clean_stop_check).
+            log.warning("a trade run was still going at the stop: it is cut off")
+        elif self._beat_at or self._thread:   # this process ran the loop: a clean stop takes the heartbeat away
             try:
                 from . import maintenance
                 maintenance.unbeat()
