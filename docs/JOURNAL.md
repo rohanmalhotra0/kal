@@ -2,6 +2,23 @@
 
 Newest first. Each 2-hour check-in adds one entry: what it checked, what it found, links.
 
+## 2026-10-30 18:20 UTC — #57 merged: a stop holds through a disk error and a reboot
+
+- Merged [PR #57](https://github.com/rohanmalhotra0/kal/pull/57) after two more review
+  rounds, run on a real ext4 disk (`errors=remount-ro`, journal abort, fsck) with the real
+  `kal app` under systemd 255.
+- Found and fixed, all on main before:
+  - A stop saved just before a disk error was lost after fsck (3 of 3), so the bot came
+    back on. The rename that saves `config.json` wasn't synced. Now kept (3 of 3).
+  - A stop on a read-only disk can't be saved, and DEPLOY.md said to reboot: the reboot
+    turned the bot back on, and it traded within seconds. Now the heartbeat holds the
+    boot id (synced at once), and a start that finds an earlier boot's stops the bot.
+  - Out of inodes: now it stops at 5,000 left, while the stop can still be saved.
+  - Alerts: the real command (`sudo kal`), books busy isn't "restore", one alert per cause,
+    kal-watch quiet during an update's check and right about crash loops.
+- Mutation check: 43 changes, each caught by a test. Full suite: 1,262 OK. CI green.
+- Waiting on the owner: update the server, `sudo kal setup`, `sudo kal doctor`.
+
 ## 2026-10-30 16:50 UTC — check-in: the cross-PR audit's fixes; limits hold to the order
 
 - Checked: CI and market-check green on main e4aebc4 (self-test passed, scan found
