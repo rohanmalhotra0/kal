@@ -6,7 +6,7 @@ set -u
 export KAL_HOME="$(mktemp -d)"
 python -m kal on --budget 300 > /dev/null
 python -m kal set trade_interval_min 2 > /dev/null
-if [ "$MODE" = trace ]; then
+if [ "$MODE" = trace ] || [ "$MODE" = keys ]; then
   python tools/memprobe.py
   exit 0
 fi

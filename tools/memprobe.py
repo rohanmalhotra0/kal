@@ -71,10 +71,50 @@ def field_sizes(events):
         print(f"   {n / MB:7.1f} MB  {k}")
 
 
+def named_in_code(key):
+    """Like tests/test_engine_memory.py: does any kal/*.py name this field (or its base)?"""
+    import glob
+    import re
+    if not hasattr(named_in_code, "src"):
+        root = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "kal")
+        src = ""
+        for path in glob.glob(os.path.join(root, "**", "*.py"), recursive=True):
+            with open(path) as f:
+                text = f.read()
+            if path.endswith(os.path.join("kal", "engine.py")):
+                text = text.replace(text[text.index("UNREAD = ("):text.index(")\n", text.index("UNREAD = ("))], "")
+            src += text
+        named_in_code.src = src
+    names = {key, re.sub(r"_(dollars|fp)$", "", key)}
+    return any(re.search(rf"\b{re.escape(n)}\b", named_in_code.src) for n in names)
+
+
+def key_report(events):
+    from collections import Counter
+    keys, sizes = Counter(), Counter()
+    markets = [m for ev in events for m in (ev.get("markets") or []) if isinstance(m, dict)]
+    for m in markets:
+        keys.update(m.keys())
+        sizes[sys.getsizeof(m)] += 1
+    unread = sorted(k for k in keys if not named_in_code(k))
+    print(f"{len(markets)} markets; keys per market after slimming: "
+          f"{Counter(len(m) for m in markets).most_common(6)}; dict sizes: {sizes.most_common(4)}")
+    print(f"{len(keys)} distinct market keys. Never named in kal code ({len(unread)}):")
+    print("   " + ", ".join(f"{k} ({keys[k]})" for k in unread))
+    left = Counter(sum(1 for k in m if k not in set(unread)) for m in markets)
+    print(f"keys per market if those went too: {left.most_common(6)}")
+    ekeys = Counter(k for ev in events for k in ev.keys())
+    print(f"event keys: {', '.join(f'{k}{"" if named_in_code(k) else "*"}' for k in sorted(ekeys))} (* never named)")
+
+
 def open_events(self):
     t = time.time()
     out = _open(self)
     seen.update(kept=len(out), load=time.time() - t, rss_loaded=mem()["VmRSS"])
+    if MODE == "keys":
+        key_report(out)
+        sys.stdout.flush()
+        os._exit(0)
     if MODE == "trace":
         field_sizes(out)
     return out
@@ -190,7 +230,9 @@ def wrap_trade():
 
 if __name__ == "__main__":
     print(f"mode={MODE} cpus={os.cpu_count()} MALLOC_ARENA_MAX={os.environ.get('MALLOC_ARENA_MAX')}", flush=True)
-    if MODE == "trace":
+    if MODE == "keys":
+        engine.run_once()
+    elif MODE == "trace":
         trace_one()
     else:
         wrap_trade()
