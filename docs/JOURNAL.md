@@ -2,6 +2,20 @@
 
 Newest first. Each 2-hour check-in adds one entry: what it checked, what it found, links.
 
+## 2026-10-30 18:50 UTC — check-in: all green on #57; a 3-hour soak of main runs
+
+- Checked: CI green on main a54c586. Market-check on 8cd421b (#57 merged): self-test all
+  ok, scan 0 found for all 11 strategies (no orders), research 3 tested / 0 failed,
+  coverage ok. No status report: the private `kal-status` repo isn't shared with Claude.
+- This check-in's one fix: #57 (above).
+- Started: a 3-hour paper soak of main on live Kalshi data
+  ([api-probe run 41105723547](https://github.com/rohanmalhotra0/kal/actions/runs/41105723547),
+  branch `probe/soak-main`, no key). At the end it checks restarts on a real runner: a
+  crash on the same boot must not stop the bot; a heartbeat from an earlier boot must.
+  Read at 21:30 UTC.
+- Research: only idea #18 is left, and it needs weeks of paper trades from the server.
+- Waiting on the owner: update the server, `sudo kal setup`, `sudo kal doctor`.
+
 ## 2026-10-30 18:20 UTC — #57 merged: a stop holds through a disk error and a reboot
 
 - Merged [PR #57](https://github.com/rohanmalhotra0/kal/pull/57) after two more review
