@@ -10,7 +10,7 @@ inflate it. Kalshi's fills are read only to lower it (contracts sold outside the
 import time
 
 from . import db
-from .client import UnknownSettlement, fee, num, price, ts, yes_payout
+from .client import UnknownSettlement, fee, num, outcome_side, price, ts, yes_payout
 
 OPEN = ("active", "open")
 
@@ -316,8 +316,24 @@ def write_off(ticker, side, count, note=""):
     return cost
 
 
+def _direction(f):
+    """(side, action) of a fill. Kalshi's deprecated side and action say exactly what was
+    done. Once they're gone, the outcome side says which way: buy YES and sell NO leave the
+    same position, so it reads as a buy of that side, priced on that side. Both there but
+    saying different things: CatchUpError, never a guess."""
+    side, action, outcome = f.get("side"), f.get("action"), outcome_side(f)
+    if side in ("yes", "no") and action in ("buy", "sell"):
+        long = side if action == "buy" else ("no" if side == "yes" else "yes")
+        if outcome and outcome != long:
+            raise CatchUpError(f"a fill says {action} {side} but outcome {outcome}: they should agree")
+        return side, action
+    if outcome:
+        return outcome, "buy"
+    return side, action or "buy"   # as before: a side with no action was a buy
+
+
 def _parse_fill(f):
-    side, action = f.get("side"), f.get("action", "buy")
+    side, action = _direction(f)
     n = num(f, "count")
     p = price(f, f"{side}_price") if side in ("yes", "no") else 0.0
     if side not in ("yes", "no") or action not in ("buy", "sell") or not n > 0 or not 0 < p < 1 \
