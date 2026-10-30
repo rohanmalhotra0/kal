@@ -2,6 +2,15 @@
 
 Newest first. Each 2-hour check-in adds one entry: what it checked, what it found, links.
 
+## 2026-10-30 22:50 UTC — check-in: all green
+
+- Checked: CI green on main 7318902. Latest market-check (18:39, a54c586): self-test ok,
+  scan 0 found (no orders), research 0 failed. No status report: the private `kal-status`
+  repo isn't shared with Claude.
+- Nothing broken, so no fix. Research: only idea #18 is left (needs weeks of server paper
+  trades).
+- Waiting on the owner: update the server, `sudo kal setup`, `sudo kal doctor`.
+
 ## 2026-10-30 21:30 UTC — 3-hour paper soak of main (with #57) passed
 
 - [api-probe run 41105723547](https://github.com/rohanmalhotra0/kal/actions/runs/41105723547):
