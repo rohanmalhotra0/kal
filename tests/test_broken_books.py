@@ -2,7 +2,9 @@
 trip and no alert, while the watchdog stayed green; a stop alert that didn't get through
 was never sent again. python -m unittest tests.test_broken_books
 """
+import errno
 import os
+import re
 import sqlite3
 from types import SimpleNamespace
 from unittest import mock
@@ -39,9 +41,15 @@ class Phone:
         return SimpleNamespace(status_code=self.status)
 
 
+def service_kal_cmd():
+    """KAL_CMD as deploy/kal.service sets it: alerts from the bot say what the owner types."""
+    with open(os.path.join(config.ROOT, "deploy", "kal.service")) as f:
+        return re.search(r'^Environment="KAL_CMD=([^"]+)"$', f.read(), re.M).group(1)
+
+
 class Base(TempHome):
     def setUp(self):
-        env = mock.patch.dict(os.environ, {"KAL_NTFY_TOPIC": "test-topic"})
+        env = mock.patch.dict(os.environ, {"KAL_NTFY_TOPIC": "test-topic", "KAL_CMD": service_kal_cmd()})
         env.start()
         self.addCleanup(env.stop)
         super().setUp()
@@ -57,6 +65,7 @@ class Base(TempHome):
         self.client = fake_with_arb()
         self.assertTrue(engine.run_once(self.client)["ok"])   # good books first
         self.phone.titles.clear()
+        self.phone.bodies.clear()
 
 
 class BrokenBooksTests(Base):
@@ -78,7 +87,8 @@ class BrokenBooksTests(Base):
             out = maintenance.health()
         books = [r for r in out["checks"] if r["check"] == "books"][0]
         self.assertEqual(books["level"], "fail")
-        self.assertIn("sudo kal restore", books["detail"].replace("python -m kal", "sudo kal"))
+        self.assertIn("sudo kal restore", books["detail"])
+        self.assertNotIn("python -m kal", config.load()["disabled_reason"])
         self.assertIn("the books are damaged", config.load()["disabled_reason"])
         # One alert: the stop. Not a second about the trading check, which failed on the books.
         self.assertEqual(self.phone.titles, ["kal stopped itself"])
@@ -255,6 +265,54 @@ class StopAlertTests(Base):
             maintenance.health()
         self.assertEqual(self.phone.titles, ["kal stopped itself"])
 
+class ReadOnlyDiskTests(Base):
+    """A disk remounted read-only after errors: every run fails before it can stop the bot,
+    so the health check stops it, by name."""
+
+    def read_only(self):
+        return mock.patch.object(maintenance.tempfile, "mkstemp",
+                                 side_effect=OSError(errno.EROFS, "Read-only file system"))
+
+    def test_a_read_only_disk_stops_the_bot_and_says_so(self):
+        with self.read_only(), free_disk(50_000), kalshi_clock(0):
+            out = maintenance.health()
+        disk = [r for r in out["checks"] if r["check"] == "disk"][0]
+        self.assertEqual(disk["level"], "fail")
+        self.assertIn("read-only", config.load()["disabled_reason"])
+        self.assertEqual(self.phone.titles, ["kal stopped itself"])   # once: no second warning
+
+    def test_when_the_stop_cant_be_saved_either_it_says_so_at_most_hourly(self):
+        cant = OSError(errno.EROFS, "Read-only file system")
+        with self.read_only(), mock.patch.object(config, "_write", side_effect=cant), \
+                free_disk(50_000), kalshi_clock(0):
+            for _ in range(3):   # 30 minutes of health checks
+                out = maintenance.health()
+        disk = [r for r in out["checks"] if r["check"] == "disk"][0]
+        self.assertEqual((disk["level"], disk["tripped"]), ("fail", True))
+        self.assertEqual(self.phone.titles.count("kal stopped itself"), 1)
+        self.assertIn("read-only", self.phone.bodies[0])
+        self.assertIn("couldn't be saved", self.phone.bodies[0])
+
+    def test_a_folder_this_user_cant_write_is_only_a_warning(self):
+        with mock.patch.object(maintenance.tempfile, "mkstemp", side_effect=PermissionError(errno.EACCES, "Permission denied")):
+            row = maintenance.disk_ok()
+        self.assertEqual(row["level"], "warn")
+        self.assertTrue(config.load()["enabled"])   # no stop
+
+
+class BusyBooksTests(Base):
+    def test_books_locked_for_a_moment_warn_under_their_own_title_and_say_dont_restore(self):
+        locked = sqlite3.OperationalError("database is locked")
+        with mock.patch.object(maintenance, "_open", side_effect=locked), free_disk(50_000), \
+                kalshi_clock(0):
+            maintenance.health()
+        self.assertIn("kal warning: books busy", self.phone.titles)
+        self.assertNotIn("kal warning: books", self.phone.titles)   # that title means damaged: restore
+        body = self.phone.bodies[self.phone.titles.index("kal warning: books busy")]
+        self.assertIn("Not damaged: don't restore", body)
+        self.assertTrue(config.load()["enabled"])
+
+
 class AlertMemoryTests(Base):
     def test_books_that_read_but_cant_write_still_alert_once_a_day(self):
         with mock.patch.object(db, "put", side_effect=sqlite3.OperationalError("database or disk is full")), \
@@ -272,6 +330,7 @@ class StaleStopTests(Base):
             config.trip(reason)
         self.phone.status = 200
         self.phone.titles.clear()
+        self.phone.bodies.clear()
 
     def test_a_newer_stop_that_got_through_drops_the_old_one(self):
         self.unsent("the books are damaged: kal.db")

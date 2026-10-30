@@ -830,6 +830,18 @@ exec "$@"
         self.assertIn("try-restart kal", _read(self.sysctl_log))
         self.assertFalse(os.path.exists(os.path.join(self.data, ".research.lock")))
 
+    def test_after_its_verdict_the_update_sets_where_kal_watch_counts_from(self):
+        # A rollback that lands while the bad version waits to restart keeps the restart
+        # count: without this, kal-watch would say the healthy old version keeps restarting.
+        for code in ("x = 2", "x = 'CRASH'"):
+            with self.subTest(code=code):
+                self._active()
+                self._push_code(code=code)
+                self._run()
+                sd = self._sd_now()
+                self.assertEqual(_read(os.path.join(self.data, "watch_nrestarts")).split(),
+                                 [str(sd["nrest"]), "inv%d" % sd["inv"]])
+
     def test_earlier_crashes_alone_never_roll_back(self):
         self._active(nrest=2)
         self._push_code()
@@ -869,15 +881,16 @@ exec "$@"
         self.assertIn("http://my.ntfy.box/kal-xyz", _read(self.curl_log))
 
     def test_local_changes_block_the_update(self):
-        before = self._head()
         # a local commit on the server's app that isn't on origin -> not a fast-forward
         _write(os.path.join(self.app, "kal", "local.py"), "y = 1\n")
         self._git(self.app, "add", "-A")
         self._git(self.app, "commit", "-q", "-m", "local", email="me@home", name="Me")
+        local = self._head()
         self._push_code()
         r = self._run()
         self.assertEqual(r.returncode, 1)
         self.assertIn("kal update skipped", _read(self.curl_log))
+        self.assertEqual(self._head(), local)   # still the server's own commit: nothing changed
 
 
 if __name__ == "__main__":

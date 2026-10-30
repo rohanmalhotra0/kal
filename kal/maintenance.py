@@ -19,12 +19,14 @@ that stop the bot before either can hurt it.
 
 A check result is a row: {"check", "ok", "level" ("ok" / "warn" / "fail"), "detail"}.
 """
+import errno
 import json
 import logging
 import os
 import re
 import shutil
 import sqlite3
+import tempfile
 import threading
 import time
 from contextlib import ExitStack, contextmanager
@@ -203,7 +205,8 @@ def books_ok(trip=True, quick=False):
             got = ["ok"] if quick else [r[0] for r in c.execute("PRAGMA quick_check")]
     except sqlite3.Error as e:
         if not db.damaged(e):
-            return _row("books", "warn", f"couldn't check {name}: {e}")
+            return _row("books", "warn", f"couldn't check {name}: {e}. Not damaged: don't restore. "
+                        f"It looks again in 10 minutes.", title="kal warning: books busy")
         got = [str(e)]
     if got == ["ok"]:
         return _row("books", "ok", f"{name} reads fine")
@@ -516,8 +519,34 @@ def _room_for_vacuum(path):
 
 # ---------- disk / clock ----------
 
+def _write_error(path):
+    """None if a new file can be made in `path`, else the OSError. A disk remounted read-only
+    after errors takes nothing: no order record, no heartbeat, no stop."""
+    try:
+        fd, p = tempfile.mkstemp(prefix=".write-check-", dir=path)
+        os.close(fd)
+        os.remove(p)
+        return None
+    except OSError as e:
+        return e
+
+
 def disk_ok(trip=True):
-    """Free space where the books live. Under 200 MB the bot trips; under 1 GB, a warning."""
+    """Free space where the books live. Under 200 MB the bot trips; under 1 GB, a warning.
+    A read-only disk trips too: every run fails before it can stop the bot itself."""
+    err = _write_error(config.home())
+    if err is not None and err.errno == errno.EROFS:
+        reason = (f"The disk is read-only (it had errors), so nothing can be saved and trading "
+                  f"has stopped. The server needs a look: {config.command('health')}")
+        try:
+            tripped = trip and _trip_once(reason)
+        except OSError:
+            tripped = True   # it couldn't be saved; trip() said so (at most once an hour)
+        return _row("disk", "fail", "read-only: nothing can be saved, so trading has stopped",
+                    tripped=tripped)
+    if err is not None:   # a full disk is told below; anything else (who runs this?) is a warning
+        if err.errno != errno.ENOSPC:
+            return _row("disk", "warn", f"can't write to {config.home()} here: {err.strerror or err}")
     free = shutil.disk_usage(config.home()).free // MB
     if free < DISK_TRIP_MB:
         tripped = trip and _trip_once(f"Disk almost full: {free:,} MB free. Free up space, then press Reset.")
@@ -799,7 +828,7 @@ def health(trip=True, client=None):
         if r.get("tripped"):
             _note_sent(key)   # its stop alert just went: no second one about it for a day
         else:
-            _alert(key, f"kal warning: {r['check']}", r["detail"],
+            _alert(key, r.get("title") or f"kal warning: {r['check']}", r["detail"],
                    priority="high" if r["level"] == "fail" else "default")
     try:
         db.put("health", {"ts": time.time(), "checks": rows})

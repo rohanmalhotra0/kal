@@ -314,6 +314,7 @@ To change it (the hour is in UTC): `sudo kal set summary_hour_utc 14`
 | **kal warning: clock** | The server clock is off. Kalshi may refuse orders. | `timedatectl`. If it says not synchronized: `sudo systemctl restart chrony` |
 | **kal warning: trading** | Trade runs keep failing. Kalshi or the internet is down. It keeps trying. | Usually nothing. If it lasts a day: `sudo kal logs` |
 | **kal warning: books** | The books (`kal.db`) are damaged and the bot is stopped. | Put a backup back: see "Restore" below. |
+| **kal warning: books busy** | The books couldn't be read for a moment (locked, or the disk). Not damaged. | Nothing. Don't restore. If it lasts an hour: `sudo kal health` |
 | **kal warning: report** | The status report can't reach GitHub. Usually the token ran out (they last 90 days). | Make a new token: step 10 below. Until then the check-in can't see the bot. |
 | **kal backup failed** | Last night's backup didn't work. | `sudo kal backup` shows why. |
 

@@ -5,8 +5,9 @@
 # turns it on for you.
 #
 # It alerts when: the service isn't running, it is restarting over and over (a crash
-# loop keeps the heartbeat fresh, so we also watch the restart count), or `kal health
-# --alive` fails (e.g. the scheduler loop stopped). At most one alert per kind per day.
+# loop keeps the heartbeat fresh, so we also watch the restart count; kal-update sets the
+# count it starts from after an update), or `kal health --alive` fails (e.g. the
+# scheduler loop stopped). At most one alert per kind per day.
 set -uo pipefail
 
 APP="${APP:-/opt/kal}"
@@ -47,9 +48,17 @@ ntfy_server() {
   printf '%s' "${s:-https://ntfy.sh}"
 }
 
-# One alert per kind per day: remember the day we last sent each kind.
+# One alert per kind per day: remember the day we last sent each kind. In $DATA; when the
+# disk can't take it (read-only after errors), under /run (memory), or it would buzz every
+# 10 minutes.
+RUN_DIR="${KAL_WATCH_RUN:-/run/kal-watch}"
 sent_today() {  # kind
-  [ "$(cat "$DATA/watch_$1" 2>/dev/null)" = "$(date -u +%Y-%m-%d)" ]
+  local today; today=$(date -u +%Y-%m-%d)
+  [ "$(cat "$DATA/watch_$1" 2>/dev/null)" = "$today" ] || [ "$(cat "$RUN_DIR/watch_$1" 2>/dev/null)" = "$today" ]
+}
+mark_sent() {  # kind
+  date -u +%Y-%m-%d > "$DATA/watch_$1" 2>/dev/null && return 0
+  mkdir -p "$RUN_DIR" 2>/dev/null; date -u +%Y-%m-%d > "$RUN_DIR/watch_$1" 2>/dev/null || true
 }
 alert() {  # kind title message
   sent_today "$1" && { say "already alerted '$1' today"; return 0; }
@@ -58,7 +67,7 @@ alert() {  # kind title message
   server=$(ntfy_server)
   # Marked as sent only once it really went out: a failed send is tried again next time.
   if curl -fsS -m 10 -H "Priority: high" -H "Title: $2" -d "$3" "$server/$topic" >/dev/null; then
-    date -u +%Y-%m-%d > "$DATA/watch_$1" 2>/dev/null || true
+    mark_sent "$1"
     say "alerted: $3"
   else
     say "couldn't send the alert, trying again next time: $3"
@@ -75,7 +84,11 @@ twice() {  # cmd... : true if the command fails now, and again a little later
 }
 
 if twice systemctl is-active --quiet kal; then
-  alert down "kal is not running" "The bot is stopped. Start it: sudo systemctl start kal"
+  case "$(systemctl show kal -p SubState --value 2>/dev/null)" in
+    auto-restart*)   # it crashed and waits to start again: starting it won't help
+      alert loop "kal keeps restarting" "The bot is crash-looping. Look: sudo kal logs" ;;
+    *) alert down "kal is not running" "The bot is stopped. Start it: sudo systemctl start kal" ;;
+  esac
   exit 0
 fi
 

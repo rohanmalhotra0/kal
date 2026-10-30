@@ -49,6 +49,8 @@ class WatchSandbox(unittest.TestCase):
         self.curl_fail = os.path.join(self.d, "CURL_FAIL")
         self.nrest = os.path.join(self.d, "nrest")
         self.inv = os.path.join(self.d, "inv")   # InvocationID: a new one at every start
+        self.looping = os.path.join(self.d, "LOOPING")   # crashed, waiting to start again
+        self.run_dir = os.path.join(self.d, "run")       # /run: memory, writable when the disk isn't
         _write(self.nrest, "0\n")
         _write(os.path.join(self.bin, "systemctl"), f"""#!/bin/sh
 if [ "$1" = is-active ]; then
@@ -59,6 +61,7 @@ fi
 if [ "$1 $2 $3" = "show kal -p" ]; then
   case "$4" in
     InvocationID) cat {self.inv} 2>/dev/null || echo a ;;
+    SubState) if [ -e {self.looping} ]; then echo auto-restart; elif [ -e {self.active} ]; then echo running; else echo dead; fi ;;
     *) cat {self.nrest} 2>/dev/null || echo 0 ;;
   esac
   exit 0
@@ -92,7 +95,8 @@ esac
 
     def _run(self):
         env = dict(os.environ, APP=os.path.join(self.d, "app"), VENV=self.venv,
-                   DATA=self.data, ETC=self.etc, PATH=self.bin + ":/usr/bin:/bin", KAL_WATCH_PAUSE="0")
+                   DATA=self.data, ETC=self.etc, PATH=self.bin + ":/usr/bin:/bin", KAL_WATCH_PAUSE="0",
+                   KAL_WATCH_RUN=self.run_dir)
         # cwd: systemd starts it in /, not in the code folder.
         return subprocess.run(["bash", WATCH], env=env, capture_output=True, text=True, cwd=self.d)
 
@@ -108,6 +112,25 @@ esac
         first = _read(self.curl_log)
         self._run()
         self.assertEqual(_read(self.curl_log), first)   # no second buzz the same day
+
+    def test_a_crash_loop_says_it_is_looping_not_start_it(self):
+        # After repeated crashes it waits up to 5 minutes to start again: down on both looks.
+        # "Start it" wouldn't help; the loop alert says to look at the logs.
+        open(self.looping, "w").close()
+        self._run()
+        log = _read(self.curl_log)
+        self.assertIn("kal keeps restarting", log)
+        self.assertNotIn("not running", log)
+
+    def test_a_disk_that_cant_take_the_note_still_alerts_once_a_day(self):
+        # Read-only after errors: the once-a-day note goes to /run instead. Before, every
+        # 10-minute look alerted again (144 a day).
+        open(self.active, "w").close()
+        open(os.path.join(self.data, "health_fail"), "w").close()
+        os.makedirs(os.path.join(self.data, "watch_health"))   # can't be written, even by root
+        for _ in range(3):
+            self._run()
+        self.assertEqual(_read(self.curl_log).count("unhealthy"), 1)
 
     def test_the_first_look_logs_no_error(self):
         # No count saved yet: the journal must not show a "No such file" error for it.
