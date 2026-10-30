@@ -4,7 +4,13 @@ The real script runs in a temp dir with a local bare git "origin", a stub git hi
 and fake systemctl/runuser/curl/python on PATH that log their calls. No root, no network:
 tests pass here and on GitHub Actions. APP/VENV/DATA/ETC and a few knobs are env vars that
 default to the real server paths, so overriding them can't change production behaviour.
+
+The fake systemctl is a small model of systemd 255 (checked against a real systemd 255
+user manager): the bot's state moves on a fake clock that only the fake `sleep` moves, so
+the script runs with its real waits in no time. What the bot does depends on the code it
+started with, as on the server.
 """
+import json
 import os
 import shutil
 import subprocess
@@ -27,13 +33,152 @@ case "$*" in
      chmod +x "$d/bin/python" "$d/bin/pip"
      exit 0 ;;
   *"-m unittest"*)
+     [ -x {hook} ] && {hook}   # something happens while the tests run (a person acts, say)
      [ -e tests/FAIL ] && exit 1
      exit 0 ;;
   *"-m kal health"*)
      if [ -n "$KAL_HOME" ] && [ -e "$KAL_HOME/health_fail" ]; then exit 1; fi
+     grep -q UNHEALTHY {state} 2>/dev/null && exit 1   # the code running now is unhealthy
      exit 0 ;;
   *) exit 0 ;;
 esac
+"""
+
+# systemd 255, for one unit (kal), as kal-update.sh sees it:
+# - every start is a new InvocationID (automatic restarts too);
+# - a start runs the code on disk then; code with CRASH crashes a second after it starts,
+#   EXIT0 exits cleanly (Restart=always starts it again), LATE crashes once, late_after
+#   seconds after its first start, and CHILD's crash leaves a child that takes `cleanup`
+#   seconds to stop. With the file ALL_CRASH, every start crashes (a cause outside the code);
+# - a crash sets Result=exit-code; the bot waits restart_delay seconds ("activating",
+#   SubState auto-restart), then starts again and NRestarts goes up by one;
+# - a start resets Result. A manual (re)start of a running or stopped bot starts NRestarts
+#   from 0; try-restart while it waits to restart after a crash keeps it;
+# - try-restart restarts a running bot, or one waiting to restart; it does nothing to one
+#   that is stopped or being stopped ("deactivating"), as systemd does.
+# A person acts with `person-stop`, `person-restart SECS` (the stop takes SECS),
+# `person-start-at SECS` and `person-restart-at SECS`. A stopped bot keeps its last
+# InvocationID (kal is enabled, so systemd keeps the unit loaded).
+FAKE_SYSTEMCTL = """#!/usr/bin/env python3
+import json, os, sys
+D, APP = {d!r}, {app!r}
+S = os.path.join(D, "sd.json")
+with open(os.path.join(D, "systemctl.log"), "a") as f:
+    f.write(" ".join(sys.argv[1:]) + "\\n")
+with open(S) as f:
+    s = json.load(f)
+
+
+def code():
+    try:
+        with open(os.path.join(APP, "kal", "x.py")) as f:
+            return f.read()
+    except OSError:
+        return ""
+
+
+def at(secs, what):   # from now: the time of the event being applied, else the clock
+    s["events"].append([s.get("t", s["clock"]) + secs, what])
+
+
+def start(kind):   # manual: count from 0; auto: one more; keep: as it is
+    s["inv"] += 1
+    s["result"] = "success"
+    s["nrest"] = {{"manual": 0, "auto": s["nrest"] + 1, "keep": s["nrest"]}}[kind]
+    s["code"] = code()
+    s["state"], s["sub"] = "active", "running"
+    s["events"] = [e for e in s["events"] if e[1] in ("person_start",)]
+    if "LATE" in s["code"] and not s.get("late_done"):
+        s["late_done"] = True
+        at(s["late_after"], "crash")
+    elif "CRASH" in s["code"] or os.path.exists(os.path.join(D, "ALL_CRASH")):
+        at(1, "crash")
+    elif "EXIT0" in s["code"]:
+        at(1, "exit0")
+
+
+def wait_to_restart():
+    s["state"], s["sub"] = "activating", "auto-restart"
+    at(s["restart_delay"], "auto")
+
+
+def apply(what):
+    if what == "crash":
+        s["result"] = "exit-code"
+        if "CHILD" in s["code"]:
+            s["state"], s["sub"] = "deactivating", "stop-sigterm"
+            at(s["cleanup"], "cleaned")
+        else:
+            wait_to_restart()
+    elif what in ("exit0", "cleaned"):
+        wait_to_restart()
+    elif what == "auto":
+        start("auto")
+    elif what == "stopped":
+        s["state"], s["sub"] = "inactive", "dead"
+    elif what == "restarted":
+        start("manual")
+    elif what == "person_start" and s["state"] == "inactive":
+        start("manual")
+    elif what == "person_stop":
+        person_stop(0)
+
+
+def advance():
+    while True:
+        due = sorted(e for e in s["events"] if e[0] <= s["clock"])
+        if not due:
+            s["t"] = s["clock"]
+            return
+        s["events"].remove(due[0])
+        s["t"] = due[0][0]
+        apply(due[0][1])
+
+
+def person_stop(secs):
+    s["events"] = [e for e in s["events"] if e[1] == "person_start"]
+    s["state"], s["sub"] = "deactivating", "stop-sigterm"
+    at(secs, "stopped")
+
+
+a = sys.argv[1:]
+advance()
+out, rc = None, 0
+if a[0] == "sleep":
+    s["clock"] += float(a[1])
+    advance()
+elif a[0] == "is-active":
+    out = s["state"]
+    rc = 0 if out == "active" else 3
+    if "--quiet" in a:
+        out = None
+elif a[0] == "show":
+    out = {{"InvocationID": "inv%d" % s["inv"], "NRestarts": s["nrest"], "SubState": s["sub"],
+           "Result": s["result"], "ActiveState": s["state"]}}[a[a.index("-p") + 1]]
+elif a[0] == "try-restart" and s.get("try_fails", 0) > 0:
+    s["try_fails"] -= 1   # systemctl failed (a D-Bus timeout, say): nothing restarted
+    rc = 1
+elif a[0] == "try-restart":
+    if s["state"] in ("active", "activating"):
+        start("manual" if s["state"] == "active" else "keep")
+        if os.path.exists(os.path.join(D, "STOP_AFTER")):   # a person stops it right after
+            at(1, "person_stop")
+elif a[0] == "person-stop":
+    person_stop(0)
+elif a[0] == "person-restart":
+    person_stop(float(a[1]))
+    s["events"] = [e for e in s["events"] if e[1] != "stopped"]
+    at(float(a[1]), "restarted")
+elif a[0] == "person-start-at":
+    at(float(a[1]), "person_start")
+elif a[0] == "person-restart-at":
+    at(float(a[1]), "restarted")
+advance()
+with open(S, "w") as f:
+    json.dump(s, f)
+if out is not None:
+    print(out)
+sys.exit(rc)
 """
 
 
@@ -71,10 +216,11 @@ class UpdateSandbox(unittest.TestCase):
         self.sysctl_log = os.path.join(self.d, "systemctl.log")
         self.curl_log = os.path.join(self.d, "curl.log")
         self.pip_log = os.path.join(self.d, "pip.log")
-        self.active = os.path.join(self.d, "ACTIVE")
-        self.nrest = os.path.join(self.d, "nrest")
-        self.loop = os.path.join(self.d, "LOOP")
-        _write(self.nrest, "0\n")
+        self.state = os.path.join(self.d, "sd.json")   # the fake systemd's state
+        self.hook = os.path.join(self.d, "hook.sh")      # runs while the update's tests run
+        self.stop_after = os.path.join(self.d, "STOP_AFTER")   # a person stops it right after the restart
+        self.all_crash = os.path.join(self.d, "ALL_CRASH")     # every start crashes (outside cause)
+        self._sd(state="inactive", sub="dead")
         self._stubs()
         self._repo()
 
@@ -91,16 +237,8 @@ class UpdateSandbox(unittest.TestCase):
         return r.stdout.strip()
 
     def _stubs(self):
-        _write(os.path.join(self.bin, "systemctl"), f"""#!/bin/sh
-echo "$*" >> {self.sysctl_log}
-if [ "$1" = is-active ]; then [ -e {self.active} ] && exit 0 || exit 1; fi
-if [ "$1 $2 $3" = "show kal -p" ]; then cat {self.nrest} 2>/dev/null || echo 0; exit 0; fi
-if [ "$1" = try-restart ]; then
-  if [ -e {self.loop} ]; then n=$(cat {self.nrest} 2>/dev/null || echo 0); echo $((n+1)) > {self.nrest}; fi
-  exit 0
-fi
-exit 0
-""", x=True)
+        _write(os.path.join(self.bin, "systemctl"), FAKE_SYSTEMCTL.format(d=self.d, app=self.app), x=True)
+        _write(os.path.join(self.bin, "sleep"), f'#!/bin/sh\nexec {self.bin}/systemctl sleep "$1"\n', x=True)
         _write(os.path.join(self.bin, "runuser"), """#!/bin/sh
 shift 2 2>/dev/null
 [ "$1" = "--" ] && shift
@@ -111,7 +249,7 @@ echo "$*" >> {self.curl_log}
 exit 0
 """, x=True)
         self.fakepy = os.path.join(self.bin, "fakepython")
-        _write(self.fakepy, FAKE_PY, x=True)
+        _write(self.fakepy, FAKE_PY.format(hook=self.hook, state=self.state), x=True)
         os.makedirs(os.path.join(self.venv, "bin"))
         shutil.copy(self.fakepy, os.path.join(self.venv, "bin", "python"))
         _write(os.path.join(self.venv, "bin", "pip"), f"""#!/bin/sh
@@ -138,15 +276,15 @@ exit 0
 
     def _env(self):
         return dict(APP=self.app, VENV=self.venv, DATA=self.data, ETC=self.etc,
-                    STAGE_USER="nobody", STAGE_PYTHON=self.fakepy, KAL_UPDATE_WAIT="0",
-                    PATH=self.bin + ":/usr/bin:/bin")
+                    STAGE_USER="nobody", STAGE_PYTHON=self.fakepy,
+                    PATH=self.bin + ":/usr/bin:/bin")   # real waits: only the fake clock moves
 
     def _run(self):
         return subprocess.run(["bash", UPDATE], env=dict(os.environ, **self._env()),
                               capture_output=True, text=True)
 
-    def _push_code(self, email="noreply@github.com", name="GitHub", fail=False):
-        _write(os.path.join(self.work, "kal", "x.py"), "x = 2\n")
+    def _push_code(self, email="noreply@github.com", name="GitHub", fail=False, code="x = 2"):
+        _write(os.path.join(self.work, "kal", "x.py"), code + "\n")
         if fail:
             _write(os.path.join(self.work, "tests", "FAIL"), "1\n")
         self._git(self.work, "add", "-A")
@@ -173,8 +311,32 @@ exit 0
     def _head(self):
         return self._git(self.app, "rev-parse", "HEAD")
 
-    def _active(self):
-        open(self.active, "w").close()
+    def _sd(self, **kw):
+        """Set the fake systemd's state (it starts a stopped bot on the clock's 0)."""
+        try:
+            with open(self.state) as f:
+                sd = json.load(f)
+        except OSError:
+            sd = dict(clock=0, state="inactive", sub="dead", result="success", inv=1, nrest=0,
+                      code="", events=[], restart_delay=5, late_after=30, cleanup=10)
+        sd.update(kw)
+        with open(self.state, "w") as f:
+            json.dump(sd, f)
+
+    def _sd_now(self):
+        with open(self.state) as f:
+            return json.load(f)
+
+    def _active(self, **kw):
+        """The old version runs."""
+        self._sd(state="active", sub="running", code=_read(os.path.join(self.app, "kal", "x.py")), **kw)
+
+    def _during_tests(self, *commands):
+        """Run these fake-systemctl commands (a person acting, say) while the update tests."""
+        _write(self.hook, "#!/bin/sh\n" + "".join(f"{self.bin}/systemctl {c}\n" for c in commands), x=True)
+
+    def _blamed(self):
+        return os.path.exists(os.path.join(self.data, "update_failed"))
 
     def _refused(self, before):
         r = self._run()
@@ -426,9 +588,8 @@ exit 0
 
     def test_unhealthy_after_restart_rolls_back_code_and_packages(self):
         self._active()
-        open(os.path.join(self.data, "health_fail"), "w").close()
         before = self._head()
-        self._push_code()
+        self._push_code(code="x = 'UNHEALTHY'")
         r = self._run()
         self.assertEqual(r.returncode, 1)
         self.assertEqual(self._head(), before)               # rolled back (finding 2)
@@ -438,16 +599,244 @@ exit 0
         self.assertIn("freeze-before.txt", _read(self.pip_log))  # exact old versions (finding 4)
         self.assertEqual(_read(os.path.join(self.data, "update_failed")).strip(),   # not retried daily
                          self._git(self.app, "rev-parse", "origin/main"))
+        self.assertEqual(self._sd_now()["code"], "x = 1\n")   # the old version runs again
 
     def test_restart_loop_rolls_back(self):
         self._active()
-        open(self.loop, "w").close()   # NRestarts climbs on restart
+        before = self._head()
+        self._push_code(code="x = 'CRASH'")
+        r = self._run()
+        self.assertEqual(r.returncode, 1)
+        self.assertEqual(self._head(), before)
+        self.assertIn("rolled back", _read(self.curl_log))
+        self.assertIn("crashed", _read(self.curl_log))
+        self.assertTrue(self._blamed())                      # the old version runs fine: to blame
+        self.assertEqual(self._sd_now()["state"], "active")
+
+    def test_a_crash_after_earlier_crashes_still_rolls_back(self):
+        # Two crashes since the last manual start, then the new version crashes: the update's
+        # restart started the count from 0, so it can read fewer than the 2 before it.
+        self._active(nrest=2)
+        before = self._head()
+        self._push_code(code="x = 'CRASH'")
+        r = self._run()
+        self.assertEqual(r.returncode, 1)
+        self.assertEqual(self._head(), before)
+        self.assertIn("rolled back", _read(self.curl_log))
+
+    # One test per sign of a crash: each is the only one showing when the check looks.
+    def test_a_crash_seen_only_as_a_rise_in_restarts_rolls_back(self):
+        # It crashed once during the check and runs again: only NRestarts shows it.
+        self._active()
+        self._sd(late_after=60)
+        self._push_code(code="x = 'LATE'")
+        r = self._run()
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("The new version crashed.", _read(self.curl_log))
+
+    def test_a_crash_seen_only_as_waiting_to_restart_rolls_back(self):
+        # It exits cleanly (Result stays success) and waits to be started again.
+        self._active()
+        self._sd(restart_delay=300)
+        self._push_code(code="x = 'EXIT0'")
+        r = self._run()
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("The new version crashed.", _read(self.curl_log))
+
+    def test_a_crash_still_cleaning_up_when_checked_rolls_back(self):
+        # Crashed near the end of the check; a child still stops ("deactivating"), and the
+        # count hasn't moved: only Result shows it. Before, this read as a person's stop.
+        self._active()
+        self._sd(late_after=118, cleanup=30)
+        self._push_code(code="x = 'LATE CHILD'")
+        r = self._run()
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("The new version crashed.", _read(self.curl_log))
+
+    def test_a_restart_while_it_waited_to_restart_is_not_a_crash(self):
+        # systemd keeps the count when the update's restart lands while the old version waits
+        # to restart after a crash. A healthy new version must not be rolled back for it.
+        self._sd(state="activating", sub="auto-restart", result="exit-code", nrest=3,
+                 events=[[300, "auto"]])
+        self._push_code()
+        r = self._run()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("try-restart kal", _read(self.sysctl_log))   # checked, not "left stopped"
+        self.assertIn("kal updated", _read(self.curl_log))
+
+    def test_a_crash_looping_bot_still_gets_the_check(self):
+        # It reads "activating" while it waits to restart: before, the new code went live
+        # unchecked ("left it stopped"). Every start crashes (a port taken, say), the old
+        # version's too after the rollback: so the new one isn't blamed, it is tried again.
+        open(self.all_crash, "w").close()
+        self._sd(state="activating", sub="auto-restart", result="exit-code", nrest=4,
+                 events=[[300, "auto"]])
         before = self._head()
         self._push_code()
         r = self._run()
         self.assertEqual(r.returncode, 1)
         self.assertEqual(self._head(), before)
-        self.assertIn("rolled back", _read(self.curl_log))
+        self.assertIn("The old version fails too", _read(self.curl_log))
+        self.assertFalse(self._blamed())
+
+    def test_a_cause_that_begins_during_the_update_doesnt_blame_the_new_version(self):
+        # Healthy when the update starts; then every fresh start crashes (a kal.env edit not
+        # yet restarted, say). The rollback shows the old version fails too.
+        self._active()
+        _write(self.hook, f"#!/bin/sh\ntouch {self.all_crash}\n", x=True)
+        self._push_code()
+        r = self._run()
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("The old version fails too", _read(self.curl_log))
+        self.assertFalse(self._blamed())
+
+    def test_a_check_failing_on_the_old_version_after_the_rollback_too_doesnt_blame(self):
+        self._active()
+        _write(self.hook, f"#!/bin/sh\ntouch {self.data}/health_fail\n", x=True)
+        self._push_code()
+        r = self._run()
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("wasn't healthy. The old version fails too", _read(self.curl_log))
+        self.assertFalse(self._blamed())
+
+    def test_a_check_that_failed_before_the_update_never_rolls_it_back(self):
+        # Damaged books (say) fail the check before and after: not the new version's fault.
+        self._active()
+        open(os.path.join(self.data, "health_fail"), "w").close()
+        self._push_code()
+        r = self._run()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("kal updated", _read(self.curl_log))
+
+    def test_a_person_stopping_it_during_the_check_is_no_verdict(self):
+        # Stopped (not crashed) during the check: the new code stays, unchecked, not blamed.
+        self._active()
+        open(self.stop_after, "w").close()
+        self._push_code()
+        r = self._run()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(self._head(), self._git(self.app, "rev-parse", "origin/main"))
+        self.assertIn("stopped during the update", _read(self.curl_log))
+        self.assertFalse(self._blamed())
+
+    def test_a_person_stopping_it_during_the_tests_is_no_verdict(self):
+        self._active()
+        self._during_tests("person-stop")
+        self._push_code()
+        r = self._run()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("stopped during the update", _read(self.curl_log))
+        self.assertEqual(self._sd_now()["state"], "inactive")   # left stopped
+        self.assertFalse(self._blamed())
+
+    def test_a_bot_being_stopped_when_the_update_starts_still_gets_the_check(self):
+        self._sd(state="deactivating", sub="stop-sigterm", events=[[20, "restarted"]])
+        self._push_code()
+        r = self._run()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("try-restart kal", _read(self.sysctl_log))
+        self.assertIn("kal updated", _read(self.curl_log))
+
+    def test_a_restart_by_a_person_under_way_is_waited_for_then_checked(self):
+        # A person ran `systemctl restart kal` during the tests, and a trade run makes the stop
+        # take 200 seconds: longer than the update's wait for the bot to be up and its check. try-restart does nothing to a bot being stopped, and the person's
+        # restart then starts the new code: it must still be checked (a bad one rolled back).
+        self._active()
+        self._during_tests("person-restart 200")
+        before = self._head()
+        self._push_code(code="x = 'CRASH'")
+        r = self._run()
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertEqual(self._head(), before)
+        self.assertIn("The new version crashed.", _read(self.curl_log))
+        self.assertTrue(self._blamed())
+
+    def test_a_restart_that_didnt_happen_rolls_back_without_blame(self):
+        # systemctl failed: the old code still runs, and the new one would go live unchecked
+        # at the next start. Back to the old code; tried again tomorrow.
+        self._active(try_fails=2)
+        before = self._head()
+        self._push_code()
+        r = self._run()
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertEqual(self._head(), before)
+        self.assertIn("didn't restart", _read(self.curl_log))
+        self.assertFalse(self._blamed())
+
+    def test_a_restart_by_a_person_during_the_check_is_judged(self):
+        # The update's restart failed, then a person restarted it during the check: the new
+        # code runs, so it gets the verdict.
+        self._active(try_fails=2)
+        self._during_tests("person-restart-at 90")
+        before = self._head()
+        self._push_code(code="x = 'CRASH'")
+        r = self._run()
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertEqual(self._head(), before)
+        self.assertIn("The new version crashed.", _read(self.curl_log))
+        self.assertTrue(self._blamed())
+
+    def test_a_start_by_a_person_during_the_check_is_judged(self):
+        # Stopped by a person during the tests, so the update's restart does nothing, then
+        # started by them during the check: the new code runs, so it gets the verdict.
+        self._active()
+        self._during_tests("person-stop", "person-start-at 100")
+        before = self._head()
+        self._push_code(code="x = 'CRASH'")
+        r = self._run()
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertEqual(self._head(), before)
+        self.assertIn("The new version crashed.", _read(self.curl_log))
+
+    def test_a_version_failing_again_with_the_old_one_failing_too_is_blamed(self):
+        # A release that broke the bot's data makes the old version fail too: one more try,
+        # then it is blamed.
+        self._active()
+        _write(self.hook, f"#!/bin/sh\ntouch {self.all_crash}\n", x=True)
+        self._push_code()
+        self.assertEqual(self._run().returncode, 1)
+        self.assertFalse(self._blamed())                    # first time: tried again
+        self.assertIn("tries again tomorrow", _read(self.curl_log))
+        r = self._run()                                      # the next day, same version
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertTrue(self._blamed())
+        self.assertIn("isn't tried again", _read(self.curl_log))
+
+    def test_a_version_tried_again_that_works_is_kept(self):
+        self._active()
+        _write(self.hook, f"#!/bin/sh\ntouch {self.all_crash}\n", x=True)
+        self._push_code()
+        self.assertEqual(self._run().returncode, 1)
+        os.remove(self.hook)
+        os.remove(self.all_crash)                           # the outside cause is fixed
+        r = self._run()
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertIn("kal updated", _read(self.curl_log))
+        self.assertFalse(os.path.exists(os.path.join(self.data, "update_retry")))
+
+    def test_the_update_never_makes_the_research_lock_itself(self):
+        # Made by root, research (as kal) couldn't open it again: if the kal user can't make
+        # it, the restart goes ahead without it.
+        _write(os.path.join(self.bin, "runuser"), """#!/bin/sh
+shift 2 2>/dev/null
+[ "$1" = "--" ] && shift
+[ "$1" = touch ] && exit 1
+exec "$@"
+""", x=True)
+        self._active()
+        self._push_code()
+        r = self._run()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("try-restart kal", _read(self.sysctl_log))
+        self.assertFalse(os.path.exists(os.path.join(self.data, ".research.lock")))
+
+    def test_earlier_crashes_alone_never_roll_back(self):
+        self._active(nrest=2)
+        self._push_code()
+        r = self._run()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("kal updated", _read(self.curl_log))
+        self.assertNotIn(".  http", _read(self.curl_log))   # no stray space after the message
 
     def test_a_long_research_run_delays_the_restart_but_never_skips_it(self):
         import fcntl

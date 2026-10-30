@@ -24,6 +24,8 @@ KAL_USER="${KAL_USER:-kal}"          # the service user; health runs as them
 STAGE_USER="${STAGE_USER:-$(id kal-stage >/dev/null 2>&1 && echo kal-stage || echo nobody)}"
 STAGE_PYTHON="${STAGE_PYTHON:-python3}"
 WAIT="${KAL_UPDATE_WAIT:-120}"       # seconds to let the bot settle before the health check
+UP_WAIT="${KAL_UPDATE_UP_WAIT:-60}"  # longest wait for the new version to be up after the restart
+STOP_WAIT="${KAL_UPDATE_STOP_WAIT:-360}"  # longest wait for a stop under way (TimeoutStopSec=330)
 RESEARCH_LOCK="$DATA/.research.lock" # the file kal/research holds while a research run works
 RESEARCH_WAIT="${KAL_RESEARCH_WAIT:-3600}"  # longest wait for that run before restarting anyway
 
@@ -73,6 +75,7 @@ after=$(git rev-parse origin/main)
 [ "$before" = "$after" ] && { say "already up to date (${before:0:7})"; exit 0; }
 
 failed="$DATA/update_failed"   # the version whose tests failed: try it once, alert once
+retry="$DATA/update_retry"     # a version that failed while the old one failed too: one more try
 if [ "$(cat "$failed" 2>/dev/null)" = "$after" ]; then
   say "skipping ${after:0:7}: its tests failed before"
   exit 0
@@ -141,8 +144,21 @@ if git diff --quiet "$before" "$after" -- . ':(exclude)docs'; then
   exit 1
 fi
 
-was_active=0
-systemctl is-active --quiet kal && was_active=1
+health_ok() {  # the same check the /usr/local/bin/kal wrapper uses, run as the kal user
+  runuser -u "$KAL_USER" -- env KAL_HOME="$DATA" "$VENV/bin/python" -m kal health --alive >/dev/null 2>&1
+}
+
+# A bot waiting to restart after a crash reads "activating", and one being stopped or
+# restarted "deactivating". It may run the new code within minutes, so it gets the restart
+# and the check.
+was_active=0 note=""
+case "$(systemctl is-active kal 2>/dev/null)" in
+  active|reloading|deactivating|activating) was_active=1 ;;
+esac
+# Read now, on the old code: a check that already fails (damaged books, say) is not the new
+# version's fault, so only a check that passes now and fails after the update rolls it back.
+ok_before=0
+[ "$was_active" = 1 ] && health_ok && ok_before=1
 
 # Build and test the NEW code in a throwaway copy, as a locked-down user with its own venv.
 # This never touches the live venv or the live code, and the tests can't read DATA or ETC.
@@ -191,41 +207,112 @@ fi
 chmod -R a+rX "$APP"
 chmod -R go-w "$APP" "$VENV"
 
-health_ok() {  # the same check the /usr/local/bin/kal wrapper uses, run as the kal user
-  runuser -u "$KAL_USER" -- env KAL_HOME="$DATA" "$VENV/bin/python" -m kal health --alive >/dev/null 2>&1
+inv() { systemctl show kal -p InvocationID --value 2>/dev/null || true; }   # new at every start
+# try-restart does nothing to a bot that is being stopped or restarted (by a person, say). Let
+# that finish first: a restart under way would start the new code later, with no check.
+settle() {
+  for _ in $(seq "$STOP_WAIT"); do
+    [ "$(systemctl is-active kal 2>/dev/null)" = deactivating ] || return 0
+    sleep 1
+  done
 }
 restart() {
   # Wait (up to an hour) for a research run to finish, so the restart doesn't kill it. The
   # lock file must belong to the kal user: research opens it to write, and couldn't if root
   # made it. Still running after an hour: restart anyway, research retries after a restart.
   [ -e "$RESEARCH_LOCK" ] || runuser -u "$KAL_USER" -- touch "$RESEARCH_LOCK" 2>/dev/null
-  flock -w "$RESEARCH_WAIT" "$RESEARCH_LOCK" systemctl try-restart kal || systemctl try-restart kal
+  # (9< never creates the file: one made by root here would lock research out for good.)
+  ( flock -w "$RESEARCH_WAIT" 9; settle; systemctl try-restart kal ) 9<"$RESEARCH_LOCK" \
+    || { settle; systemctl try-restart kal; }
 }
-roll_back() {
+# After restart(): wait (up to UP_WAIT) for the bot to be up, let it run WAIT seconds, then
+# set `seen`: "same" if it still runs as InvocationID $1 (the restart didn't happen), "crashed"
+# if it crashed since it came up, "up" if it runs, else "stopped" (by a person). A stopped
+# bot keeps its last InvocationID: kal is enabled, so systemd keeps the unit loaded.
+# A crash shows one of three ways, depending on when we look: NRestarts rose (it crashed and
+# started again), SubState auto-restart (it waits to start again: after repeated crashes,
+# up to 5 minutes), or Result not success (it is still cleaning up). A start resets Result,
+# and NRestarts is read once it is up: a restart of a running bot starts the count from 0,
+# one that lands while it waits to restart after a crash doesn't (systemd 255).
+look() {  # inv0
+  local inv1 nbase sub result
+  for _ in $(seq "$UP_WAIT"); do systemctl is-active --quiet kal && break; sleep 1; done
+  inv1=$(inv)
+  nbase=$(systemctl show kal -p NRestarts --value 2>/dev/null || echo 0)
+  [ "$WAIT" -gt 0 ] 2>/dev/null && sleep "$WAIT"
+  sub=$(systemctl show kal -p SubState --value 2>/dev/null || true)
+  result=$(systemctl show kal -p Result --value 2>/dev/null || true)
+  if [ -n "$1" ] && [ "$inv1" = "$1" ] && [ "$(inv)" = "$1" ]; then
+    case "$(systemctl is-active kal 2>/dev/null)" in
+      inactive|failed|deactivating) seen=stopped ;;   # a person stopped it: the new code never ran
+      *) seen=same ;;                                   # it still runs the old code
+    esac
+  elif [ "$(systemctl show kal -p NRestarts --value 2>/dev/null || echo 0)" -gt "$nbase" ] 2>/dev/null \
+      || [ "${sub#auto-restart}" != "$sub" ] || { [ -n "$result" ] && [ "$result" != success ]; }; then
+    seen=crashed
+  elif systemctl is-active --quiet kal; then
+    seen=up
+  else
+    seen=stopped
+  fi
+}
+roll_back() {  # why ; "blame": the new version failed (don't try it again, unless the old fails too)
+  local why=$1 blame=${2:-} inv0
   git reset --quiet --hard "$before"
   "$VENV/bin/pip" install --quiet -r requirements.txt
   [ -s "$freeze" ] && "$VENV/bin/pip" install --quiet -r "$freeze"   # exact old versions
   chmod -R a+rX "$APP"
   chmod -R go-w "$APP" "$VENV"
-  [ "$was_active" = 1 ] && restart
-  echo "$after" > "$failed"   # don't try the same version again tomorrow
-  alert high "kal update rolled back" "The new version wasn't healthy. Back on ${before:0:7}."
-  say "rolled back ${after:0:7} -> ${before:0:7}"
+  if [ "$was_active" = 1 ]; then
+    inv0=$(inv)
+    restart
+    if [ -n "$blame" ]; then
+      # A cause outside the code breaks every fresh start (a kal.env edit not yet restarted,
+      # a crash loop that began before or during the update): then the old version fails
+      # the same way now, and the new one isn't to blame.
+      # A version that broke the bot's data would make the old one fail too: it gets one more
+      # try, and is blamed if it fails again.
+      look "$inv0"
+      if [ "$seen" = crashed ] || { [ "$seen" = up ] && [ "$ok_before" = 1 ] && ! health_ok; }; then
+        if [ "$(cat "$retry" 2>/dev/null)" = "$after" ]; then
+          why="$why The old version fails too, but this version failed last time as well, so it isn't tried again. Look: sudo kal logs."
+        else
+          echo "$after" > "$retry"
+          why="$why The old version fails too, so the update isn't to blame: it tries again tomorrow. Look: sudo kal logs."
+          blame=""
+        fi
+      fi
+    fi
+  fi
+  [ -n "$blame" ] && echo "$after" > "$failed"   # don't try the same version again tomorrow
+  alert high "kal update rolled back" "$why Back on ${before:0:7}."
+  say "rolled back ${after:0:7} -> ${before:0:7}: $why"
 }
 
 if [ "$was_active" = 1 ]; then
-  nbefore=$(systemctl show kal -p NRestarts --value 2>/dev/null || echo 0)
+  inv0=$(inv)
   restart
-  [ "$WAIT" -gt 0 ] 2>/dev/null && sleep "$WAIT"
-  nafter=$(systemctl show kal -p NRestarts --value 2>/dev/null || echo 0)
-  if ! health_ok || { [ "$nafter" -gt "$nbefore" ] 2>/dev/null; }; then
-    roll_back
-    exit 1
-  fi
+  look "$inv0"
+  case "$seen" in
+    same)      # it still runs the old code: the new code would go live unchecked at its next start
+      roll_back "The bot didn't restart, so the new code couldn't be checked. It tries again tomorrow."
+      exit 1 ;;
+    crashed)
+      roll_back "The new version crashed." blame
+      exit 1 ;;
+    stopped)   # stopped by a person during the update: no verdict either way
+      note="It was stopped during the update, so the new code wasn't checked."
+      say "the bot was stopped during the update; kept the new code, unchecked" ;;
+    up)
+      if [ "$ok_before" = 1 ] && ! health_ok; then
+        roll_back "The new version wasn't healthy." blame
+        exit 1
+      fi ;;
+  esac
 else
   say "the bot was stopped; updated the code and left it stopped"
 fi
 
-rm -f "$failed"
+rm -f "$failed" "$retry"
 say "updated ${before:0:7} -> ${after:0:7}"
-alert low "kal updated" "Now running $(git log -1 --format='%h %s')."
+alert low "kal updated" "Now on $(git log -1 --format='%h %s').${note:+ $note}"

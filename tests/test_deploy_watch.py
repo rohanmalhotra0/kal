@@ -48,6 +48,7 @@ class WatchSandbox(unittest.TestCase):
         self.coming = os.path.join(self.d, "COMING")      # a restart in progress: up by the next look
         self.curl_fail = os.path.join(self.d, "CURL_FAIL")
         self.nrest = os.path.join(self.d, "nrest")
+        self.inv = os.path.join(self.d, "inv")   # InvocationID: a new one at every start
         _write(self.nrest, "0\n")
         _write(os.path.join(self.bin, "systemctl"), f"""#!/bin/sh
 if [ "$1" = is-active ]; then
@@ -55,7 +56,13 @@ if [ "$1" = is-active ]; then
   [ -e {self.coming} ] && touch {self.active}
   exit 1
 fi
-if [ "$1 $2 $3" = "show kal -p" ]; then cat {self.nrest} 2>/dev/null || echo 0; exit 0; fi
+if [ "$1 $2 $3" = "show kal -p" ]; then
+  case "$4" in
+    InvocationID) cat {self.inv} 2>/dev/null || echo a ;;
+    *) cat {self.nrest} 2>/dev/null || echo 0 ;;
+  esac
+  exit 0
+fi
 exit 0
 """, x=True)
         _write(os.path.join(self.bin, "runuser"), """#!/bin/sh
@@ -102,12 +109,54 @@ esac
         self._run()
         self.assertEqual(_read(self.curl_log), first)   # no second buzz the same day
 
+    def test_the_first_look_logs_no_error(self):
+        # No count saved yet: the journal must not show a "No such file" error for it.
+        open(self.active, "w").close()
+        r = self._run()
+        self.assertEqual(r.stderr, "")
+        self.assertTrue(os.path.exists(os.path.join(self.data, "watch_nrestarts")))
+
     def test_crash_loop_alerts(self):
         open(self.active, "w").close()
         _write(self.nrest, "5\n")
         _write(os.path.join(self.data, "watch_nrestarts"), "2\n")
         self._run()
         self.assertIn("crash-looping", _read(self.curl_log))
+
+    def test_a_crash_after_a_manual_restart_alerts_too(self):
+        # A manual restart starts the count from 0: one crash since reads 1, below the 2 seen.
+        open(self.active, "w").close()
+        _write(self.nrest, "1\n")
+        _write(os.path.join(self.data, "watch_nrestarts"), "2\n")
+        self._run()
+        self.assertIn("crash-looping", _read(self.curl_log))
+
+    def test_one_crash_after_a_reset_back_to_the_same_count_alerts(self):
+        # The count was 1, a manual restart (or an update) set it to 0, and one crash brought
+        # it back to 1: the same number, but the bot started again (a new InvocationID).
+        open(self.active, "w").close()
+        _write(self.nrest, "1\n")
+        _write(self.inv, "b\n")
+        _write(os.path.join(self.data, "watch_nrestarts"), "1 a\n")
+        self._run()
+        self.assertIn("crash-looping", _read(self.curl_log))
+
+    def test_a_restart_with_no_crash_is_quiet(self):
+        open(self.active, "w").close()
+        _write(self.nrest, "0\n")
+        _write(self.inv, "b\n")
+        _write(os.path.join(self.data, "watch_nrestarts"), "2 a\n")
+        self._run()
+        self.assertEqual(_read(self.curl_log), "")
+
+    def test_a_manual_restart_alone_or_old_crashes_are_quiet(self):
+        open(self.active, "w").close()
+        for now, seen in (("0", "2"), ("2", "2")):
+            with self.subTest(now=now, seen=seen):
+                _write(self.nrest, now + "\n")
+                _write(os.path.join(self.data, "watch_nrestarts"), seen + "\n")
+                self._run()
+                self.assertEqual(_read(self.curl_log), "")
 
     def test_unhealthy_but_running_alerts(self):
         open(self.active, "w").close()

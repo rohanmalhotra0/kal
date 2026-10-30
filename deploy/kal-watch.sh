@@ -79,11 +79,14 @@ if twice systemctl is-active --quiet kal; then
   exit 0
 fi
 
-# A crash loop: the restart count climbs between two checks.
+# A crash loop: automatic restarts since the last check. The count isn't 0, and it moved or
+# the bot started again since (InvocationID changes at every start). A manual restart starts
+# the count from 0, so a crash after one can read the same as, or lower than, before.
 nown=$(systemctl show kal -p NRestarts --value 2>/dev/null || echo 0)
-prev=$(cat "$DATA/watch_nrestarts" 2>/dev/null || echo "$nown")
-echo "$nown" > "$DATA/watch_nrestarts" 2>/dev/null || true
-if [ "$nown" -gt "$prev" ] 2>/dev/null; then
+inv=$(systemctl show kal -p InvocationID --value 2>/dev/null || true)
+read -r prev pinv 2>/dev/null < "$DATA/watch_nrestarts" || { prev=$nown; pinv=$inv; }
+echo "$nown ${inv:-}" > "$DATA/watch_nrestarts" 2>/dev/null || true
+if [ "$nown" -gt 0 ] 2>/dev/null && { [ "$nown" != "$prev" ] || [ "${inv:-}" != "${pinv:-${inv:-}}" ]; }; then
   alert loop "kal keeps restarting" "The bot is crash-looping. Look: sudo kal logs"
   exit 0
 fi
