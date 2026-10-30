@@ -2,6 +2,31 @@
 
 Newest first. Each 2-hour check-in adds one entry: what it checked, what it found, links.
 
+## 2026-10-30 02:00 UTC — Kalshi API changes: three fixes merged, one in review
+
+Checked Kalshi's live docs and API for changes the bot hadn't caught up with. Found three, each
+a real way to fail:
+
+- Merged [PR #40](https://github.com/rohanmalhotra0/kal/pull/40): Kalshi now makes **Ed25519**
+  API keys by default. kal signed only with RSA, so a key made with Kalshi's defaults crashed
+  every signed request and setup could never finish. Now both key types work.
+- Merged [PR #42](https://github.com/rohanmalhotra0/kal/pull/42): Kalshi moves done orders to a
+  historical store after about 15 days, and fills and settled markets after about 2 months.
+  After a long outage the bot could book a filled order "never placed" (a loss left out of the
+  $300 count). It now reads both stores. An independent review found nothing blocking; its 4
+  fixes went in.
+- Merged [PR #41](https://github.com/rohanmalhotra0/kal/pull/41): Kalshi deprecated `side`,
+  `action` and `taker_side` (removable since May 2026). Without them the bot would stop at its
+  first settlement, and the order-flow guard would pass every bet. It now reads `outcome_side`.
+  The independent review found one blocking hole, fixed before the merge: after a restore, an
+  owner's sale could have been booked as a payout.
+- In review, [PR #43](https://github.com/rohanmalhotra0/kal/pull/43): every order now carries a
+  mark Kalshi keeps for good, so if the server's disk is lost, the bot finds its orders again
+  and the $300 limit still counts their losses.
+- Also fixed: a test that failed every UTC morning (time-of-day fixture).
+- Still waiting on the server: no status report yet. Owner: update with
+  `cd /opt/kal && sudo git pull && sudo bash deploy/install.sh`, then `sudo kal doctor`.
+
 ## 2026-10-30 00:50 UTC — check-in: gold and silver links merged; paper books a set together
 
 - Merged [PR #38](https://github.com/rohanmalhotra0/kal/pull/38): `metal_link_arb` (gold and
