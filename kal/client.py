@@ -201,7 +201,8 @@ class Kalshi:
     def markets_by_ticker(self, tickers):
         """{ticker: market}. Batches with tickers=, then fetches any it missed one by one:
         the real API returned nothing for some tickers in a batch, and a position we can't
-        see would never settle in the ledger."""
+        see would never settle in the ledger. Last, Kalshi's historical store, where markets
+        settled before its cutoff (about 2 months back in Oct 2026) can move."""
         out = {}
         tickers = list(dict.fromkeys(tickers))
         for i in range(0, len(tickers), 100):
@@ -211,17 +212,33 @@ class Kalshi:
             except KalshiError:
                 pass
         for t in tickers:
-            if t not in out:
+            for archive in (False, True):
+                if t in out:
+                    break
                 try:
-                    m = self.market(t)
+                    m = self.market(t, archive=True) if archive else self.market(t)
                 except KalshiError:
                     continue
                 if m:
                     out[t] = m
         return out
 
-    def market(self, ticker):
-        return self.get(f"/markets/{ticker}").get("market", {})
+    def market(self, ticker, archive=False):
+        return self.get(f"/historical/markets/{ticker}" if archive else f"/markets/{ticker}").get("market", {})
+
+    def cutoff(self):
+        """When Kalshi's historical store starts, per kind of record, as unix times: e.g.
+        {"trades_created_ts": ..., "orders_updated_ts": ..., "market_settled_ts": ...}.
+        Fills before trades_created_ts, and orders done before orders_updated_ts, are only in
+        /historical (about 2 months and 15 days back in Oct 2026). A field it can't read is left
+        out, so callers read the store too."""
+        out = {}
+        for k, v in self.get("/historical/cutoff").items():
+            try:
+                out[k] = ts(v)
+            except (AttributeError, TypeError, ValueError):
+                pass
+        return out
 
     def events(self, limit=None, **params):
         return self.paginate("/events", "events", {"limit": 200, **params}, limit)
@@ -295,21 +312,25 @@ class Kalshi:
         params = {"limit": 1000, **({"min_ts": int(min_ts)} if min_ts else {})}
         return self.paginate("/portfolio/settlements", "settlements", params, strict=True)
 
-    def fills(self, min_ts=None, ticker=None):
+    def fills(self, min_ts=None, ticker=None, archive=False):
+        """The account's fills. archive: from Kalshi's historical store instead, where fills
+        older than its cutoff move. every_fill() reads both."""
         params = {"limit": 1000}
         if min_ts:
             params["min_ts"] = int(min_ts)
         if ticker:
             params["ticker"] = ticker
-        return self.paginate("/portfolio/fills", "fills", params, strict=True)
+        return self.paginate("/historical/fills" if archive else "/portfolio/fills", "fills", params, strict=True)
 
-    def orders(self, ticker=None, min_ts=None):
+    def orders(self, ticker=None, min_ts=None, archive=False):
+        """The account's orders. archive: from Kalshi's historical store instead, where
+        orders done (filled or cancelled) before its cutoff move. every_order() reads both."""
         params = {"limit": 1000}
         if ticker:
             params["ticker"] = ticker
         if min_ts:
             params["min_ts"] = int(min_ts)
-        return self.paginate("/portfolio/orders", "orders", params, strict=True)
+        return self.paginate("/historical/orders" if archive else "/portfolio/orders", "orders", params, strict=True)
 
     def cancel(self, order_id):
         r = self._req("DELETE", f"/portfolio/events/orders/{order_id}")
@@ -336,6 +357,64 @@ class Kalshi:
             raise KalshiError(f"Order failed ({r.status_code}): {r.text[:300]}", r.status_code)
         d = r.json() if r.text else {}
         return d.get("order", d) if isinstance(d, dict) else {}
+
+
+# ---------- account history: live list plus Kalshi's historical store ----------
+
+def _archived_since(client, field, since):
+    """True if Kalshi may have moved records from `since` on (None: from the start) to its
+    historical store. Asked after the live list is read: records only move from live to the
+    store, and the cutoff only moves forward, so a cutoff at or before `since` now was one
+    then too. Can't read it: True, so the store gets read as well."""
+    if since is None:
+        return True
+    try:
+        cut = client.cutoff().get(field)
+    except Exception:
+        return True
+    return cut is None or cut > since
+
+
+def _merged(live, stored, ids):
+    """live + whatever of stored isn't already there. A record can show up in both while
+    Kalshi moves it: any id the two copies share makes it one record. Counting a fill twice
+    is never safe (the owner's buy-back counted twice would hide their sale)."""
+    seen = {i for r in live for i in ids(r)}
+    return live + [r for r in stored if not seen & set(ids(r))]
+
+
+def _fill_ids(f):
+    out = [("fill", f["fill_id"])] if f.get("fill_id") else []
+    if f.get("trade_id"):
+        out.append(("trade", f["trade_id"], f.get("order_id")))   # a self-trade is two fills, one trade
+    return out or [("raw", repr(sorted(f.items())))]
+
+
+def _order_ids(o):
+    out = [("order", o["order_id"])] if o.get("order_id") else []
+    if o.get("client_order_id"):
+        out.append(("client", o["client_order_id"]))   # unique per account: Kalshi won't reuse one
+    return out or [("raw", repr(sorted(o.items())))]
+
+
+def every_fill(client, min_ts=None, ticker=None):
+    """The account's fills from min_ts on (None: all of them), each once: the live list,
+    plus Kalshi's historical store when some may have moved there (fills older than about 2
+    months, Oct 2026). Reading only the live list would miss those."""
+    live = list(client.fills(min_ts=min_ts, ticker=ticker))
+    if not _archived_since(client, "trades_created_ts", min_ts):
+        return live
+    return _merged(live, list(client.fills(min_ts=min_ts, ticker=ticker, archive=True)), _fill_ids)
+
+
+def every_order(client, ticker=None, min_ts=None):
+    """The account's orders from min_ts on (None: all of them), each once: the live list,
+    plus Kalshi's historical store when some may have moved there (orders done more than
+    about 15 days ago, Oct 2026). Resting orders always stay in the live list."""
+    live = list(client.orders(ticker=ticker, min_ts=min_ts))
+    if not _archived_since(client, "orders_updated_ts", min_ts):
+        return live
+    return _merged(live, list(client.orders(ticker=ticker, min_ts=min_ts, archive=True)), _order_ids)
 
 
 # ---------- field helpers ----------

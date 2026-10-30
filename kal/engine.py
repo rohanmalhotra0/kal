@@ -13,7 +13,8 @@ import traceback
 import uuid
 
 from . import books, config, db, fees, flow, gate, ledger, paper, risk, sizing
-from .client import Kalshi, KalshiError, UnknownSettlement, fee, fill_known, filled, is_transient, resting, ts
+from .client import (Kalshi, KalshiError, UnknownSettlement, every_order, fee, fill_known, filled, is_transient,
+                     resting, ts)
 from .strategies import load_all
 from .strategies.base import Context
 
@@ -211,11 +212,13 @@ def _stop_resting(client, ticker, order):
 
 
 def reconcile(client):
-    """Find out what happened to orders whose reply we never got. Raises if we can't."""
+    """Find out what happened to orders whose reply we never got. Raises if we can't.
+    Kalshi moves done orders to its historical store after about 15 days, so after a long
+    outage the lookup reads that too: never call an order that filled "never placed"."""
     rows = ledger.unresolved_orders()
     fixed = 0
     for r in rows:
-        found = [o for o in client.orders(ticker=r["ticker"], min_ts=r["ts"] - 60)
+        found = [o for o in every_order(client, ticker=r["ticker"], min_ts=r["ts"] - 60)
                  if o.get("client_order_id") == r["client_order_id"]]
         if found:
             o = found[0]
