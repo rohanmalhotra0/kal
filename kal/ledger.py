@@ -7,10 +7,12 @@ positions. Built only from our own fills plus public settlement results, so a
 deposit, a manual trade, or a schema change in Kalshi's settlement feed can't
 inflate it. Kalshi's fills are read only to lower it (contracts sold outside the bot).
 """
+import json
 import time
 
 from . import db
-from .client import UnknownSettlement, every_fill, fee, num, outcome_side, price, ts, yes_payout
+from .client import (BOT_MARK, UnknownSettlement, every_fill, every_order, fee, fill_count, num, outcome_side,
+                     price, resting, ts, yes_payout)
 
 OPEN = ("active", "open")
 
@@ -141,7 +143,9 @@ def _restored_gain(ticker, paid, side=None):
     """What orders added after a restore (catch_up) are worth over their cost on a market,
     at a YES value of `paid` (its payout, or for one side, that side's bid as 1 - paid on NO).
     Some may be the owner's own trades, so only their losses count, never their gains: at
-    settlement and in equity alike, so a win settling never reads as a loss."""
+    settlement and in equity alike, so a win settling never reads as a loss. recover() adds
+    'restored' rows too, on new books: there losses from before the order mark can't be
+    seen, so gains mustn't grow the budget either."""
     gain = 0.0
     for r in db.query("SELECT side, filled, price FROM orders WHERE ticker = ? AND strategy = 'restored' "
                       "AND filled > 0", ticker):
@@ -396,6 +400,102 @@ def catch_up(client):
     db.put("restore_check", True)   # strangers() gets one look at Kalshi's positions next
     db.execute("DELETE FROM kv WHERE key = 'restored'")
     return len(found)
+
+
+RECOVER_SLACK = 3600   # seconds: orders from just before the last check are looked at again
+
+
+def _bought_count(o):
+    """How many contracts a bot order bought: client.fill_count, with no size to fall back on
+    ("executed" alone is no number). Raises CatchUpError if Kalshi's reply doesn't say for
+    sure: a count null, empty or unreadable, or counts that contradict each other."""
+    n = fill_count(o)
+    if n is None:
+        raise CatchUpError(f"order {o.get('client_order_id')} doesn't say how much it bought (fields: "
+                           f"{', '.join(sorted(o))[:200]})")
+    return n
+
+
+def _bought_side(o):
+    """(side, limit price) of a bot order. The bot only ever buys, so the side is the outcome
+    it's long: outcome_side or book_side, with Kalshi's deprecated side/action only as a
+    cross-check ("sell YES" is "buy NO"). Raises CatchUpError, never a guess."""
+    side, action = _direction(o)   # raises if the fields disagree
+    if side in ("yes", "no") and action == "sell":
+        side = "no" if side == "yes" else "yes"
+    p = price(o, f"{side}_price") if side in ("yes", "no") else 0.0
+    if not 0 < p < 1:
+        raise CatchUpError(f"order {o.get('client_order_id')} doesn't say which way or at what price (fields: "
+                           f"{', '.join(sorted(o))[:200]})")
+    return side, p
+
+
+def recover(client):
+    """Put back the bot's own orders that its books don't have: a lost or replaced disk, a
+    reinstall, or books rolled back to an older copy without `kal restore`. Every order the
+    bot sends carries a marked client_order_id (client.new_order_id), and Kalshi keeps it, so
+    a marked order is the bot's for sure. Books with an earlier check (rolled back to an
+    older copy) still hold what came before, so it goes back with its full result
+    ("recovered"). Books with no check yet (a new disk) can't see losses from before the
+    mark, so there only its losses count, never its gains ("restored"), and the budget
+    can't grow from a lost disk. One the books call never placed, found filled inside the
+    look-back, is corrected in its own row, and a basket it belongs to is checked again.
+    One whose market the books already settled without it counts as lost in full (the safe
+    way). Each order's writes go in one transaction: a run killed part way redoes it.
+    Looks back to the last check (kv 'orders_checked') less RECOVER_SLACK, or over the
+    whole account if the books don't say. Orders sent before the mark existed can't be
+    found. Returns how many it put back. Raises CatchUpError if one can't be read."""
+    start = time.time()
+    since = db.get("orders_checked") or None   # one meaning for "no check yet", whatever was stored
+    ids = {r["order_id"] for r in db.query("SELECT DISTINCT order_id FROM orders WHERE order_id != ''")}
+    rows = {r["client_order_id"]: r for r in db.query(
+        "SELECT id, client_order_id, status, ticker, side, signal_id FROM orders WHERE client_order_id != ''")}
+    settled = {r["ticker"] for r in db.query("SELECT ticker FROM settlements")}
+    back = 0
+    for o in every_order(client, min_ts=since - RECOVER_SLACK if since else None):
+        coid, oid = str(o.get("client_order_id") or ""), str(o.get("order_id") or "")
+        row = rows.get(coid)
+        if not coid.startswith(BOT_MARK) or (row and row["status"] != "never_placed") or (oid and oid in ids):
+            continue
+        ticker = o.get("ticker")
+        if not oid or not ticker:
+            raise CatchUpError(f"order {coid} has no order id or ticker")
+        if resting(o):
+            raise CatchUpError(f"order {coid} on {ticker} is still on the book")
+        n = _bought_count(o)
+        if n <= 0:
+            continue   # bought nothing (a test order, a missed chance): nothing to book
+        side, p = _bought_side(o)
+        try:
+            when = ts(o["created_time"]) if o.get("created_time") else start
+        except (TypeError, ValueError, AttributeError):
+            raise CatchUpError(f"order {coid} has an unreadable time: {o.get('created_time')!r}")
+        if row and (row["ticker"], row["side"]) != (ticker, side):
+            raise CatchUpError(f"order {coid}: Kalshi says {side} on {ticker}, the books {row['side']} "
+                               f"on {row['ticker']}")
+        with db.connect() as c:   # all of this order's writes, or none of them
+            if row:   # the books said never placed, but it filled
+                c.execute("UPDATE orders SET filled = ?, status = 'recovered', order_id = ? WHERE id = ?",
+                          (n, oid, row["id"]))
+                sig = c.execute("SELECT legs FROM signals WHERE id = ?", (row["signal_id"],)).fetchone() \
+                    if row["signal_id"] else None
+                if sig:   # a basket with a leg after all: stranded_baskets() looks at it again this run
+                    many = len(json.loads(sig["legs"] or "[]")) > 1
+                    c.execute("UPDATE signals SET status = ? WHERE id = ?",
+                              ("failed: a leg Kalshi shows filled after all" if many else "executed",
+                               row["signal_id"]))
+            else:
+                c.execute("INSERT INTO orders (ts, strategy, ticker, side, count, price, filled, status, order_id, "
+                          "client_order_id) VALUES (?, ?, ?, ?, ?, ?, ?, 'recovered', ?, ?)",
+                          (when, "restored" if since is None else "recovered", ticker, side, n, p, n, oid, coid))
+            if ticker in settled:
+                c.execute("INSERT INTO writeoffs (ts, ticker, side, count, cost, note) VALUES (?, ?, ?, ?, ?, ?)",
+                          (time.time(), ticker, side, n, n * p + fee(n, p),
+                           "found after its market was booked without it: counted as lost"))
+        ids.add(oid)
+        back += 1
+    db.put("orders_checked", start)
+    return back
 
 
 def strangers(positions):

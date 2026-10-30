@@ -10,11 +10,10 @@ import logging
 import os
 import time
 import traceback
-import uuid
 
 from . import books, config, db, fees, flow, gate, ledger, paper, risk, sizing
 from .client import (Kalshi, KalshiError, UnknownSettlement, every_order, fee, fill_count, is_transient,
-                     resting, ts)
+                     new_order_id, resting, ts)
 from .strategies import load_all
 from .strategies.base import Context
 
@@ -279,7 +278,7 @@ def execute(client, sig, signal_id):
     spent, count = 0.0, None
     for i, leg in enumerate(sig.legs):
         want = leg.count if count is None else count
-        coid = str(uuid.uuid4())
+        coid = new_order_id()
         # Written before sending, so a crash mid-request still leaves a trace to reconcile.
         oid = db.insert("orders", signal_id=signal_id, strategy=sig.strategy, ticker=leg.ticker,
                         side=leg.side, count=want, price=leg.price, filled=0, status="sending",
@@ -493,6 +492,22 @@ def _trade(client, cfg, summary):
             return
         if added:
             summary["notes"].append(f"added {added} order(s) from Kalshi that the restored books were missing")
+        try:
+            back = ledger.recover(client)
+        except ledger.CatchUpError as e:
+            reason = f"can't read the bot's own orders on Kalshi to check its books: {e}. Check them on Kalshi."
+            config.trip(reason)
+            summary["notes"].append(f"STOPPED: {reason}")
+            return
+        if back:
+            note = (f"Kalshi shows {back} order(s) the bot made that its books didn't have (lost or older "
+                    f"books?). They're back in, so the $300 limit still counts them.")
+            summary["notes"].append(note)
+            try:
+                from . import notify
+                notify.send("kal put back orders its books had lost", note, tags=("warning",))
+            except Exception:
+                log.warning("recovery alert failed", exc_info=True)
         stranded = stranded_baskets()
         if stranded:
             reason = (f"basket left half-built on {', '.join(stranded)} (an earlier run stopped between "

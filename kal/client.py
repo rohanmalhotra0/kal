@@ -99,6 +99,17 @@ def parse_key(pem):
     return key
 
 
+BOT_MARK = "ca1ca1ca"   # the first group of every client_order_id the bot makes
+
+
+def new_order_id():
+    """A fresh client_order_id: a UUID whose first group is BOT_MARK. Kalshi keeps every
+    order's id for good (live, then in its historical store), so the bot's own orders can be
+    found again if its books are ever lost (ledger.recover). Still a valid UUID, the shape
+    in Kalshi's examples; a random one starts the same way once in 4 billion."""
+    return BOT_MARK + str(uuid.uuid4())[len(BOT_MARK):]
+
+
 def sign(private_key, timestamp_ms, method, path):
     """Kalshi's request signature: timestamp + method + path (no query), base64. Ed25519
     keys sign the text itself; RSA keys use RSA-PSS with SHA-256 (docs.kalshi.com, API Keys)."""
@@ -367,7 +378,7 @@ class Kalshi:
         if side not in ("yes", "no"):
             raise ValueError(f"side must be yes or no, not {side!r}")
         book_side, book_price = ("bid", limit_price) if side == "yes" else ("ask", 1 - limit_price)
-        body = {"ticker": ticker, "client_order_id": client_order_id or str(uuid.uuid4()),
+        body = {"ticker": ticker, "client_order_id": client_order_id or new_order_id(),
                 "side": book_side, "count": f"{float(count):.2f}", "price": f"{book_price:.4f}",
                 "time_in_force": "immediate_or_cancel", "self_trade_prevention_type": "taker_at_cross"}
         r = self._req("POST", "/portfolio/events/orders", body=body)
