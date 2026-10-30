@@ -1,57 +1,27 @@
-"""Prints the reply shapes of Kalshi's live and historical account endpoints (probe only)."""
-import json
-import re
-
+"""Does each Kalshi environment have the historical store? (public calls only; probe)"""
 import requests
-import yaml
 
 S = requests.Session()
-S.headers["User-Agent"] = "kal-docs-probe"
-raw = S.get("https://docs.kalshi.com/openapi.yaml", timeout=60).text
-spec = yaml.safe_load(re.sub(r"[\x80-\x9f]", "", raw))
-comp = spec.get("components", {})
-
-
-def resolve(node, depth=0):
-    if depth > 6:
-        return "..."
-    if isinstance(node, dict):
-        if "$ref" in node:
-            parts = node["$ref"].lstrip("#/").split("/")
-            target = spec
-            for p in parts:
-                target = target.get(p, {})
-            return resolve(target, depth + 1)
-        return {k: resolve(v, depth + 1) for k, v in node.items() if k not in ("example", "examples")}
-    if isinstance(node, list):
-        return [resolve(v, depth + 1) for v in node]
-    return node
-
-
-def fields(schema):
-    """Top-level fields of an object schema, with their types."""
-    s = resolve(schema)
-    out = {}
-    for k, v in (s.get("properties") or {}).items():
-        if isinstance(v, dict):
-            out[k] = v.get("type") or ("enum" if "enum" in v else "?")
-            if v.get("type") == "array":
-                out[k] = f"array of {list((v.get('items') or {}).get('properties', {}).keys())[:60]}"
-    return out, s.get("required")
-
-
-for path in ("/portfolio/orders", "/historical/orders", "/portfolio/fills", "/historical/fills",
-             "/historical/markets/{ticker}", "/markets/{ticker}", "/historical/cutoff", "/portfolio/positions"):
-    op = spec["paths"].get(path, {}).get("get")
-    if not op:
-        print(path, "not in spec")
-        continue
-    ok = (op.get("responses") or {}).get("200", {})
-    sch = ((resolve(ok).get("content") or {}).get("application/json") or {}).get("schema") or {}
-    f, req = fields(sch)
-    print(f"\n== GET {path} reply: {json.dumps(f)[:3000]}\n   required: {req}")
-
-for name in ("Order", "Fill", "HistoricalOrder", "HistoricalFill"):
-    if name in comp.get("schemas", {}):
-        f, req = fields(comp["schemas"][name])
-        print(f"\n== schema {name}: {json.dumps(f)[:3000]}\n   required: {req}")
+for name, base in (("prod", "https://api.elections.kalshi.com/trade-api/v2"),
+                   ("demo", "https://demo-api.kalshi.co/trade-api/v2")):
+    for path in ("/historical/cutoff", "/historical/markets?limit=1", "/historical/fills?limit=1",
+                 "/historical/orders?limit=1", "/portfolio/fills?limit=1",
+                 "/historical/markets/KXHIGHNY-26AUG01-B85.5"):
+        try:
+            r = S.get(base + path, timeout=30)
+            print(f"{name:5} {path:45} {r.status_code} {r.text[:300]!r}")
+        except Exception as e:
+            print(f"{name:5} {path:45} {e}")
+    # a market settled before the cutoff: live vs historical lookups
+    try:
+        r = S.get(base + "/historical/markets", params={"limit": 2}, timeout=30)
+        ms = (r.json() or {}).get("markets") or []
+        for m in ms[:2]:
+            t = m.get("ticker")
+            a = S.get(f"{base}/markets/{t}", timeout=30)
+            b = S.get(f"{base}/historical/markets/{t}", timeout=30)
+            keep = {k: (b.json().get("market") or {}).get(k) for k in
+                    ("ticker", "status", "result", "settlement_value_dollars", "open_time", "close_time")}
+            print(f"{name:5} archived {t}: live -> {a.status_code}, historical -> {b.status_code} {keep}")
+    except Exception as e:
+        print(name, "archived lookup:", e)
