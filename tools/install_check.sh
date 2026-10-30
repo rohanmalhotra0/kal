@@ -203,13 +203,17 @@ check "the heartbeat is fresh again" within 60 sudo kal health --alive
 
 say "9. A crash"
 pid=$(prop MainPID) n=$(prop NRestarts)
+crashed=$(date +%s)
 sudo kill -9 "$pid"
 check "systemd starts it again" within 30 \
   sh -c "[ \"\$(systemctl show kal -p NRestarts --value)\" = $((n + 1)) ] && systemctl is-active --quiet kal"
 refuse "as a new process" [ "$(prop MainPID)" = "$pid" ]
 watch_once
 check "the watchdog alerts on the crash" grep -q "^/$TOPIC | kal keeps restarting | " "$OUT/alerts.txt"
-check "the heartbeat is fresh after the crash" within 60 sudo kal health --alive
+# The crashed process's heartbeat is still on disk and still "fresh": only a newer one shows
+# the new process beating (and so able to take it away on a clean stop, step 10).
+beats_since() { [ "$(sudo stat -c %Y "$DATA/.heartbeat" 2>/dev/null || echo 0)" -ge "$1" ]; }
+check "the new process beats after the crash" within 60 beats_since "$crashed"
 
 say "10. A clean stop"
 t0=$(date +%s)

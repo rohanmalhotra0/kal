@@ -757,6 +757,21 @@ class SchedulerJobTests(Base):
         self.assertGreaterEqual(len(calls), 3)
         self.assertIsNone(maintenance.heartbeat_age())   # a clean stop takes it away
 
+    def test_the_loop_beats_before_its_first_tick(self):
+        # The first tick can take a while; until the loop beats, the heartbeat on disk may be
+        # a crashed process's.
+        seen = []
+        s = Scheduler(jobs={"health": lambda: seen.append(maintenance.heartbeat_age())}, tick=0.01,
+                      intervals=lambda cfg: {"health": 60}, hours=lambda cfg: {})
+        s.start()
+        try:
+            deadline = time.time() + 5
+            while not seen and time.time() < deadline:
+                time.sleep(0.01)
+        finally:
+            s.stop(wait=5)
+        self.assertTrue(seen and seen[0] is not None, seen)
+
     def test_summary_hour_is_read_from_config_each_tick(self):
         db.put("scheduler", {"summary": utc(2026, 10, 24, 13)})
         clock = Clock(utc(2026, 10, 25, 12))
