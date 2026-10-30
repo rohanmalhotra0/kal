@@ -1,27 +1,30 @@
-"""Does each Kalshi environment have the historical store? (public calls only; probe)"""
+"""Order direction fields and their deprecation, from Kalshi's docs (probe only)."""
+import re
+
 import requests
+import yaml
 
 S = requests.Session()
-for name, base in (("prod", "https://api.elections.kalshi.com/trade-api/v2"),
-                   ("demo", "https://demo-api.kalshi.co/trade-api/v2")):
-    for path in ("/historical/cutoff", "/historical/markets?limit=1", "/historical/fills?limit=1",
-                 "/historical/orders?limit=1", "/portfolio/fills?limit=1",
-                 "/historical/markets/KXHIGHNY-26AUG01-B85.5"):
-        try:
-            r = S.get(base + path, timeout=30)
-            print(f"{name:5} {path:45} {r.status_code} {r.text[:300]!r}")
-        except Exception as e:
-            print(f"{name:5} {path:45} {e}")
-    # a market settled before the cutoff: live vs historical lookups
-    try:
-        r = S.get(base + "/historical/markets", params={"limit": 2}, timeout=30)
-        ms = (r.json() or {}).get("markets") or []
-        for m in ms[:2]:
-            t = m.get("ticker")
-            a = S.get(f"{base}/markets/{t}", timeout=30)
-            b = S.get(f"{base}/historical/markets/{t}", timeout=30)
-            keep = {k: (b.json().get("market") or {}).get(k) for k in
-                    ("ticker", "status", "result", "settlement_value_dollars", "open_time", "close_time")}
-            print(f"{name:5} archived {t}: live -> {a.status_code}, historical -> {b.status_code} {keep}")
-    except Exception as e:
-        print(name, "archived lookup:", e)
+t = S.get("https://docs.kalshi.com/getting_started/order_direction.md", timeout=30).text
+print(t.split("## OpenAPI")[0][:12000])
+print("=" * 80)
+log = S.get("https://docs.kalshi.com/changelog.md", timeout=30).text
+for m in re.finditer(r"\*\*([A-Z][a-z]+ \d{1,2}, 20\d\d)\*\*(.*?)(?=\*\*[A-Z][a-z]+ \d{1,2}, 20\d\d\*\*|\Z)", log, re.S):
+    body = m.group(2)
+    if re.search(r"outcome_side|book_side|legacy|deprecat|remov|client_order_id|historical|/portfolio/fills|"
+                 r"/portfolio/orders|fill", body, re.I):
+        print(f"--- {m.group(1)}: {' '.join(body.split())[:900]}")
+print("=" * 80)
+raw = S.get("https://docs.kalshi.com/openapi.yaml", timeout=60).text
+spec = yaml.safe_load(re.sub(r"[\x80-\x9f]", "", raw))
+for name in ("Order", "Fill"):
+    props = spec["components"]["schemas"][name]["properties"]
+    for k in ("side", "action", "outcome_side", "book_side", "yes_price_dollars", "no_price_dollars", "count_fp",
+              "fill_count_fp", "created_time", "last_update_time", "status", "client_order_id"):
+        if k in props:
+            v = props[k]
+            print(f"{name}.{k}: deprecated={v.get('deprecated')} enum={v.get('enum')} "
+                  f"ref={v.get('$ref')} desc={(v.get('description') or '').strip()[:300]!r}")
+for k, v in spec["components"]["schemas"].items():
+    if k in ("OutcomeSide", "BookSide", "OrderStatus"):
+        print(k, v)
