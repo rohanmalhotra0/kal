@@ -928,6 +928,7 @@ class UnreadableReplyTests(TempHome):
                       {"status": "executed", "remaining_count_fp": "1.00"},
                       {"fill_count_fp": "2.00", "initial_count_fp": "1.00"},
                       {"fill_count_fp": "2.00"},
+                      {"fill_count_fp": "0.004"},                    # rounds to 0, but something filled
                       {"status": "canceled", "fill_count": "lots"}):
             with self.subTest(order=order):
                 ok, detail, alarming = gate.judge("T", 0.5, dict(order, order_id="x"))
