@@ -2,6 +2,20 @@
 
 Newest first. Each 2-hour check-in adds one entry: what it checked, what it found, links.
 
+## 2026-10-30 14:30 UTC — 5-hour paper soak passed; all 3 swarm fixes on main
+
+- 5-hour paper soak of the real scheduler on live Kalshi data, no key
+  ([api-probe run 41032139755](https://github.com/rohanmalhotra0/kal/actions/runs/41032139755)):
+  - 60 trade runs, all ok (30 s average, 53 s longest). 0 errors, 0 failed runs, 0 live
+    orders.
+  - Memory flat for 5 hours: 170-210 MB between runs, 305-367 MB at a run's peak (the cap
+    is 1.2 GB). Python's object count stayed flat too: no leak.
+  - Research ran to the end in its own process: 15 series in 90 min, 0 failed, peak 196 MB.
+- Merged [PR #54](https://github.com/rohanmalhotra0/kal/pull/54) (auto-update check). Its last
+  review found a stopped bot keeps its InvocationID on the server; fixed, and proved on a
+  real systemd 255 manager. All 3 swarm-review fixes (#53, #54, #55) are now on main.
+- Waiting on the owner: update the server, `sudo kal setup`, `sudo kal doctor`.
+
 ## 2026-10-30 12:50 UTC — check-in: 2 swarm fixes merged; the update check fixed for real systemd
 
 - Checked: CI and market-check green on main 0aa2058 (self-test passed, scan found
