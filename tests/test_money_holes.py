@@ -274,6 +274,15 @@ class LiveBasketTests(TempHome):
         self.assertFalse(s["ok"], s)
         self.assertEqual(len(c.orders), 1)                         # no later leg bought
         self.assertEqual([r["status"] for r in ledger.unresolved_orders()], ["unknown"])   # looked up next run
+        # The lookup says 8.87 of 10, and the other legs were never bought: a person must look.
+        coid = db.query("SELECT client_order_id FROM orders")[0]["client_order_id"]
+        c.order_list = [{"client_order_id": coid, "order_id": "o1", "status": "canceled", "ticker": c.orders[0][0],
+                         "fill_count_fp": "8.87", "initial_count_fp": "10.00", "remaining_count_fp": "0.00"}]
+        c.buy = real_buy
+        c.event_list = []
+        engine.run_once(c)
+        self.assertEqual(db.query("SELECT filled FROM orders")[0]["filled"], 8.87)
+        self.assertIn("half-built", config.load()["disabled_reason"])
 
     def test_env_switch_mid_run_keeps_one_runs_orders_in_one_books(self):
         c = fake_with_arb()

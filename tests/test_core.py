@@ -60,6 +60,30 @@ class ClientTests(unittest.TestCase):
         self.assertTrue(client.fill_known(done))
         self.assertEqual(client.filled(dict(cancelled, fill_count_fp="3.00"), 10), 3)
 
+    def test_fill_count_reads_every_real_shape_and_guesses_none(self):
+        fc = client.fill_count
+        # What Kalshi sends: the V2 create reply, a GET order (done, cancelled part fill, resting).
+        self.assertEqual(fc({"order_id": "o", "fill_count": "5.00", "remaining_count": "0.00", "ts_ms": 1}), 5)
+        self.assertEqual(fc({"status": "executed", "fill_count_fp": "10.00", "initial_count_fp": "10.00",
+                             "remaining_count_fp": "0.00"}), 10)
+        self.assertEqual(fc({"status": "canceled", "fill_count_fp": "3.00", "initial_count_fp": "10.00",
+                             "remaining_count_fp": "0.00"}), 3)
+        self.assertEqual(fc({"status": "resting", "fill_count_fp": "2.00", "remaining_count_fp": "3.00"}), 2)
+        self.assertEqual(fc({"fill_count_fp": None, "fill_count": 9}), 9)          # legacy when _fp is null
+        self.assertEqual(fc({"status": "executed", "initial_count_fp": None}, 7), 7)  # all of what was asked
+        # Says nothing, or contradicts itself: None, never a number.
+        for order in ({"fill_count": None, "remaining_count": "0.00"}, {"fill_count_fp": ""},
+                      {"status": "executed", "initial_count_fp": "10.00", "remaining_count_fp": "1.13"},
+                      {"status": "executed", "fill_count_fp": "0.00", "initial_count_fp": "10.00"},
+                      {"fill_count_fp": "12.00", "initial_count_fp": "10.00"},
+                      {"fill_count": True}, {"fill_count_fp": "nan"}, {"fill_count_fp": "inf"},
+                      {"fill_count": 10 ** 400}, {"fill_count_fp": "-1.00"}, {"fill_count_fp": "lots"},
+                      {"status": "executed"}, "not a dict"):
+            with self.subTest(order=order):
+                self.assertIsNone(fc(order))
+                if isinstance(order, dict) and order != {"status": "executed"}:   # that one: all it asked
+                    self.assertFalse(client.fill_known(order))
+
     def test_a_cancelled_test_order_without_a_fill_count_is_no_false_alarm(self):
         from kal import gate
         ok, why, alarming = gate.judge("T-1", 0.10, {"status": "canceled", "initial_count_fp": "1.00",

@@ -515,34 +515,65 @@ def price_strict(d, field):
     return float(raw)
 
 
+_BAD = object()   # a count that is there but can't be read
+
+
+def _count(order, field):
+    """One count: the first of `field`_fp and legacy `field` that isn't null or empty. A
+    number; _BAD for a bool, text, NaN or infinity; None if neither is there."""
+    for k in (f"{field}_fp", field):
+        v = order.get(k)
+        if v is None or v == "":
+            continue
+        if isinstance(v, bool):
+            return _BAD
+        try:
+            x = float(v)
+        except (TypeError, ValueError, OverflowError):
+            return _BAD
+        return x if math.isfinite(x) else _BAD
+    return None
+
+
+def fill_count(order, requested=None):
+    """How many contracts an order bought, or None if its reply doesn't say for sure: then it
+    is looked up or the bot stops, never guessed. Kalshi's fill count when there is one.
+    Without it, only an order "executed" in full, with nothing remaining: its initial count,
+    else what was asked (`requested`). Initial less remaining says nothing otherwise: Kalshi
+    zeroes "remaining" when it cancels the rest. Counts that contradict each other (a fill
+    above the order, an "executed" order short of its size or with some remaining) are None.
+    Rounded to Kalshi's 2 decimals: 10.00 - 1.13 is 8.870000000000001 in floats."""
+    if not isinstance(order, dict):
+        return None
+    got, start, left = (_count(order, f) for f in ("fill_count", "initial_count", "remaining_count"))
+    if _BAD in (got, start, left):
+        return None
+    done = order.get("status") == "executed"
+    if done and left is not None and left > 0.005:
+        return None
+    if got is None:
+        if not done:
+            return None
+        got = start if start is not None else requested
+        if got is None:
+            return None
+    if got < 0 or (start is not None and (got > start + 0.005 or (done and got < start - 0.005))):
+        return None
+    return round(got, 2)
+
+
 def filled(order, requested):
-    """Contracts an order actually bought: Kalshi's fill count. Without one, all of it for an
-    order "executed" in full (initial less remaining, or what was asked), else 0. On any other
-    order initial less remaining says nothing: Kalshi zeroes "remaining" when it cancels the
-    rest, so it would read as all of it (fill_known() is False there). Never more than asked."""
-    if "fill_count_fp" in order or "fill_count" in order:
-        n = num(order, "fill_count")
-    elif order.get("status") != "executed":
-        n = 0
-    elif ("initial_count_fp" in order or "initial_count" in order) and \
-            ("remaining_count_fp" in order or "remaining_count" in order):
-        n = num(order, "initial_count") - num(order, "remaining_count")
-    else:
-        n = requested
-    # Kalshi counts have 2 decimals. Without rounding, 10.00 - 1.13 is 8.870000000000001: a
-    # basket's later legs would ask for that, get the 8.87 sent, and read as short.
-    return max(0.0, min(float(requested), round(n, 2)))
+    """Contracts an order bought, as fill_count() reads it; 0 if it doesn't say (fill_known()
+    is False then). Never more than was asked for."""
+    n = fill_count(order, requested)
+    return 0.0 if n is None else max(0.0, min(float(requested), n))
 
 
 def fill_known(order):
-    """True if an order reply says how much it bought: a fill count, or "executed" (all of
-    it). A "canceled" alone could hide a part fill, and so could initial and remaining counts:
-    Kalshi zeroes "remaining" when it cancels the rest. The order gets looked up instead."""
-    def has(field):
-        return f"{field}_fp" in order or field in order
-    if not isinstance(order, dict):
-        return False
-    return has("fill_count") or order.get("status") == "executed"
+    """True if an order reply says for sure how much it bought (fill_count()). A "canceled"
+    alone could hide a part fill, and so could initial and remaining counts: Kalshi zeroes
+    "remaining" when it cancels the rest. The order gets looked up instead."""
+    return fill_count(order, 0) is not None
 
 
 DONE = ("executed", "canceled", "cancelled")
