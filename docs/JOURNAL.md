@@ -2,6 +2,19 @@
 
 Newest first. Each 2-hour check-in adds one entry: what it checked, what it found, links.
 
+## 2026-10-30 05:00 UTC — check-in: audit found a restore bug; fix in review
+
+- Checked: CI green on main 1360f8e; market-check green on 79b7b9e (self-test passed, scan
+  and research ran). No status report yet: `kal-status` doesn't exist or isn't shared with
+  Claude.
+- Fix: [PR #46](https://github.com/rohanmalhotra0/kal/pull/46). A review across today's merged
+  PRs found a bug in how #41 and #43 combine. After `kal restore`, fills with no time (or two
+  in one second) could make the books hold both sides of a market, so a payout was booked on
+  contracts already sold (+$9.53 where the truth is -$8.34). A second reviewer confirmed it.
+  The bot now puts back its own orders before it reads other fills. Tests fail on the old order.
+- Still being checked: a list read that could loop forever on a repeated cursor, and two rare
+  restore cases (a missing event for the per-event cap, a false half-built basket stop).
+
 ## 2026-10-30 04:05 UTC — fill counts read one strict way; order memory merged
 
 - Merged [PR #45](https://github.com/rohanmalhotra0/kal/pull/45): one reader decides how much an
