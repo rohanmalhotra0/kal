@@ -247,6 +247,16 @@ def reconcile(client):
     return fixed
 
 
+def _mark(sid, status):
+    """Mark a half-built basket reported. Called only once its stop is written, so a write
+    that fails here (a locked database) just means it's reported once more after Reset:
+    never an error that could hide the stop's reason."""
+    try:
+        db.execute("UPDATE signals SET status = ? WHERE id = ?", status, sid)
+    except Exception:
+        log.warning("couldn't mark basket %s reported; the next run reports it again", sid, exc_info=True)
+
+
 def stranded_baskets():
     """Live baskets an earlier run left part-bought: some legs filled, the rest didn't or
     were never sent (a lost reply, or the process dying between legs). Call after
@@ -360,7 +370,7 @@ def _run_once(client, cfg, t0):
             log.warning("run waiting on an order: %s", e)
         else:
             log.error("run stopped: %s", traceback.format_exc())
-            if isinstance(e, LegFailed):
+            if isinstance(e, LegFailed):   # _trade stops for these itself; this is only a fallback
                 config.trip(f"basket left half-built: {e}. Check open positions on Kalshi.")
             elif not isinstance(e, Halted):
                 _count_error(cfg, e)
@@ -513,7 +523,7 @@ def _trade(client, cfg, summary):
                       f"run stopped between legs). Check open positions on Kalshi.")
             config.trip(reason)
             for sid, _, status in stranded:   # only after the stop is written
-                db.execute("UPDATE signals SET status = ? WHERE id = ?", status, sid)
+                _mark(sid, status)
             summary["notes"].append(f"STOPPED: {reason}")
             return
     try:
@@ -679,7 +689,7 @@ def _trade(client, cfg, summary):
                     # Stop first, then mark 'stranded' (reported once). A process killed in
                     # between leaves it unmarked, so the next run finds it and stops again.
                     config.trip(f"basket left half-built: {e}. Check open positions on Kalshi.")
-                    db.execute("UPDATE signals SET status = ? WHERE id = ?", f"stranded: {e}", sid)
+                    _mark(sid, f"stranded: {e}")
                     raise Halted(str(e)) from e
                 db.execute("UPDATE signals SET status = ? WHERE id = ?", f"failed: {e}", sid)   # checked next run
                 raise

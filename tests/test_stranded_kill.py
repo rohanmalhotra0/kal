@@ -3,6 +3,7 @@ basket was marked 'stranded' first and the stop written after it. A process kill
 (an update's restart, an out-of-memory kill) left it marked and never reported, and
 stranded_baskets() never looks at a marked one again (cross-PR money-path audit). The stop is
 now written first."""
+import sqlite3
 import time
 from unittest import mock
 
@@ -28,6 +29,25 @@ def killed_at_the_stop():
     return mock.patch.object(config, "trip", trip)
 
 
+def short_basket():
+    """A live basket whose first leg fills and the next gets nothing."""
+    config.update({"strategies": {"basket_arb": {"mode": "live"}}})
+    orders_proven()
+    c = fake_with_arb()
+    calls = []
+
+    def fill(ticker, side, count, price):
+        calls.append(ticker)
+        return count if len(calls) == 1 else 0
+    c.fill = fill
+    return c
+
+
+def reset():
+    config.clear_trip()
+    config.update({"enabled": True})
+
+
 class KilledAtTheStopTests(TempHome):
     def setUp(self):
         super().setUp()
@@ -35,25 +55,54 @@ class KilledAtTheStopTests(TempHome):
                        "strategies": {k: {"mode": "off"} for k in config.DEFAULTS["strategies"]}})
 
     def test_a_short_second_leg(self):
-        config.update({"strategies": {"basket_arb": {"mode": "live"}}})
-        orders_proven()
-        c = fake_with_arb()
-        calls = []
-
-        def fill(ticker, side, count, price):
-            calls.append(ticker)
-            return count if len(calls) == 1 else 0   # leg 1 fills, leg 2 gets nothing
-        c.fill = fill
+        c = short_basket()
         with killed_at_the_stop(), self.assertRaises(Killed):
             engine.run_once(c)
         self.assertEqual(config.load()["disabled_reason"], "")
         c.fill = lambda *a: 0   # the restart: nothing new to buy
         engine.run_once(c)
         self.assertIn("half-built", config.load()["disabled_reason"])   # was: never stopped
-        config.clear_trip()
-        config.update({"enabled": True})
+        reset()
         engine.run_once(c)
         self.assertEqual(config.load()["disabled_reason"], "")          # reported once, then marked
+
+    def test_one_stop_and_one_alert_per_half_built_basket(self):
+        c = short_basket()
+        trips = []
+        real = config.trip
+        with mock.patch.object(config, "trip", lambda reason: (trips.append(reason), real(reason))):
+            engine.run_once(c)
+        self.assertEqual(len(trips), 1, trips)
+        self.assertIn("half-built", trips[0])
+
+    def test_killed_after_the_stop_reports_it_once_more(self):
+        c = short_basket()
+        with mock.patch.object(engine, "_mark", side_effect=Killed("killed before the mark")), \
+                self.assertRaises(Killed):
+            engine.run_once(c)
+        self.assertIn("half-built", config.load()["disabled_reason"])
+        c.fill = lambda *a: 0
+        reset()
+        engine.run_once(c)
+        self.assertIn("half-built", config.load()["disabled_reason"])   # an extra stop, never a missing one
+        reset()
+        engine.run_once(c)
+        self.assertEqual(config.load()["disabled_reason"], "")
+
+    def test_a_mark_that_fails_never_hides_the_stop(self):
+        c = short_basket()
+        db.put("consecutive_errors", 2)   # one more counted error would stop the bot for that instead
+        real = db.execute
+
+        def locked(sql, *args):
+            if sql.startswith("UPDATE signals") and "stranded" in str(args):
+                raise sqlite3.OperationalError("database is locked")
+            return real(sql, *args)
+        with mock.patch.object(db, "execute", locked):
+            s = engine.run_once(c)
+        self.assertIn("half-built", config.load()["disabled_reason"])   # was: "3 failed runs in a row"
+        self.assertEqual(db.get("consecutive_errors"), 2)
+        self.assertFalse(s["ok"])
 
     def test_a_leg_found_filled_after_all(self):
         # recover() finds a leg the books called never placed filled on Kalshi: the basket is
