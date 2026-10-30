@@ -303,9 +303,17 @@ def available(cfg):
 def _mark(m, side):
     """What one contract of `side` is worth now: once the result is known (a market can be
     determined a while before it settles) what it will pay, else its best bid. None when
-    the market shows neither."""
-    if m.get("result") in ("yes", "no"):
-        return 1.0 if m["result"] == side else 0.0
+    the market shows neither. A result counts only once trading has stopped, and a scalar
+    or void one by its settlement value."""
+    if m.get("status") in ("closed", "determined", "settled", "finalized"):
+        if m.get("result") in ("yes", "no"):
+            return 1.0 if m["result"] == side else 0.0
+        try:
+            paid = float(m.get("settlement_value_dollars") or "nan")
+        except (TypeError, ValueError):
+            paid = float("nan")
+        if 0 <= paid <= 1:
+            return paid if side == "yes" else 1 - paid
     bid = price(m, f"{side}_bid")
     return bid if bid > 0 else None
 

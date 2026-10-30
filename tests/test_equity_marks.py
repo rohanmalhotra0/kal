@@ -70,6 +70,22 @@ class ClosedMarketTests(TempHome):
         self.c.market_info["Y"] = {"ticker": "Y", "status": "determined", "result": "no"}
         self.assertAlmostEqual(before - self.run_at(2026, 10, 29, 10, 15), 50)   # its $50 bid is gone
 
+    def test_a_scalar_result_counts_at_its_settlement_value(self):
+        # Only yes or no results counted: a scalar one kept the old bid until final, and the
+        # difference landed on settlement day (independent review of this change).
+        self.holds("Y", "yes", 100, 0.40, 0.50)
+        before = self.run_at(2026, 10, 29, 10, 0)
+        self.c.market_info["Y"] = {"ticker": "Y", "status": "determined", "result": "scalar",
+                                   "settlement_value_dollars": "0.9000"}
+        self.assertAlmostEqual(self.run_at(2026, 10, 29, 10, 15) - before, 40)   # 0.50 -> 0.90 a contract
+
+    def test_a_result_on_a_market_still_trading_is_ignored(self):
+        self.holds("Y", "yes", 100, 0.40, 0.99)
+        before = self.run_at(2026, 10, 29, 10, 0)
+        self.c.market_info["Y"]["result"] = "no"   # still active: its bid says what it's worth
+        self.assertAlmostEqual(self.run_at(2026, 10, 29, 10, 15), before)
+        self.assertEqual(config.load()["disabled_reason"], "")
+
     def test_a_market_that_never_had_a_bid_stays_at_cost(self):
         self.holds("Y", "yes", 100, 0.40, 0.0)
         self.run_at(2026, 10, 29, 10, 0)
