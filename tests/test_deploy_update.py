@@ -57,7 +57,8 @@ esac
 # - try-restart restarts a running bot, or one waiting to restart; it does nothing to one
 #   that is stopped or being stopped ("deactivating"), as systemd does.
 # A person acts with `person-stop`, `person-restart SECS` (the stop takes SECS),
-# `person-start-at SECS` and `person-restart-at SECS`. A stopped bot has no InvocationID.
+# `person-start-at SECS` and `person-restart-at SECS`. A stopped bot keeps its last
+# InvocationID (kal is enabled, so systemd keeps the unit loaded).
 FAKE_SYSTEMCTL = """#!/usr/bin/env python3
 import json, os, sys
 D, APP = {d!r}, {app!r}
@@ -152,8 +153,7 @@ elif a[0] == "is-active":
     if "--quiet" in a:
         out = None
 elif a[0] == "show":
-    out = {{"InvocationID": "" if s["state"] == "inactive" else "inv%d" % s["inv"],
-           "NRestarts": s["nrest"], "SubState": s["sub"],
+    out = {{"InvocationID": "inv%d" % s["inv"], "NRestarts": s["nrest"], "SubState": s["sub"],
            "Result": s["result"], "ActiveState": s["state"]}}[a[a.index("-p") + 1]]
 elif a[0] == "try-restart" and s.get("try_fails", 0) > 0:
     s["try_fails"] -= 1   # systemctl failed (a D-Bus timeout, say): nothing restarted
@@ -787,6 +787,48 @@ exit 0
         self.assertEqual(r.returncode, 1, r.stdout)
         self.assertEqual(self._head(), before)
         self.assertIn("The new version crashed.", _read(self.curl_log))
+
+    def test_a_version_failing_again_with_the_old_one_failing_too_is_blamed(self):
+        # A release that broke the bot's data makes the old version fail too: one more try,
+        # then it is blamed.
+        self._active()
+        _write(self.hook, f"#!/bin/sh\ntouch {self.all_crash}\n", x=True)
+        self._push_code()
+        self.assertEqual(self._run().returncode, 1)
+        self.assertFalse(self._blamed())                    # first time: tried again
+        self.assertIn("tries again tomorrow", _read(self.curl_log))
+        r = self._run()                                      # the next day, same version
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertTrue(self._blamed())
+        self.assertIn("isn't tried again", _read(self.curl_log))
+
+    def test_a_version_tried_again_that_works_is_kept(self):
+        self._active()
+        _write(self.hook, f"#!/bin/sh\ntouch {self.all_crash}\n", x=True)
+        self._push_code()
+        self.assertEqual(self._run().returncode, 1)
+        os.remove(self.hook)
+        os.remove(self.all_crash)                           # the outside cause is fixed
+        r = self._run()
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertIn("kal updated", _read(self.curl_log))
+        self.assertFalse(os.path.exists(os.path.join(self.data, "update_retry")))
+
+    def test_the_update_never_makes_the_research_lock_itself(self):
+        # Made by root, research (as kal) couldn't open it again: if the kal user can't make
+        # it, the restart goes ahead without it.
+        _write(os.path.join(self.bin, "runuser"), """#!/bin/sh
+shift 2 2>/dev/null
+[ "$1" = "--" ] && shift
+[ "$1" = touch ] && exit 1
+exec "$@"
+""", x=True)
+        self._active()
+        self._push_code()
+        r = self._run()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("try-restart kal", _read(self.sysctl_log))
+        self.assertFalse(os.path.exists(os.path.join(self.data, ".research.lock")))
 
     def test_earlier_crashes_alone_never_roll_back(self):
         self._active(nrest=2)

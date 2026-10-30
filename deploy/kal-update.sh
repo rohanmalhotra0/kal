@@ -75,6 +75,7 @@ after=$(git rev-parse origin/main)
 [ "$before" = "$after" ] && { say "already up to date (${before:0:7})"; exit 0; }
 
 failed="$DATA/update_failed"   # the version whose tests failed: try it once, alert once
+retry="$DATA/update_retry"     # a version that failed while the old one failed too: one more try
 if [ "$(cat "$failed" 2>/dev/null)" = "$after" ]; then
   say "skipping ${after:0:7}: its tests failed before"
   exit 0
@@ -220,13 +221,14 @@ restart() {
   # lock file must belong to the kal user: research opens it to write, and couldn't if root
   # made it. Still running after an hour: restart anyway, research retries after a restart.
   [ -e "$RESEARCH_LOCK" ] || runuser -u "$KAL_USER" -- touch "$RESEARCH_LOCK" 2>/dev/null
-  ( flock -w "$RESEARCH_WAIT" 9; settle; systemctl try-restart kal ) 9<>"$RESEARCH_LOCK" \
+  # (9< never creates the file: one made by root here would lock research out for good.)
+  ( flock -w "$RESEARCH_WAIT" 9; settle; systemctl try-restart kal ) 9<"$RESEARCH_LOCK" \
     || { settle; systemctl try-restart kal; }
 }
 # After restart(): wait (up to UP_WAIT) for the bot to be up, let it run WAIT seconds, then
 # set `seen`: "same" if it still runs as InvocationID $1 (the restart didn't happen), "crashed"
-# if it crashed since it came up, "up" if it runs, else "stopped" (by a person: a stopped bot
-# has no InvocationID).
+# if it crashed since it came up, "up" if it runs, else "stopped" (by a person). A stopped
+# bot keeps its last InvocationID: kal is enabled, so systemd keeps the unit loaded.
 # A crash shows one of three ways, depending on when we look: NRestarts rose (it crashed and
 # started again), SubState auto-restart (it waits to start again: after repeated crashes,
 # up to 5 minutes), or Result not success (it is still cleaning up). A start resets Result,
@@ -241,7 +243,10 @@ look() {  # inv0
   sub=$(systemctl show kal -p SubState --value 2>/dev/null || true)
   result=$(systemctl show kal -p Result --value 2>/dev/null || true)
   if [ -n "$1" ] && [ "$inv1" = "$1" ] && [ "$(inv)" = "$1" ]; then
-    seen=same
+    case "$(systemctl is-active kal 2>/dev/null)" in
+      inactive|failed|deactivating) seen=stopped ;;   # a person stopped it: the new code never ran
+      *) seen=same ;;                                   # it still runs the old code
+    esac
   elif [ "$(systemctl show kal -p NRestarts --value 2>/dev/null || echo 0)" -gt "$nbase" ] 2>/dev/null \
       || [ "${sub#auto-restart}" != "$sub" ] || { [ -n "$result" ] && [ "$result" != success ]; }; then
     seen=crashed
@@ -265,10 +270,17 @@ roll_back() {  # why ; "blame": the new version failed (don't try it again, unle
       # A cause outside the code breaks every fresh start (a kal.env edit not yet restarted,
       # a crash loop that began before or during the update): then the old version fails
       # the same way now, and the new one isn't to blame.
+      # A version that broke the bot's data would make the old one fail too: it gets one more
+      # try, and is blamed if it fails again.
       look "$inv0"
       if [ "$seen" = crashed ] || { [ "$seen" = up ] && [ "$ok_before" = 1 ] && ! health_ok; }; then
-        why="$why The old version fails too, so the update isn't to blame. Look: sudo kal logs."
-        blame=""
+        if [ "$(cat "$retry" 2>/dev/null)" = "$after" ]; then
+          why="$why The old version fails too, but this version failed last time as well, so it isn't tried again. Look: sudo kal logs."
+        else
+          echo "$after" > "$retry"
+          why="$why The old version fails too, so the update isn't to blame: it tries again tomorrow. Look: sudo kal logs."
+          blame=""
+        fi
       fi
     fi
   fi
@@ -301,6 +313,6 @@ else
   say "the bot was stopped; updated the code and left it stopped"
 fi
 
-rm -f "$failed"
+rm -f "$failed" "$retry"
 say "updated ${before:0:7} -> ${after:0:7}"
 alert low "kal updated" "Now on $(git log -1 --format='%h %s').${note:+ $note}"

@@ -438,7 +438,8 @@ Each morning (about 09:30 UTC) it fetches `main` and then, to stay safe:
   crashing, and no check failing that passed before. If not, it puts the old code and
   packages back and sends "kal update rolled back". If the old code then fails the same
   way (a crash loop that started before or during the update, say), the update isn't
-  to blame: the alert says so, and it tries that version again the next day.
+  to blame: the alert says so, and it tries that version again the next day. If it fails
+  again, it stops trying it.
 - If you restart the bot while it updates, it waits for that restart to finish, then
   checks the new code all the same. If you stop the bot, it keeps the new code and says
   it wasn't checked. If the restart itself fails, it goes back to the old code and tries
