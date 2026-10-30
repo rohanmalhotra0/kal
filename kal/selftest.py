@@ -220,6 +220,21 @@ class _Checks:
             return False, f"{len(bad)} positions have no ticker or position"
         return True, f"{len(ps)} open positions"
 
+    def history_check(self):
+        """Kalshi's historical store, where fills and done orders move after weeks (about 2
+        months and 15 days, Oct 2026). Settling an old market, a restore, and an order lookup
+        after a long outage read it, so a key that can't is found now, not then."""
+        seen = {}
+        for what in ("fills", "orders"):
+            if hasattr(self.c, "paginate") and callable(getattr(self.c, "get", None)):
+                page = self.c.get(f"/historical/{what}", {"limit": 1})
+                if not isinstance(page, dict) or what not in page:
+                    return False, f"/historical/{what}: the reply has no '{what}' list"
+                seen[what] = len(page[what] or [])
+            else:
+                seen[what] = len(getattr(self.c, what)(archive=True))
+        return True, f"fills and orders read ({seen['fills']} and {seen['orders']} on the first page)"
+
     def order_probe(self):
         """Two IOC buys at $0.01, 1 YES then 1 NO, where the price is far off. Never more.
         The same test the engine runs before real money (kal/gate.py), so a pass here also
@@ -329,6 +344,7 @@ def run(client=None, order_probe=False):
     if can_trade:
         check("balance", checks.balance_check)
         check("positions", checks.positions_check)
+        check("history store", checks.history_check)
     else:
         rows.append(_row("account", True, "skipped: no API key, so only public checks ran"))
     if order_probe:

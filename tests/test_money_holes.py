@@ -236,9 +236,9 @@ class LiveBasketTests(TempHome):
         self.assertEqual({abs(n) for n in c.held.values()}, {9.5})
         self.assertEqual(config.load()["disabled_reason"], "")
 
-    def test_a_part_fill_read_from_what_was_left_matches_every_leg(self):
-        # A reply with only initial and remaining counts: 10.00 - 1.13 is 8.870000000000001 in
-        # floats. The later legs must ask for the 8.87 they send, not read 8.87 as short (critic).
+    def test_a_part_fill_read_from_the_fill_count_matches_every_leg(self):
+        # Kalshi's counts have 2 decimals: the later legs ask for the 8.87 the first leg got,
+        # and never read it as short (critic).
         c = fake_with_arb()
         real_buy = c.buy
 
@@ -246,14 +246,43 @@ class LiveBasketTests(TempHome):
             r = real_buy(ticker, side, count, price, client_order_id)
             if len(c.orders) == 1:
                 c.held[ticker] += 1.13 if c.held[ticker] < 0 else -1.13   # 1.13 never filled
-                return {"order_id": "o1", "status": "canceled", "initial_count_fp": f"{count:.2f}",
-                        "remaining_count_fp": "1.13"}
+                return {"order_id": "o1", "status": "canceled", "fill_count_fp": "8.87",
+                        "remaining_count_fp": "0.00"}
             return r
         c.buy = buy
         engine.run_once(c)
         self.assertEqual(config.load()["disabled_reason"], "")
         self.assertEqual([o[2] for o in c.orders], [10, 8.87, 8.87, 8.87])
         self.assertEqual([r["filled"] for r in db.query("SELECT filled FROM orders ORDER BY id")], [8.87] * 4)
+
+    def test_a_cancelled_reply_with_no_fill_count_buys_no_more_legs(self):
+        # Initial and remaining alone: Kalshi zeroes "remaining" when it cancels the rest, so
+        # 10 less 0 would read as 10 bought when 8.87 were. The later legs would then buy 10
+        # each: a position no locked-in set covers. The order is looked up instead.
+        c = fake_with_arb()
+        real_buy = c.buy
+
+        def buy(ticker, side, count, price, client_order_id=None):
+            r = real_buy(ticker, side, count, price, client_order_id)
+            if len(c.orders) == 1:
+                c.held[ticker] += 1.13 if c.held[ticker] < 0 else -1.13
+                return {"order_id": "o1", "status": "canceled", "initial_count_fp": f"{count:.2f}",
+                        "remaining_count_fp": "0.00"}
+            return r
+        c.buy = buy
+        s = engine.run_once(c)
+        self.assertFalse(s["ok"], s)
+        self.assertEqual(len(c.orders), 1)                         # no later leg bought
+        self.assertEqual([r["status"] for r in ledger.unresolved_orders()], ["unknown"])   # looked up next run
+        # The lookup says 8.87 of 10, and the other legs were never bought: a person must look.
+        coid = db.query("SELECT client_order_id FROM orders")[0]["client_order_id"]
+        c.order_list = [{"client_order_id": coid, "order_id": "o1", "status": "canceled", "ticker": c.orders[0][0],
+                         "fill_count_fp": "8.87", "initial_count_fp": "10.00", "remaining_count_fp": "0.00"}]
+        c.buy = real_buy
+        c.event_list = []
+        engine.run_once(c)
+        self.assertEqual(db.query("SELECT filled FROM orders")[0]["filled"], 8.87)
+        self.assertIn("half-built", config.load()["disabled_reason"])
 
     def test_env_switch_mid_run_keeps_one_runs_orders_in_one_books(self):
         c = fake_with_arb()
@@ -868,6 +897,46 @@ class UnreadableReplyTests(TempHome):
         self.assertIn("how much filled", detail)
         ok, _, _ = gate.judge("T", 0.5, {"order_id": "x", "status": "canceled", "fill_count": "0.00"})
         self.assertTrue(ok)
+
+    def test_a_reply_with_a_remaining_count_it_cant_read_is_looked_up(self):
+        # A reply with a fill count and a remaining count it can't read: the row was written
+        # done with 0 bought, then the resting check crashed. The 10 bought were never looked
+        # up, so never booked (review of the shared fill reader).
+        c = fake_with_arb()
+        real_buy = c.buy
+
+        def buy(ticker, side, count, price, client_order_id=None):
+            real_buy(ticker, side, count, price, client_order_id)
+            return {"order_id": "o1", "fill_count": f"{count:.2f}", "remaining_count": "abc"}
+        c.buy = buy
+        s = engine.run_once(c)
+        self.assertFalse(s["ok"], s)
+        self.assertEqual(len(c.orders), 1)   # nothing more bought
+        self.assertEqual([r["status"] for r in ledger.unresolved_orders()], ["unknown"])
+        coid = db.query("SELECT client_order_id FROM orders")[0]["client_order_id"]
+        c.order_list = [{"client_order_id": coid, "order_id": "o1", "status": "executed", "ticker": c.orders[0][0],
+                         "fill_count_fp": "10.00", "initial_count_fp": "10.00", "remaining_count_fp": "0.00"}]
+        c.buy = real_buy
+        c.event_list = []
+        engine.run_once(c)
+        self.assertEqual(db.query("SELECT filled FROM orders")[0]["filled"], 10)   # booked
+        self.assertIn("half-built", config.load()["disabled_reason"])             # the other legs never bought
+
+    def test_a_test_order_reply_that_shows_a_fill_raises_the_alarm_even_if_it_doesnt_add_up(self):
+        # These got "can't tell", with no alarm, for a while (review of the shared fill reader).
+        for order in ({"status": "executed", "fill_count_fp": "0.00", "initial_count_fp": "1.00"},
+                      {"status": "executed", "remaining_count_fp": "1.00"},
+                      {"fill_count_fp": "2.00", "initial_count_fp": "1.00"},
+                      {"fill_count_fp": "2.00"},
+                      {"fill_count_fp": "0.004"},                    # rounds to 0, but something filled
+                      {"status": "canceled", "fill_count": "lots"}):
+            with self.subTest(order=order):
+                ok, detail, alarming = gate.judge("T", 0.5, dict(order, order_id="x"))
+                self.assertEqual((ok, alarming), (False, True), detail)
+                self.assertIn("may have FILLED", detail)
+        ok, detail, alarming = gate.judge("T", 0.5, {"order_id": "x", "fill_count_fp": "1.00"})
+        self.assertEqual((ok, alarming), (False, True))
+        self.assertIn("FILLED (1)", detail)
 
 
 STANDARD = ("If the game is cancelled or rescheduled to over 48 hours away, the market will resolve "

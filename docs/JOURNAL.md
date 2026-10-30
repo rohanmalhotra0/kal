@@ -2,6 +2,105 @@
 
 Newest first. Each 2-hour check-in adds one entry: what it checked, what it found, links.
 
+## 2026-10-30 06:30 UTC — audit fixes merged: restore, lost disk, per-event cap, baskets, backups
+
+The cross-PR audit (3 finders, each finding checked by a separate verifier) found 6 issues in
+how today's changes combine. 1 was refuted (needs a reply Kalshi never sends). The other 5
+are fixed and merged, each with tests that fail on the old code and its own independent
+review:
+
+- [PR #46](https://github.com/rohanmalhotra0/kal/pull/46): after `kal restore`, fills with no
+  time could book a payout on contracts already sold (+$9.53 where the truth is -$8.34).
+- [PR #47](https://github.com/rohanmalhotra0/kal/pull/47): a half-built basket is now stopped
+  for before it is marked, so a crash in between can't hide it.
+- [PR #48](https://github.com/rohanmalhotra0/kal/pull/48): orders put back after a lost disk
+  or a restore count toward their event's cap ($37.84 staked against a $20 cap before). Their
+  event comes from Kalshi: a probe found most open tickers can't be cut down to it.
+- [PR #49](https://github.com/rohanmalhotra0/kal/pull/49): after a lost disk, past baskets
+  net out instead of reading as losses (65 profitable baskets booked -$517 and the bot
+  stopped for good). The review found the add-back could hide a day's loss from the daily
+  stop; fixed. Fuzz: 0 of 3,000 random histories count more than the strictest truth.
+- [PR #50](https://github.com/rohanmalhotra0/kal/pull/50): the daily backup waits for a
+  trade run, so a copy never lands between a basket's legs.
+- [PR #51](https://github.com/rohanmalhotra0/kal/pull/51): the daily stop used to value a
+  position at cost once its market closed and before it settled, so a winner's gain dropped
+  out for a while (a false stop, or a later day's loss partly hidden). Now a known result
+  counts at what it will pay, else the last mark seen. Older than today's work; reviewed and
+  re-checked.
+- No PRs open. Waiting on the owner: update the server, `sudo kal setup`, `sudo kal doctor`.
+
+## 2026-10-30 05:00 UTC — check-in: audit found a restore bug; fix in review
+
+- Checked: CI green on main 1360f8e; market-check green on 79b7b9e (self-test passed, scan
+  and research ran). No status report yet: `kal-status` doesn't exist or isn't shared with
+  Claude.
+- Fix: [PR #46](https://github.com/rohanmalhotra0/kal/pull/46). A review across today's merged
+  PRs found a bug in how #41 and #43 combine. After `kal restore`, fills with no time (or two
+  in one second) could make the books hold both sides of a market, so a payout was booked on
+  contracts already sold (+$9.53 where the truth is -$8.34). A second reviewer confirmed it.
+  The bot now puts back its own orders before it reads other fills. Tests fail on the old order.
+- Still being checked: a list read that could loop forever on a repeated cursor, and two rare
+  restore cases (a missing event for the per-event cap, a false half-built basket stop).
+
+## 2026-10-30 04:05 UTC — fill counts read one strict way; order memory merged
+
+- Merged [PR #45](https://github.com/rohanmalhotra0/kal/pull/45): one reader decides how much an
+  order bought, everywhere. A reply that doesn't say for sure, or contradicts itself, is looked
+  up (or the bot stops), never guessed. Three independent reviews. One found a reply shape that
+  crashed the "still on the book?" check after the order was written as done with 0 bought, so
+  that fill was never booked. Fixed, with tests that fail on the old code. A $0.01 test order
+  whose reply shows any sign of a fill raises the alarm again.
+- Merged [PR #43](https://github.com/rohanmalhotra0/kal/pull/43): every order the bot sends
+  carries a mark Kalshi keeps, so books lost with the server get the bot's orders back. Four
+  independent reviews, none blocking.
+- Running: one more review across everything merged today, for bugs in how the changes combine.
+- Waiting on the owner: server update and `sudo kal setup`, and the private status repo.
+
+## 2026-10-30 02:55 UTC — check-in: install-check race fixed; order memory through 3 reviews
+
+- Checked: CI green on main adabb58; market-check green on 6f9cd89 (all 11 strategies ran, 0
+  trades found; self-test passed). No status report yet: `kal-status` doesn't exist or isn't
+  shared with Claude.
+- Watch: "Research (quick)" took 5 minutes on today's 01:45-02:05 UTC runs, 17 s at 23:30. Not
+  today's code (#40 only changed request signing, and research runs without a key); same 3
+  series and results. Likely Kalshi or runner latency. Research runs in its own process, so
+  trade runs don't wait on it.
+- Fix: [PR #44](https://github.com/rohanmalhotra0/kal/pull/44). `install-check` failed once on
+  [PR #43](https://github.com/rohanmalhotra0/kal/pull/43): after a crash, a stop before the new
+  process beat once left the crashed one's heartbeat behind. In real use, `kal health` would
+  call a stopped bot alive for up to 5 minutes. The scheduler now beats at once, and the check
+  waits for the new process's own heartbeat.
+- [PR #43](https://github.com/rohanmalhotra0/kal/pull/43) (the bot's orders carry a mark Kalshi
+  keeps, so lost books get them back) went through 3 independent reviews, none blocking. All
+  their fixes are in, with tests: one transaction per order, new books count only losses,
+  null or negative counts stop the bot. CI running.
+- Research: no idea can be built now. Only #18 is left, and it needs 4+ weeks of server data.
+
+## 2026-10-30 02:00 UTC — Kalshi API changes: three fixes merged, one in review
+
+Checked Kalshi's live docs and API for changes the bot hadn't caught up with. Found three, each
+a real way to fail:
+
+- Merged [PR #40](https://github.com/rohanmalhotra0/kal/pull/40): Kalshi now makes **Ed25519**
+  API keys by default. kal signed only with RSA, so a key made with Kalshi's defaults crashed
+  every signed request and setup could never finish. Now both key types work.
+- Merged [PR #42](https://github.com/rohanmalhotra0/kal/pull/42): Kalshi moves done orders to a
+  historical store after about 15 days, and fills and settled markets after about 2 months.
+  After a long outage the bot could book a filled order "never placed" (a loss left out of the
+  $300 count). It now reads both stores. An independent review found nothing blocking; its 4
+  fixes went in.
+- Merged [PR #41](https://github.com/rohanmalhotra0/kal/pull/41): Kalshi deprecated `side`,
+  `action` and `taker_side` (removable since May 2026). Without them the bot would stop at its
+  first settlement, and the order-flow guard would pass every bet. It now reads `outcome_side`.
+  The independent review found one blocking hole, fixed before the merge: after a restore, an
+  owner's sale could have been booked as a payout.
+- In review, [PR #43](https://github.com/rohanmalhotra0/kal/pull/43): every order now carries a
+  mark Kalshi keeps for good, so if the server's disk is lost, the bot finds its orders again
+  and the $300 limit still counts their losses.
+- Also fixed: a test that failed every UTC morning (time-of-day fixture).
+- Still waiting on the server: no status report yet. Owner: update with
+  `cd /opt/kal && sudo git pull && sudo bash deploy/install.sh`, then `sudo kal doctor`.
+
 ## 2026-10-30 00:50 UTC — check-in: gold and silver links merged; paper books a set together
 
 - Merged [PR #38](https://github.com/rohanmalhotra0/kal/pull/38): `metal_link_arb` (gold and

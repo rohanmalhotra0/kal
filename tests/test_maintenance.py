@@ -97,6 +97,29 @@ class BackupTests(Base):
         self.fill("B")   # bought after the backup: only the catch-up can bring it back
         return day
 
+    def test_copies_only_between_trade_runs(self):
+        # A copy taken between a basket's legs, put back later, read as a basket left
+        # half-built: a false stop (cross-PR money-path audit).
+        self.fill("A")
+        with risk.run_lock():
+            with self.assertRaises(risk.Locked):
+                maintenance.backup(wait=0)
+        self.assertEqual(maintenance.backups(), [])   # nothing copied under a run
+        held, release = threading.Event(), threading.Event()
+
+        def trade_run():
+            with risk.run_lock():
+                held.set()
+                release.wait(5)
+        t = threading.Thread(target=trade_run)
+        t.start()
+        held.wait(5)
+        threading.Timer(0.3, release.set).start()
+        t0 = time.time()
+        self.assertEqual(maintenance.backup(wait=10)["files"], ["kal.db"])
+        self.assertGreater(time.time() - t0, 0.25)   # it waited for the run to finish
+        t.join(5)
+
     def tickers(self):
         with closing(sqlite3.connect(db.path())) as c:
             return sorted(r[0] for r in c.execute("SELECT ticker FROM orders"))
@@ -756,6 +779,21 @@ class SchedulerJobTests(Base):
                 s.stop(wait=5)
         self.assertGreaterEqual(len(calls), 3)
         self.assertIsNone(maintenance.heartbeat_age())   # a clean stop takes it away
+
+    def test_the_loop_beats_before_its_first_tick(self):
+        # The first tick can take a while; until the loop beats, the heartbeat on disk may be
+        # a crashed process's.
+        seen = []
+        s = Scheduler(jobs={"health": lambda: seen.append(maintenance.heartbeat_age())}, tick=0.01,
+                      intervals=lambda cfg: {"health": 60}, hours=lambda cfg: {})
+        s.start()
+        try:
+            deadline = time.time() + 5
+            while not seen and time.time() < deadline:
+                time.sleep(0.01)
+        finally:
+            s.stop(wait=5)
+        self.assertTrue(seen and seen[0] is not None, seen)
 
     def test_summary_hour_is_read_from_config_each_tick(self):
         db.put("scheduler", {"summary": utc(2026, 10, 24, 13)})

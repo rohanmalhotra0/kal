@@ -68,6 +68,20 @@ tests/            unittest; tests/fakes.py has FakeKalshi, tests/helpers.py has 
 - Price ticks are 1c, 0.1c, or 0.1c near the ends (`price_ranges`). Orders are priced off
   the opposite side's real bid, so they're always on a tick.
 - Combo markets (`KXMVE...`) are skipped everywhere.
+- **The bot's orders carry a mark.** Every client_order_id is a UUID starting with
+  `client.BOT_MARK`. Kalshi keeps orders for good (live, then `/historical/orders`), so
+  `ledger.recover` puts back any marked order that bought something and isn't in the
+  books. Books rolled back to an older copy get its full result. New books (a lost disk)
+  can't see what came before the mark (Oct 30, 2026), so there their gains only make up
+  their losses, never more (`ledger.made_up`): a past basket nets out instead of reading
+  as a loss of one leg. Each live run looks back to its last check. Every order put back
+  (here or by `catch_up`) gets a stand-in signal with its event from Kalshi's market
+  data, so `max_per_event` counts it. A ticker can't say its event: player-prop and
+  negative-threshold tickers carry extra hyphens.
+- **API keys are Ed25519 (Kalshi's default since 2026) or RSA.** Both sign timestamp +
+  method + path (no query), base64: Ed25519 signs the text itself, RSA uses RSA-PSS with
+  SHA-256 (`client.sign`). The PEM header doesn't say which; `client.parse_key` refuses
+  any other kind.
 - **Orders use V2 only.** `POST /portfolio/orders` answers 410 `deprecated_v1_order_endpoint`.
   Create: `POST /portfolio/events/orders` on one YES book (`bid`/`ask`): buy YES at p =
   bid p, buy NO at p = ask 1-p; count/price are strings. Cancel:
@@ -114,10 +128,16 @@ tests/            unittest; tests/fakes.py has FakeKalshi, tests/helpers.py has 
   written off as lost, so the books never earn on contracts they don't hold.
 - Account lists (positions, orders, fills) missing their key -> error, not "empty".
 - After `kal restore`, the next live run adds the buys Kalshi shows since the backup's
-  day before it trades (`ledger.catch_up`). A fill it can't read -> trip. Then any
+  day before it trades (`ledger.catch_up`). It puts back the bot's own marked orders
+  first (`ledger.recover`), so a sale outside the bot is never read as the bot's buy of
+  the other side, whatever the fills' times say. A fill it can't read -> trip. Then any
   Kalshi position the books still don't know -> one trip (the owner's own? Reset).
   The marker that asks for this is written into a copy of the backup, and only that copy
   is swapped in, so restored books never come back without it.
+- The daily stop reads equity: open positions at their bid, or at what a known result
+  will pay. A closed market shows no bid until it settles, so it keeps the last mark seen
+  (kv `last_marks`): at cost, a winner's gain left at the close and came back at the
+  settlement, a false stop, or the next day a real loss partly hidden.
 - The daily stop, the bets cap and bet sizes scale with min(capital, account cash +
   open cost), so a budget typed bigger than the account can't loosen them.
 - Baskets skip events with a market closing in under 5 minutes.

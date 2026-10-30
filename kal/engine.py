@@ -10,10 +10,10 @@ import logging
 import os
 import time
 import traceback
-import uuid
 
 from . import books, config, db, fees, flow, gate, ledger, paper, risk, sizing
-from .client import Kalshi, KalshiError, UnknownSettlement, fee, fill_known, filled, is_transient, resting, ts
+from .client import (Kalshi, KalshiError, UnknownSettlement, every_order, fee, fill_count, is_transient,
+                     new_order_id, resting, ts)
 from .strategies import load_all
 from .strategies.base import Context
 
@@ -211,25 +211,31 @@ def _stop_resting(client, ticker, order):
 
 
 def reconcile(client):
-    """Find out what happened to orders whose reply we never got. Raises if we can't."""
+    """Find out what happened to orders whose reply we never got. Raises if we can't.
+    Kalshi moves done orders to its historical store after about 15 days, so after a long
+    outage the lookup reads that too: never call an order that filled "never placed"."""
     rows = ledger.unresolved_orders()
     fixed = 0
     for r in rows:
-        found = [o for o in client.orders(ticker=r["ticker"], min_ts=r["ts"] - 60)
-                 if o.get("client_order_id") == r["client_order_id"]]
+        def lookup(store=None):
+            return [o for o in every_order(client, ticker=r["ticker"], min_ts=r["ts"] - 60, store=store)
+                    if o.get("client_order_id") == r["client_order_id"]]
+        found = lookup()
+        if not found and time.time() - r["ts"] > RECONCILE_GRACE:
+            found = lookup(store=True)   # "never placed" can't be taken back: read the store whatever its cutoff says
         if found:
             o = found[0]
             if resting(o):
                 # Still on the book: stop, as when a reply shows it. More can fill before the
                 # cancel lands, so its count now isn't booked. It's looked up again after Reset.
                 raise _stop_resting(client, r["ticker"], o)
-            if not fill_known(o):
+            n = fill_count(o, r["count"])
+            if n is None:
                 # "canceled" alone can hide a part fill: never book it as nothing. It stays
                 # 'unknown', and the bot stops for a person to check it.
                 config.trip(f"can't tell how much order {r['client_order_id']} on {r['ticker']} filled "
                             f"(Kalshi says only {o.get('status', 'nothing')!r}). Check it on Kalshi.")
                 raise Halted(f"{r['ticker']}: the order lookup doesn't say how much filled")
-            n = filled(o, r["count"])
             db.execute("UPDATE orders SET status = ?, filled = ?, order_id = ? WHERE id = ?",
                        f"reconciled:{o.get('status', '?')}", n, o.get("order_id", ""), r["id"])
             fixed += 1
@@ -241,11 +247,22 @@ def reconcile(client):
     return fixed
 
 
+def _mark(sid, status):
+    """Mark a half-built basket reported. Called only once its stop is written, so a write
+    that fails here (a locked database) just means it's reported once more after Reset:
+    never an error that could hide the stop's reason."""
+    try:
+        db.execute("UPDATE signals SET status = ? WHERE id = ?", status, sid)
+    except Exception:
+        log.warning("couldn't mark basket %s reported; the next run reports it again", sid, exc_info=True)
+
+
 def stranded_baskets():
     """Live baskets an earlier run left part-bought: some legs filled, the rest didn't or
-    were never sent (a lost reply, or the process dying between legs). Each is marked
-    'stranded' so it's reported once. Call after reconcile(), so every order is resolved.
-    Returns their events."""
+    were never sent (a lost reply, or the process dying between legs). Call after
+    reconcile(), so every order is resolved. Returns (signal id, event, status) for each:
+    the caller stops the bot, then marks them with that 'stranded' status, so each is
+    reported once. Marked first, a process killed before the stop left one never reported."""
     out = []
     for s in db.query("SELECT id, event, legs, status FROM signals WHERE mode = 'live' "
                       "AND (status = 'accepted' OR status LIKE 'failed:%')"):
@@ -254,9 +271,7 @@ def stranded_baskets():
         bought = bool(fills) and max(fills) > 0
         whole = len(fills) == len(legs) and bought and min(fills) == max(fills)
         if len(legs) > 1 and bought and not whole:
-            db.execute("UPDATE signals SET status = ? WHERE id = ?",
-                       f"stranded: {sum(f > 0 for f in fills)} of {len(legs)} legs bought", s["id"])
-            out.append(s["event"])
+            out.append((s["id"], s["event"], f"stranded: {sum(f > 0 for f in fills)} of {len(legs)} legs bought"))
         elif s["status"] == "accepted":   # a run died after its last order: just finish the record
             db.execute("UPDATE signals SET status = ? WHERE id = ?",
                        "executed" if bought else "missed (no fill)", s["id"])
@@ -272,7 +287,7 @@ def execute(client, sig, signal_id):
     spent, count = 0.0, None
     for i, leg in enumerate(sig.legs):
         want = leg.count if count is None else count
-        coid = str(uuid.uuid4())
+        coid = new_order_id()
         # Written before sending, so a crash mid-request still leaves a trace to reconcile.
         oid = db.insert("orders", signal_id=signal_id, strategy=sig.strategy, ticker=leg.ticker,
                         side=leg.side, count=want, price=leg.price, filled=0, status="sending",
@@ -294,18 +309,20 @@ def execute(client, sig, signal_id):
             # Earlier legs filled and this one may not have: the basket is part-bought.
             raise LegFailed(f"leg {i + 1}/{len(sig.legs)} {leg.ticker} got no clear reply after earlier "
                             f"legs filled ({e})") from e
-        n = filled(order, want)
+        # Nothing here can raise before the row is written: a row left with a final status and
+        # 0 filled would never be looked up again, whatever the order really bought.
+        n = fill_count(order, want)
+        on_book = resting(order)
+        # 'unknown' makes the next run look the order up, so whatever filled (before the cancel,
+        # or in a reply that doesn't say) lands in the books.
         db.execute("UPDATE orders SET status = ?, filled = ?, order_id = ? WHERE id = ?",
-                   order.get("status", "?"), n, order.get("order_id", ""), oid)
-        if resting(order):
-            # 'unknown' makes the next run look the order up, so whatever filled before the
-            # cancel lands in the books.
-            db.execute("UPDATE orders SET status = 'unknown' WHERE id = ?", oid)
+                   "unknown" if on_book or n is None else str(order.get("status") or "?"), n or 0,
+                   str(order.get("order_id") or ""), oid)
+        if on_book:
             raise _stop_resting(client, leg.ticker, order)
-        if not fill_known(order):
+        if n is None:
             # The reply doesn't say how much filled ("canceled" alone can hide a part fill).
-            # Never read that as nothing: 'unknown' makes the next run look the order up.
-            db.execute("UPDATE orders SET status = 'unknown' WHERE id = ?", oid)
+            # Never read that as nothing.
             if i == 0:
                 raise OrderUnknown(f"{leg.ticker}: Kalshi's reply doesn't say how much filled")
             raise LegFailed(f"leg {i + 1}/{len(sig.legs)} {leg.ticker}: Kalshi's reply doesn't say how much "
@@ -353,7 +370,7 @@ def _run_once(client, cfg, t0):
             log.warning("run waiting on an order: %s", e)
         else:
             log.error("run stopped: %s", traceback.format_exc())
-            if isinstance(e, LegFailed):
+            if isinstance(e, LegFailed):   # _trade stops for these itself; this is only a fallback
                 config.trip(f"basket left half-built: {e}. Check open positions on Kalshi.")
             elif not isinstance(e, Halted):
                 _count_error(cfg, e)
@@ -474,6 +491,27 @@ def _trade(client, cfg, summary):
     positions, balance = [], 0.0
     if live:
         summary["reconciled"] = reconcile(client)
+        # recover() before catch_up(): the bot's own (marked) orders must be in the books before
+        # catch_up() reads the other fills since a restore. Otherwise catch_up() could read an
+        # outside sale first, book it as the bot's buy of the other side and skip the bot's buy
+        # as netted; recover() then put that buy back, and the books held both sides of the
+        # market: a payout booked on contracts already sold (cross-PR money-path audit).
+        try:
+            back = ledger.recover(client)
+        except ledger.CatchUpError as e:
+            reason = f"can't read the bot's own orders on Kalshi to check its books: {e}. Check them on Kalshi."
+            config.trip(reason)
+            summary["notes"].append(f"STOPPED: {reason}")
+            return
+        if back:
+            note = (f"Kalshi shows {back} order(s) the bot made that its books didn't have (lost or older "
+                    f"books?). They're back in, so the $300 limit still counts them.")
+            summary["notes"].append(note)
+            try:
+                from . import notify
+                notify.send("kal put back orders its books had lost", note, tags=("warning",))
+            except Exception:
+                log.warning("recovery alert failed", exc_info=True)
         try:
             added = ledger.catch_up(client)
         except ledger.CatchUpError as e:
@@ -486,9 +524,11 @@ def _trade(client, cfg, summary):
             summary["notes"].append(f"added {added} order(s) from Kalshi that the restored books were missing")
         stranded = stranded_baskets()
         if stranded:
-            reason = (f"basket left half-built on {', '.join(stranded)} (an earlier run stopped between "
-                      f"legs). Check open positions on Kalshi.")
+            reason = (f"basket left half-built on {', '.join(event for _, event, _ in stranded)} (an earlier "
+                      f"run stopped between legs). Check open positions on Kalshi.")
             config.trip(reason)
+            for sid, _, status in stranded:   # only after the stop is written
+                _mark(sid, status)
             summary["notes"].append(f"STOPPED: {reason}")
             return
     try:
@@ -508,7 +548,8 @@ def _trade(client, cfg, summary):
         if odd:
             t, held, mine = odd[0]
             reason = (f"Kalshi shows {held:+.0f} contracts on {t} but the bot's books show {mine:+.0f} "
-                      f"(+ = YES, - = NO). Check that market on Kalshi before resetting.")
+                      f"(+ = YES, - = NO). Check that market on Kalshi before resetting. If those are your own "
+                      f"trades, this clears once that market settles or you close them.")
             config.trip(reason)
             summary["notes"].append(f"STOPPED: {reason}")
             return
@@ -649,9 +690,13 @@ def _trade(client, cfg, summary):
             try:
                 spent = execute(client, sig, sid)
             except (LegFailed, OrderUnknown, Halted) as e:
-                # 'stranded' is already reported (the trip); 'failed' gets checked next run.
-                kind = "stranded" if isinstance(e, LegFailed) else "failed"
-                db.execute("UPDATE signals SET status = ? WHERE id = ?", f"{kind}: {e}", sid)
+                if isinstance(e, LegFailed):
+                    # Stop first, then mark 'stranded' (reported once). A process killed in
+                    # between leaves it unmarked, so the next run finds it and stops again.
+                    config.trip(f"basket left half-built: {e}. Check open positions on Kalshi.")
+                    _mark(sid, f"stranded: {e}")
+                    raise Halted(str(e)) from e
+                db.execute("UPDATE signals SET status = ? WHERE id = ?", f"failed: {e}", sid)   # checked next run
                 raise
             limits.spend(sig, spent)
             db.execute("UPDATE signals SET status = ? WHERE id = ?",

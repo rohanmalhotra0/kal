@@ -7,10 +7,12 @@ positions. Built only from our own fills plus public settlement results, so a
 deposit, a manual trade, or a schema change in Kalshi's settlement feed can't
 inflate it. Kalshi's fills are read only to lower it (contracts sold outside the bot).
 """
+import json
 import time
 
 from . import db
-from .client import UnknownSettlement, fee, num, price, ts, yes_payout
+from .client import (BOT_MARK, KalshiError, UnknownSettlement, every_fill, every_order, fee, fill_count, num,
+                     outcome_side, price, resting, ts, yes_payout)
 
 OPEN = ("active", "open")
 
@@ -62,9 +64,29 @@ def open_cost():
 
 
 def realized():
-    """Settled profit and loss, minus everything written off (counted as lost in full)."""
+    """Settled profit and loss, minus everything written off (counted as lost in full), plus
+    made_up(): the bot's own orders put back on new books count net of their gains."""
     settled = db.query("SELECT COALESCE(SUM(pnl), 0) AS p FROM settlements")[0]["p"]
-    return settled - db.query("SELECT COALESCE(SUM(cost), 0) AS c FROM writeoffs")[0]["c"]
+    return settled - db.query("SELECT COALESCE(SUM(cost), 0) AS c FROM writeoffs")[0]["c"] + made_up()
+
+
+def made_up(until=None):
+    """What the gains held back from the bot's own orders put back on new books (recover:
+    'restored', marked) make up of their losses, on markets settled before `until` (None: all).
+    Never more than those losses, so the budget can't grow from a lost disk; but their losses
+    count net. Counting only each one's losses booked every past basket as a loss (one leg
+    loses, the others win): after a lost disk the bot stopped, its capital "used up", while
+    the account was up (cross-PR money-path audit)."""
+    return min(*_held(until))
+
+
+def _held(until=None):
+    """(gains held back, losses) of the bot's own put-back orders on markets settled before
+    `until` (None: all)."""
+    where, args = (" WHERE ts < ?", [until]) if until is not None else ("", [])
+    h = db.query("SELECT COALESCE(SUM(gain), 0) AS g, COALESCE(SUM(loss), 0) AS l FROM held_gains" + where,
+                 *args)[0]
+    return h["g"], h["l"]
 
 
 def settle(client):
@@ -83,29 +105,42 @@ def settle(client):
         paid = yes_payout(markets.get(ticker, {}))  # raises UnknownSettlement: the engine trips
         if paid is None:
             continue
-        if _write_off_sold_outside(client, ticker, legs):
+        if _write_off_sold_outside(client, ticker, legs, markets.get(ticker, {}).get("open_time")):
             legs = [r for r in open_positions() if r["ticker"] == ticker]
         revenue = sum(r["count"] * (paid if r["side"] == "yes" else 1 - paid) for r in legs)
-        revenue = max(0.0, revenue - _restored_gain(ticker, paid))
+        restored = _restored_gain(ticker, paid)
+        held = min(revenue, restored)   # restored orders' gains never count here
         cost = sum(r["cost"] for r in legs)
         result = "yes" if paid == 1 else "no" if paid == 0 else f"{paid:.4f}"
-        db.insert("settlements", ticker=ticker, settled_ts=time.time(), result=result,
-                  revenue=revenue, cost=cost, pnl=revenue - cost)
+        gain, loss = _own_restored(ticker, paid)
+        with db.connect() as c:   # the settlement and what it held back, or neither
+            now = time.time()
+            c.execute("INSERT OR IGNORE INTO settlements (ticker, settled_ts, result, revenue, cost, pnl) "
+                      "VALUES (?, ?, ?, ?, ?, ?)", (ticker, now, result, revenue - held, cost, revenue - held - cost))
+            if gain or loss:
+                c.execute("INSERT OR IGNORE INTO held_gains (ticker, ts, gain, loss) VALUES (?, ?, ?, ?)",
+                          (ticker, now, _own_share(gain, held, restored), loss))
         n += 1
     return n
 
 
-def _write_off_sold_outside(client, ticker, legs):
+def _write_off_sold_outside(client, ticker, legs, opened=None):
     """Before a market's payout is booked, write off the bot's contracts on it that Kalshi's
     fills show someone sold outside the bot (or netted away by buying the other side). A run
     sees that in Kalshi's positions only while the market trades, so a sale while the bot
     was stopped, or just before the close, would be booked as paid. Fills only ever lower
-    the books. Returns True if it wrote anything off."""
+    the books. Every fill since the market opened (`opened`, its open_time; None: all of
+    them) counts, from Kalshi's historical store too: the open time only decides whether the
+    store is read. Returns True if it wrote anything off."""
+    try:
+        since = ts(opened) - 3600 if opened else None   # no fills before a market opens
+    except (AttributeError, TypeError, ValueError):
+        since = None
     mine = {r["order_id"] for r in db.query("SELECT DISTINCT order_id FROM orders WHERE ticker = ? "
                                             "AND order_id != ''", ticker)}
     toward_yes = 0.0   # how much everyone else's fills moved the account's position to YES
     try:
-        for f in client.fills(ticker=ticker):
+        for f in every_fill(client, ticker=ticker, earliest=since):
             oid, t, side, action, n, _, _ = _parse_fill(f)
             if t == ticker and oid not in mine:
                 toward_yes += n if (side == "yes") == (action == "buy") else -n
@@ -135,7 +170,9 @@ def _restored_gain(ticker, paid, side=None):
     """What orders added after a restore (catch_up) are worth over their cost on a market,
     at a YES value of `paid` (its payout, or for one side, that side's bid as 1 - paid on NO).
     Some may be the owner's own trades, so only their losses count, never their gains: at
-    settlement and in equity alike, so a win settling never reads as a loss."""
+    settlement and in equity alike, so a win settling never reads as a loss. recover() adds
+    'restored' rows too, on new books: there losses from before the order mark can't be
+    seen, so their gains are held back too, and only make up their own losses (made_up())."""
     gain = 0.0
     for r in db.query("SELECT side, filled, price FROM orders WHERE ticker = ? AND strategy = 'restored' "
                       "AND filled > 0", ticker):
@@ -144,6 +181,29 @@ def _restored_gain(ticker, paid, side=None):
         pay = r["filled"] * (paid if r["side"] == "yes" else 1 - paid)
         gain += max(0.0, pay - r["filled"] * r["price"] - fee(r["filled"], r["price"]))
     return gain
+
+
+def _own_restored(ticker, paid, side=None):
+    """(gain, loss) of the bot's own orders recover() put back on new books ('restored' with a
+    marked id) on a market, at a YES value of `paid`, or on one side of it."""
+    gain = loss = 0.0
+    for r in db.query("SELECT side, filled, price FROM orders WHERE ticker = ? AND strategy = 'restored' "
+                      "AND filled > 0 AND client_order_id LIKE ?", ticker, BOT_MARK + "%"):
+        if side and r["side"] != side:
+            continue
+        net = r["filled"] * (paid if r["side"] == "yes" else 1 - paid) - r["filled"] * r["price"] \
+            - fee(r["filled"], r["price"])
+        gain += max(0.0, net)
+        loss += max(0.0, -net)
+    return gain, loss
+
+
+def _own_share(gain, held, restored):
+    """The part of `held` (restored orders' gains a market held back, of `restored` in all)
+    that the bot's own put-back orders may make up their losses with: what's left once
+    catch_up()'s rows have theirs. Those may be the owner's trades, so their gains never
+    make up anything, even when the bot's contracts there were sold outside."""
+    return min(gain, max(0.0, held - (restored - gain)))
 
 
 def payout_of(result, side):
@@ -195,9 +255,11 @@ def settled_order_pnl(shares=None):
     A restored order's gain never counts: settle() took it off the market's pay, so restored
     orders get only what it kept beyond the other orders' pay."""
     shares = written_off_shares() if shares is None else shares
+    held = {r["ticker"]: r["gain"] for r in db.query("SELECT ticker, gain FROM held_gains WHERE gain > 0")}
+    back = made_up()   # shared by the bot's own restored orders, by the gains held back from them
     markets = {}
-    for r in db.query("""SELECT o.id, o.strategy, o.side, o.filled, o.price, s.ticker, s.result, s.revenue
-            FROM orders o JOIN settlements s ON s.ticker = o.ticker WHERE o.filled > 0"""):
+    for r in db.query("""SELECT o.id, o.strategy, o.side, o.filled, o.price, o.client_order_id, s.ticker,
+            s.result, s.revenue FROM orders o JOIN settlements s ON s.ticker = o.ticker WHERE o.filled > 0"""):
         markets.setdefault(r["ticker"], []).append(r)
     out = {}
     for rows in markets.values():
@@ -217,6 +279,12 @@ def settled_order_pnl(shares=None):
             n = sum(r["filled"] for r in restored)
             for r in restored:
                 pay[r["id"]] = (booked - others) * r["filled"] / n
+            mine = {r["id"]: max(0.0, r["filled"] * paid[r["id"]] - cost[r["id"]]) for r in restored
+                    if (r["client_order_id"] or "").startswith(BOT_MARK)}
+            if back and held.get(rows[0]["ticker"]) and sum(mine.values()) > 0:
+                part = back * held[rows[0]["ticker"]] / sum(held.values())
+                for oid, gain in mine.items():
+                    pay[oid] += part * gain / sum(mine.values())
         for r in rows:
             out[r["id"]] = pay[r["id"]] - cost[r["id"]]
     return out
@@ -232,24 +300,64 @@ def available(cfg):
     return max(0.0, capital(cfg) - open_cost())
 
 
-def equity(client, cfg):
-    """Capital with open positions marked at their best bid instead of at cost.
+def _mark(m, side):
+    """What one contract of `side` is worth now: once the result is known (a market can be
+    determined a while before it settles) what it will pay, else its best bid. None when
+    the market shows neither. A result counts only once trading has stopped, and a scalar
+    or void one by its settlement value."""
+    if m.get("status") in ("closed", "determined", "settled", "finalized"):
+        if m.get("result") in ("yes", "no"):
+            return 1.0 if m["result"] == side else 0.0
+        try:
+            paid = float(m.get("settlement_value_dollars") or "nan")
+        except (TypeError, ValueError):
+            paid = float("nan")
+        if 0 <= paid <= 1:
+            return paid if side == "yes" else 1 - paid
+    bid = price(m, f"{side}_bid")
+    return bid if bid > 0 else None
 
-    A market with no bid at all (thin books, or a lookup that failed) is valued at cost,
-    not $0: no buyer right now isn't a loss, and treating it as one would trip the daily
-    loss limit for nothing. Real losses still land when the market settles."""
+
+def equity(client, cfg):
+    """Capital with open positions marked at what they're worth now (_mark) instead of at
+    cost.
+
+    A market that shows no bid (closed and not yet settled, or a lookup that failed) keeps
+    the last mark the bot saw for it (kv 'last_marks'). At cost, a winner's gain left
+    equity when its market closed and came back when it settled: a false daily stop, or,
+    a day later, a real loss partly hidden from it (review of the lost-disk fix). One that
+    never had a bid is valued at cost, not $0: no buyer isn't a loss. Real losses still
+    land when the market settles."""
     rows = open_positions()
+    last, seen = db.get("last_marks") or {}, {}
     if not rows:
+        if last:
+            db.put("last_marks", {})
         return capital(cfg)
     markets = client.markets_by_ticker({r["ticker"] for r in rows})
-    value = 0.0
+    value = own_gain = own_loss = 0.0
     for r in rows:
-        bid = price(markets.get(r["ticker"], {}), f"{r['side']}_bid")
-        if bid > 0:
-            yes = bid if r["side"] == "yes" else 1 - bid
-            value += max(0.0, r["count"] * bid - _restored_gain(r["ticker"], yes, r["side"]))
-        else:
+        key = f"{r['ticker']}:{r['side']}"
+        each = _mark(markets.get(r["ticker"]) or {}, r["side"])
+        if each is None:
+            each = last.get(key)
+        if each is None:
             value += r["cost"]
+            continue
+        seen[key] = each
+        yes = each if r["side"] == "yes" else 1 - each
+        worth, restored = r["count"] * each, _restored_gain(r["ticker"], yes, r["side"])
+        held = min(worth, restored)
+        value += worth - held
+        gain, loss = _own_restored(r["ticker"], yes, r["side"])   # as settle() would book them
+        own_gain += _own_share(gain, held, restored)
+        own_loss += loss
+    db.put("last_marks", seen)
+    if own_gain or own_loss:
+        # made_up() with the open ones too: else a put-back win settling another day would make
+        # up an older loss that day, and hide a real loss from the daily stop (review of this).
+        g, l = _held()
+        value += min(g + own_gain, l + own_loss) - min(g, l)
     return capital(cfg) - open_cost() + value
 
 
@@ -316,8 +424,28 @@ def write_off(ticker, side, count, note=""):
     return cost
 
 
+def _direction(f):
+    """(side, action) of a fill. Kalshi's deprecated side and action say exactly what was
+    done. Once they're gone, the outcome side says which way: buy YES and sell NO leave the
+    same position, so it reads as a buy of that side, priced on that side. Both there but
+    saying different things: CatchUpError, never a guess."""
+    try:
+        outcome = outcome_side(f)
+    except ValueError as e:
+        raise CatchUpError(f"a fill's direction fields disagree: {e}")
+    side, action = f.get("side"), f.get("action")
+    if side in ("yes", "no") and action in ("buy", "sell"):
+        long = side if action == "buy" else ("no" if side == "yes" else "yes")
+        if outcome and outcome != long:
+            raise CatchUpError(f"a fill says {action} {side} but outcome {outcome}: they should agree")
+        return side, action
+    if outcome:
+        return outcome, "buy"
+    return side, action or "buy"   # as before: a side with no action was a buy
+
+
 def _parse_fill(f):
-    side, action = f.get("side"), f.get("action", "buy")
+    side, action = _direction(f)
     n = num(f, "count")
     p = price(f, f"{side}_price") if side in ("yes", "no") else 0.0
     if side not in ("yes", "no") or action not in ("buy", "sell") or not n > 0 or not 0 < p < 1 \
@@ -336,27 +464,184 @@ def catch_up(client):
     owner's own trades in that window get counted too: the safe direction, since they only
     make the bot think it spent more, and settle() never books their gains, only their
     losses. Returns how many orders were added (0 if no restore is waiting). Raises
-    CatchUpError if a fill can't be read: never guess."""
+    CatchUpError if a fill can't be read: never guess. Fills older than Kalshi's cutoff are
+    read from its historical store, so an old backup still gets every buy since its day.
+
+    Never added: a fill on the other side of contracts the books hold at that moment. It
+    nets them away (the owner selling them, or buying the other side; the bot never buys
+    both sides of a market), so shortfalls() and the sold-outside check write them off.
+    Added as a buy, it would hide that, and the payout would be booked. Fills go in time
+    order, so a buy and its sale inside the gap work out too. Run recover() first: the
+    bot's own marked orders are then in the books, so a sale is never read before the buy
+    it nets, whatever the fills' times say. The one case that gets wrong needs a bot order
+    from before the mark (an unmarked buy, sold, then a marked buy of the other side):
+    the bot first traded live with the mark, so it has none."""
     gap = db.get("restored")
     if not gap:
         return 0
     known = {r["order_id"] for r in db.query("SELECT DISTINCT order_id FROM orders WHERE order_id != ''")}
+    held = {}
+    for r in open_positions():
+        held[(r["ticker"], r["side"])] = held.get((r["ticker"], r["side"]), 0.0) + r["count"]
     found = {}
-    for f in client.fills(min_ts=gap["since"]):
-        oid, ticker, side, action, n, p, when = _parse_fill(f)
+    for oid, ticker, side, action, n, p, when in sorted((_parse_fill(f) for f in every_fill(client, min_ts=gap["since"])),
+                                                        key=lambda x: x[6]):
         if action != "buy" or oid in known:
             continue  # the bot never sells; a sold position shows up in shortfalls()
+        if held.get((ticker, "no" if side == "yes" else "yes"), 0.0) > 1e-6:
+            continue  # nets held contracts away: written off, never booked as the bot's buy
+        held[(ticker, side)] = held.get((ticker, side), 0.0) + n
         o = found.setdefault(oid, {"ticker": ticker, "side": side, "n": 0.0, "p": 0.0, "ts": when})
         o["n"] += n
         o["p"] = max(o["p"], p)
         o["ts"] = min(o["ts"], when)
+    events = _events(client, {o["ticker"] for o in found.values()})
     for oid, o in found.items():
-        db.insert("orders", ts=o["ts"], strategy="restored", ticker=o["ticker"], side=o["side"],
-                  count=o["n"], price=o["p"], filled=o["n"], status="imported", order_id=oid,
-                  client_order_id="")
+        with db.connect() as c:   # the order and its stand-in signal, or neither
+            sid = _stand_in(c, "restored", events[o["ticker"]], o["ticker"], o["side"], o["n"], o["p"], o["ts"])
+            c.execute("INSERT INTO orders (ts, signal_id, strategy, ticker, side, count, price, filled, status, "
+                      "order_id, client_order_id) VALUES (?, ?, 'restored', ?, ?, ?, ?, ?, 'imported', ?, '')",
+                      (o["ts"], sid, o["ticker"], o["side"], o["n"], o["p"], o["n"], oid))
     db.put("restore_check", True)   # strangers() gets one look at Kalshi's positions next
     db.execute("DELETE FROM kv WHERE key = 'restored'")
     return len(found)
+
+
+RECOVER_SLACK = 3600   # seconds: orders from just before the last check are looked at again
+
+
+def _events(client, tickers):
+    """{ticker: event} for orders put back without their signal, from Kalshi's market data
+    (the market, then its historical store). The ticker alone doesn't say: player-prop and
+    negative-threshold tickers carry extra hyphens. Only a market Kalshi has no record of
+    (404) keeps its own ticker as its event. Any other failure (an outage, a rate limit)
+    raises, so the run writes nothing and tries again: an order filed under its ticker is
+    one the per-event cap can't see until its market settles."""
+    out = {}
+    for t in sorted(tickers):
+        for archive in (False, True):
+            try:
+                m = client.market(t, archive=archive)
+            except KalshiError as e:
+                if e.status != 404:
+                    raise
+                m = None
+            if m and m.get("event_ticker"):
+                out[t] = m["event_ticker"]
+                break
+        else:
+            out[t] = t
+    return out
+
+
+def _stand_in(c, strategy, event, ticker, side, n, p, when):
+    """A signal row for an order put back without its own, so the per-event limit counts it.
+    Filed under the bare ticker, put-back orders hid from max_per_event: after a lost disk or
+    a rollback a live bet strategy staked twice the cap in one event (cross-PR audit). Its
+    status keeps it out of the basket and trade-alert checks; guaranteed=0 counts it as a bet."""
+    return c.execute("INSERT INTO signals (ts, strategy, event, title, mode, guaranteed, cost, payout_min, "
+                     "exp_profit, legs, status) VALUES (?, ?, ?, ?, 'live', 0, ?, 0, 0, ?, 'put back')",
+                     (when, strategy, event, f"{ticker} (put back from Kalshi)", n * p + fee(n, p),
+                      json.dumps([{"ticker": ticker, "side": side, "price": p, "count": n}]))).lastrowid
+
+
+def _bought_count(o):
+    """How many contracts a bot order bought: client.fill_count, with no size to fall back on
+    ("executed" alone is no number). Raises CatchUpError if Kalshi's reply doesn't say for
+    sure: a count null, empty or unreadable, or counts that contradict each other."""
+    n = fill_count(o)
+    if n is None:
+        raise CatchUpError(f"order {o.get('client_order_id')} doesn't say how much it bought (fields: "
+                           f"{', '.join(sorted(o))[:200]})")
+    return n
+
+
+def _bought_side(o):
+    """(side, limit price) of a bot order. The bot only ever buys, so the side is the outcome
+    it's long: outcome_side or book_side, with Kalshi's deprecated side/action only as a
+    cross-check ("sell YES" is "buy NO"). Raises CatchUpError, never a guess."""
+    side, action = _direction(o)   # raises if the fields disagree
+    if side in ("yes", "no") and action == "sell":
+        side = "no" if side == "yes" else "yes"
+    p = price(o, f"{side}_price") if side in ("yes", "no") else 0.0
+    if not 0 < p < 1:
+        raise CatchUpError(f"order {o.get('client_order_id')} doesn't say which way or at what price (fields: "
+                           f"{', '.join(sorted(o))[:200]})")
+    return side, p
+
+
+def recover(client):
+    """Put back the bot's own orders that its books don't have: a lost or replaced disk, a
+    reinstall, or books rolled back to an older copy without `kal restore`. Every order the
+    bot sends carries a marked client_order_id (client.new_order_id), and Kalshi keeps it, so
+    a marked order is the bot's for sure. Books with an earlier check (rolled back to an
+    older copy) still hold what came before, so it goes back with its full result
+    ("recovered"). Books with no check yet (a new disk) can't see losses from before the
+    mark, so there its gains only make up such orders' losses, never more ("restored",
+    made_up()), and the budget can't grow from a lost disk. One the books call never placed, found filled inside the
+    look-back, is corrected in its own row, and a basket it belongs to is checked again.
+    One whose market the books already settled without it counts as lost in full (the safe
+    way). Each order's writes go in one transaction: a run killed part way redoes it.
+    Looks back to the last check (kv 'orders_checked') less RECOVER_SLACK, or over the
+    whole account if the books don't say. Orders sent before the mark existed can't be
+    found. Returns how many it put back. Every order is read and checked before any is
+    written: one it can't read raises CatchUpError (the bot stops) with nothing written,
+    and the first good run after puts them all back."""
+    start = time.time()
+    since = db.get("orders_checked") or None   # one meaning for "no check yet", whatever was stored
+    ids = {r["order_id"] for r in db.query("SELECT DISTINCT order_id FROM orders WHERE order_id != ''")}
+    rows = {r["client_order_id"]: r for r in db.query(
+        "SELECT id, client_order_id, status, ticker, side, signal_id FROM orders WHERE client_order_id != ''")}
+    settled = {r["ticker"] for r in db.query("SELECT ticker FROM settlements")}
+    todo = []
+    for o in every_order(client, min_ts=since - RECOVER_SLACK if since else None):
+        coid, oid = str(o.get("client_order_id") or ""), str(o.get("order_id") or "")
+        row = rows.get(coid)
+        if not coid.startswith(BOT_MARK) or (row and row["status"] != "never_placed") or (oid and oid in ids):
+            continue
+        ticker = o.get("ticker")
+        if not oid or not ticker:
+            raise CatchUpError(f"order {coid} has no order id or ticker")
+        if resting(o):
+            raise CatchUpError(f"order {coid} on {ticker} is still on the book")
+        n = _bought_count(o)
+        if n <= 0:
+            continue   # bought nothing (a test order, a missed chance): nothing to book
+        side, p = _bought_side(o)
+        try:
+            when = ts(o["created_time"]) if o.get("created_time") else start
+        except (TypeError, ValueError, AttributeError):
+            raise CatchUpError(f"order {coid} has an unreadable time: {o.get('created_time')!r}")
+        if row and (row["ticker"], row["side"]) != (ticker, side):
+            raise CatchUpError(f"order {coid}: Kalshi says {side} on {ticker}, the books {row['side']} "
+                               f"on {row['ticker']}")
+        ids.add(oid)
+        todo.append((coid, oid, ticker, row, n, side, p, when))
+    events = _events(client, {t for _, _, t, row, *_ in todo if not row})
+    for coid, oid, ticker, row, n, side, p, when in todo:
+        with db.connect() as c:   # all of this order's writes, or none of them
+            if row:   # the books said never placed, but it filled
+                c.execute("UPDATE orders SET filled = ?, status = 'recovered', order_id = ? WHERE id = ?",
+                          (n, oid, row["id"]))
+                sig = c.execute("SELECT legs FROM signals WHERE id = ?", (row["signal_id"],)).fetchone() \
+                    if row["signal_id"] else None
+                if sig:   # a basket with a leg after all: stranded_baskets() looks at it again this run
+                    many = len(json.loads(sig["legs"] or "[]")) > 1
+                    c.execute("UPDATE signals SET status = ? WHERE id = ?",
+                              ("failed: a leg Kalshi shows filled after all" if many else "executed",
+                               row["signal_id"]))
+            else:
+                strategy = "restored" if since is None else "recovered"
+                sid = _stand_in(c, strategy, events[ticker], ticker, side, n, p, when)
+                c.execute("INSERT INTO orders (ts, signal_id, strategy, ticker, side, count, price, filled, status, "
+                          "order_id, client_order_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'recovered', ?, ?)",
+                          (when, sid, strategy, ticker, side, n, p, n, oid, coid))
+            if ticker in settled:
+                c.execute("INSERT INTO writeoffs (ts, ticker, side, count, cost, note) VALUES (?, ?, ?, ?, ?, ?)",
+                          (time.time(), ticker, side, n, n * p + fee(n, p),
+                           "found after its market was booked without it: counted as lost"))
+    db.put("orders_checked", start)
+    return len(todo)
 
 
 def strangers(positions):

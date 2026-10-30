@@ -82,9 +82,10 @@ def _today(now):
                     start)[0]
     # Contracts written off (Kalshi showed them gone) are lost money too, booked when they go.
     gone = db.query("SELECT COALESCE(SUM(cost), 0) AS c FROM writeoffs WHERE ts >= ?", start)[0]["c"]
+    back = ledger.made_up() - ledger.made_up(start)   # put-back orders' losses made up today
     pap = db.query("SELECT COALESCE(SUM(pnl), 0) AS p, COUNT(*) AS n FROM paper "
                    "WHERE settled = 1 AND settled_ts >= ?", start)[0]
-    out = {"live_settled_pnl": round(live["p"] - gone, 2), "live_settled": live["n"],
+    out = {"live_settled_pnl": round(live["p"] - gone + back, 2), "live_settled": live["n"],
            "live_written_off": round(gone, 2),
            "paper_settled_pnl": round(pap["p"], 2), "paper_settled": pap["n"], "equity_change": None}
     day, last = db.get("day_start") or {}, db.get("last_pnl") or {}
@@ -339,7 +340,7 @@ def daily(now=None):
                     "WHERE settled_ts >= ? AND settled_ts < ?", start, end)[0]
     gone = db.query("SELECT COALESCE(SUM(cost), 0) AS c FROM writeoffs WHERE ts >= ? AND ts < ?",
                     start, end)[0]["c"]   # lost money too, booked the day it was written off
-    real = live["p"] - gone
+    real = live["p"] - gone + ledger.made_up(end) - ledger.made_up(start)
     pap = db.query("SELECT COALESCE(SUM(pnl), 0) AS p, COUNT(*) AS n FROM paper "
                    "WHERE settled = 1 AND settled_ts >= ? AND settled_ts < ?", start, end)[0]
     held = ledger.open_positions()

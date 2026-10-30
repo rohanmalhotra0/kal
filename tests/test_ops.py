@@ -631,7 +631,7 @@ class SelftestTests(TempHome):
         self.assertEqual(bad, [])
         self.assertEqual({r["check"] for r in rows},
                          {"markets", "market fields", "events", "order book", "candlesticks", "series",
-                          "clock", "balance", "positions"})
+                          "clock", "balance", "positions", "history store"})
         for r in rows:
             self.assertEqual(set(r), {"check", "ok", "detail"})
         self.assertIn("skipped", rows_by_check(rows)["clock"]["detail"])   # a fake has no clock to ask
@@ -814,6 +814,15 @@ class OrderProbeTests(TempHome):
         c.buy = lambda *a, **k: c.orders.append(a) or {"order_id": "o1"}
         self.assertFalse(rows_by_check(selftest.run(c, order_probe=True))["order probe"]["ok"])
 
+    def test_a_reply_that_doesnt_add_up_but_shows_a_fill_stops_the_bot(self):
+        c = GoodFake()
+        c.buy = lambda *a, **k: c.orders.append(a) or {"order_id": "o1", "status": "executed",
+                                                       "fill_count_fp": "0.00", "initial_count_fp": "1.00"}
+        probe = rows_by_check(selftest.run(c, order_probe=True))["order probe"]
+        self.assertFalse(probe["ok"])
+        self.assertEqual(len(c.orders), 1)                               # never a second order
+        self.assertIn("may have FILLED", config.load()["disabled_reason"])
+
     def test_real_client_sends_ioc_at_one_cent(self):
         """The real Kalshi class, with HTTP stubbed: proves the probe's request body."""
         m = good_markets()[0]
@@ -828,6 +837,8 @@ class OrderProbeTests(TempHome):
             "/portfolio/balance": {"balance_dollars": "12.3400"},
             "/portfolio/positions": {"market_positions": [{"ticker": "KXA-1", "position_fp": "3.00",
                                                            "market_exposure_dollars": "1.4000"}]},
+            "/historical/fills": {"fills": [], "cursor": ""},
+            "/historical/orders": {"orders": [], "cursor": ""},
         }
         posts = []
 

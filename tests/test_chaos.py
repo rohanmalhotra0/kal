@@ -57,9 +57,10 @@ class ChaosKalshi(FakeKalshi):
         order["fill_count_fp"] = f"{order['filled']:.2f}"
 
     def _new_order(self, ticker, side, count, price, coid, status):
+        yes = price if side == "yes" else 1 - price
         o = {"order_id": f"o{len(self.order_list) + 1}", "client_order_id": coid, "ticker": ticker,
              "side": side, "price": price, "count": count, "filled": 0, "status": status,
-             "fill_count_fp": "0.00"}
+             "fill_count_fp": "0.00", "yes_price_dollars": f"{yes:.4f}", "no_price_dollars": f"{1 - yes:.4f}"}
         self.order_list.append(o)
         return o
 
@@ -95,7 +96,9 @@ class ChaosKalshi(FakeKalshi):
         self.cancelled.append(order_id)
         return {}
 
-    def fills(self, min_ts=None, ticker=None):
+    def fills(self, min_ts=None, ticker=None, archive=False):
+        if archive:
+            return []   # everything here is recent: nothing has moved to Kalshi's historical store
         return [{"order_id": o["order_id"], "ticker": o["ticker"], "side": o["side"], "action": "buy",
                  "count_fp": f"{o['filled']:.2f}", f"{o['side']}_price_dollars": f"{o['price']:.4f}",
                  "created_time": "2026-10-25T00:00:00Z"} for o in self.order_list

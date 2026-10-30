@@ -390,6 +390,9 @@ class Scheduler:
     # ---------- the loop ----------
 
     def _loop(self):
+        # Beat at once, before the first tick (which can take a while): until then the
+        # heartbeat on disk may be a crashed process's, and a clean stop must take it away.
+        self._beat()
         while not self._stop.is_set():
             try:
                 self.tick()
@@ -431,7 +434,7 @@ class Scheduler:
         trade = self._workers.get("trade")
         if trade and trade.is_alive():
             trade.join(timeout=wait)
-        if self._beat_at:   # we wrote the heartbeat: a clean stop takes it away
+        if self._beat_at or self._thread:   # this process ran the loop: a clean stop takes the heartbeat away
             try:
                 from . import maintenance
                 maintenance.unbeat()
