@@ -97,6 +97,29 @@ class BackupTests(Base):
         self.fill("B")   # bought after the backup: only the catch-up can bring it back
         return day
 
+    def test_copies_only_between_trade_runs(self):
+        # A copy taken between a basket's legs, put back later, read as a basket left
+        # half-built: a false stop (cross-PR money-path audit).
+        self.fill("A")
+        with risk.run_lock():
+            with self.assertRaises(risk.Locked):
+                maintenance.backup(wait=0)
+        self.assertEqual(maintenance.backups(), [])   # nothing copied under a run
+        held, release = threading.Event(), threading.Event()
+
+        def trade_run():
+            with risk.run_lock():
+                held.set()
+                release.wait(5)
+        t = threading.Thread(target=trade_run)
+        t.start()
+        held.wait(5)
+        threading.Timer(0.3, release.set).start()
+        t0 = time.time()
+        self.assertEqual(maintenance.backup(wait=10)["files"], ["kal.db"])
+        self.assertGreater(time.time() - t0, 0.25)   # it waited for the run to finish
+        t.join(5)
+
     def tickers(self):
         with closing(sqlite3.connect(db.path())) as c:
             return sorted(r[0] for r in c.execute("SELECT ticker FROM orders"))
