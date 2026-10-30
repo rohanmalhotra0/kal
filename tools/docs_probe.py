@@ -1,26 +1,27 @@
-"""Direction fields on real public trades, and the spec's Trade and position shapes (probe only)."""
-import json
+"""Every field Kalshi's spec marks deprecated, and breaking changes in its changelog (probe only)."""
 import re
 
 import requests
 import yaml
 
 S = requests.Session()
-API = "https://api.elections.kalshi.com/trade-api/v2"
-d = S.get(API + "/markets/trades", params={"limit": 3}, timeout=30).json()
-for t in d.get("trades", [])[:3]:
-    print("trade:", json.dumps(t)[:600])
 raw = S.get("https://docs.kalshi.com/openapi.yaml", timeout=60).text
 spec = yaml.safe_load(re.sub(r"[\x80-\x9f]", "", raw))
-sch = spec["components"]["schemas"]
-for name in ("Trade", "MarketPosition"):
-    s = sch.get(name, {})
-    print(f"\n{name} required: {s.get('required')}")
-    for k, v in (s.get("properties") or {}).items():
-        print(f"  {name}.{k}: deprecated={v.get('deprecated')} {(v.get('description') or '').strip()[:160]!r}")
-for name in ("Order", "Fill"):
-    s = sch[name]
-    print(f"\n{name} required: {s.get('required')}")
-    for k in ("side", "action", "outcome_side", "book_side"):
-        v = s["properties"].get(k, {})
-        print(f"  {name}.{k}: deprecated={v.get('deprecated')} {json.dumps(v)[:300]}")
+for name, s in sorted(spec["components"]["schemas"].items()):
+    for k, v in (s.get("properties") or {}).items() if isinstance(s, dict) else []:
+        if isinstance(v, dict) and v.get("deprecated"):
+            print(f"DEPRECATED {name}.{k}: {(v.get('description') or '').strip()[:220]!r}")
+for p, ops in spec["paths"].items():
+    for verb, op in ops.items():
+        if isinstance(op, dict):
+            if op.get("deprecated"):
+                print(f"DEPRECATED endpoint {verb.upper()} {p}: {op.get('summary')}")
+            for prm in op.get("parameters", []) or []:
+                if isinstance(prm, dict) and prm.get("deprecated"):
+                    print(f"DEPRECATED param {verb.upper()} {p} {prm.get('name')}")
+log = S.get("https://docs.kalshi.com/changelog.md", timeout=30).text
+print("=" * 60)
+for m in re.finditer(r"\*\*([A-Z][a-z]+ \d{1,2}, 20\d\d)\*\*(.*?)(?=\*\*[A-Z][a-z]+ \d{1,2}, 20\d\d\*\*|\Z)", log, re.S):
+    body = " ".join(m.group(2).split())
+    if re.search(r"breaking|removed|will be removed|deprecat|no longer", body, re.I):
+        print(f"--- {m.group(1)}: {body[:700]}")
