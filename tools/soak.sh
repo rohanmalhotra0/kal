@@ -5,14 +5,31 @@ set -u
 [ -n "${ARENA:-}" ] && export MALLOC_ARENA_MAX="$ARENA"
 export KAL_HOME="$(mktemp -d)"
 python -m kal on --budget 300 > /dev/null
-python -m kal set trade_interval_min 2 > /dev/null
+[ "$MODE" = long ] || python -m kal set trade_interval_min 2 > /dev/null
 if [ "$MODE" = trace ] || [ "$MODE" = keys ]; then
   python tools/memprobe.py
   exit 0
 fi
-timeout 2400 python tools/memprobe.py > "$KAL_HOME/probe.out" 2> "$KAL_HOME/probe.err"
-echo "== exit (124 = stopped by the 40-minute timeout): $?"
-grep -E "^(mode|trade)" "$KAL_HOME/probe.out"
+LIMIT=2400; [ "$MODE" = long ] && LIMIT=18000
+timeout $LIMIT python tools/memprobe.py > "$KAL_HOME/probe.out" 2> "$KAL_HOME/probe.err"
+echo "== exit (124 = stopped by the $((LIMIT / 60))-minute timeout): $?"
+grep -E "^(mode|trade|t=)" "$KAL_HOME/probe.out"
+if [ "$MODE" = long ]; then
+  echo "== status"; python -m kal status
+  echo "== health"; python -m kal health
+  echo "== report (first 80 lines)"; python -m kal report | head -80
+  echo "== research files"; ls -la "$KAL_HOME/research" 2>&1 | head -30
+  python - <<'PY2'
+import os, sqlite3
+db = sqlite3.connect(os.path.join(os.environ["KAL_HOME"], "kal.db"))
+for kind, n, avg, mx in db.execute("SELECT kind, COUNT(*), AVG(duration), MAX(duration) FROM runs GROUP BY kind"):
+    print(f"   {kind:12s} runs={n} avg={avg or 0:.0f}s max={mx or 0:.0f}s")
+for kind, msg in db.execute("SELECT kind, message FROM runs WHERE kind != 'trade' ORDER BY id DESC LIMIT 8"):
+    print(f"   last {kind}: {(msg or '')[:400]}")
+print("   signals by strategy/mode:", db.execute("SELECT strategy, mode, COUNT(*) FROM signals GROUP BY strategy, mode").fetchall())
+print("   paper trades:", db.execute("SELECT strategy, COUNT(*), SUM(settled) FROM paper GROUP BY strategy").fetchall())
+PY2
+fi
 echo "== failed runs"
 python - <<'PY'
 import os, sqlite3

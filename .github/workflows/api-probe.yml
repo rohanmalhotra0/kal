@@ -13,12 +13,12 @@ permissions:
 jobs:
   probe:
     runs-on: ubuntu-latest
-    timeout-minutes: 55
+    timeout-minutes: 340
     strategy:
       fail-fast: false
       matrix:
         include:
-          - {mode: keys, arena: ""}
+          - {mode: long, arena: ""}
     env:
       MODE: ${{ matrix.mode }}
       ARENA: ${{ matrix.arena }}

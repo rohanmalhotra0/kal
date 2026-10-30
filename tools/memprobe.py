@@ -228,6 +228,37 @@ def wrap_trade():
     scheduler.DEFAULT_JOBS["trade"] = trade
 
 
+def sampler(every=60):
+    """Every minute: this process's memory, and each child's (research runs in one)."""
+    me, t0 = os.getpid(), time.time()
+
+    def status(pid):
+        out = {}
+        try:
+            with open(f"/proc/{pid}/status") as f:
+                for line in f:
+                    k, _, v = line.partition(":")
+                    if k in ("VmRSS", "VmHWM", "PPid"):
+                        out[k] = int(v.split()[0])
+        except OSError:
+            pass
+        return out
+
+    def loop():
+        while True:
+            kids = []
+            for pid in os.listdir("/proc"):
+                if pid.isdigit() and status(pid).get("PPid") == me:
+                    st = status(pid)
+                    kids.append(f"{pid}: {st.get('VmRSS', 0) // 1024}/{st.get('VmHWM', 0) // 1024} MB")
+            m = mem()
+            print(f"t={(time.time() - t0) / 60:5.1f} min  main {m['VmRSS']} MB (peak since last run "
+                  f"{m['VmHWM']})  children (now/peak): {', '.join(kids) or 'none'}", flush=True)
+            time.sleep(every)
+
+    threading.Thread(target=loop, name="sampler", daemon=True).start()
+
+
 if __name__ == "__main__":
     print(f"mode={MODE} cpus={os.cpu_count()} MALLOC_ARENA_MAX={os.environ.get('MALLOC_ARENA_MAX')}", flush=True)
     if MODE == "keys":
@@ -236,5 +267,7 @@ if __name__ == "__main__":
         trace_one()
     else:
         wrap_trade()
+        if MODE == "long":
+            sampler()
         from kal.scheduler import Scheduler
         Scheduler().serve_forever()
