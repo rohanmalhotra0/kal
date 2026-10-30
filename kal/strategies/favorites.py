@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 
 from .. import sizing
 from ..client import fee, num, price, ts
-from .base import Leg, Signal, Strategy, scheduled_end
+from .base import Leg, Signal, Strategy, held_dollars, scheduled_end
 
 MAX_SPREAD = 0.02       # wider than this and the "price" isn't really known
 MIN_VOLUME_24H = 200    # thin markets: our order would be most of the trading
@@ -160,8 +160,8 @@ class Favorites(Strategy):
         for e in active_edges(ctx.research):
             by_series[e["series"]].append(e)
         best = {}  # event -> (signal, market, side, edge): markets in one event move together, so one bet each
-        held = defaultdict(int)  # series-day -> markets already held there (anyone's)
-        held_any_day = defaultdict(int)  # series -> held markets with no known end: they count on every day
+        held = defaultdict(float)  # series-day -> dollars already held there (anyone's)
+        held_any_day = defaultdict(float)  # series -> held with no known end: they count on every day
         for series, edges in sorted(by_series.items()):
             try:
                 # Every open market: a game's close_time is days after its scheduled end.
@@ -175,9 +175,9 @@ class Favorites(Strategy):
                 if m.get("ticker") in ctx.held and in_series(m, series):
                     end = ends.get(m.get("ticker"))
                     if end:
-                        held[group_of(series, end)] += 1
+                        held[group_of(series, end)] += held_dollars(ctx, m["ticker"])
                     else:
-                        held_any_day[series] += 1
+                        held_any_day[series] += held_dollars(ctx, m["ticker"])
             picks = {}
             try:
                 for m in markets:
@@ -189,12 +189,11 @@ class Favorites(Strategy):
                 continue
             best.update(picks)
         # One series-day rides one price path, so its bets share one cap. Each market already
-        # held there counts as a full bet. Best first, so the cap leaves room for those.
+        # held there counts what it cost (held_dollars). Best first, so the cap leaves room.
         found, spent = [], defaultdict(float)
         for sig, m, side, e in sorted(best.values(), key=lambda x: -x[0].exp_profit):
             g = sig.meta["group"]
-            n_held = held[g] + held_any_day[e["series"]]
-            room = GROUP_SHARE * ctx.bankroll - n_held * bet_cap(ctx) - spent[g]
+            room = GROUP_SHARE * ctx.bankroll - held[g] - held_any_day[e["series"]] - spent[g]
             if sig.cost > room + 1e-9:
                 sig = self._signal(ctx, m, side, e, sig.meta["closes"], cap=room)  # smaller, to fit (or none)
             if sig:

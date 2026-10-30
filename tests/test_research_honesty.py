@@ -115,8 +115,9 @@ class HourlyLuckTests(TempHome):
         market(8, 5.5)  # the one at the tested time
         research = {"edges": [edge(self.EDGE)]}
 
-        def scan(held_now):
-            ctx = Context(c, cfg(), "paper", 1000.0, 300.0, set(held_now), research, {})
+        def scan(held_now, held_cost=None, **kw):
+            ctx = Context(c, cfg(**kw), "paper", 1000.0, 300.0, set(held_now), research, {},
+                          held_cost=dict(held_cost or {}))
             with mock.patch.object(favorites.time, "time", return_value=now):
                 return favorites.STRATEGY.scan(ctx)
         self.assertEqual(len(scan(set())), 1)
@@ -124,6 +125,8 @@ class HourlyLuckTests(TempHome):
         two = scan(set(list(held)[:2]))
         self.assertEqual(len(two), 1)
         self.assertLessEqual(two[0].cost, 10.0 + 1e-9)
+        # Bets already made count what they cost: a lower max_per_trade later can't shrink them.
+        self.assertEqual(scan(held, held_cost={tk: 10.0 for tk in held}, max_per_trade=3), [])
 
     def test_a_failing_book_cant_hide_held_markets_from_the_cap(self):
         """Held markets are counted before any order book is read, and a series whose scan

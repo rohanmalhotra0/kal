@@ -35,7 +35,7 @@ from datetime import datetime, timezone
 
 from .. import sizing
 from ..client import fee, num, price
-from .base import Leg, Signal, Strategy, plain_payouts, scheduled_end
+from .base import Leg, Signal, Strategy, held_dollars, plain_payouts, scheduled_end
 from .favorites import is_open
 
 NAME = "longshot_fade"
@@ -194,15 +194,15 @@ class LongshotFade(Strategy):
         # The same call the arbitrage strategies make, so the run's cache serves it.
         events = [e for e in (event_info(ev, by_series)
                               for ev in ctx.client.events(status="open", with_nested_markets="true")) if e]
-        held = defaultdict(int)  # group -> tickers already held there (anyone's)
-        held_any_day = defaultdict(int)  # series -> held tickers with no known end: they count on every day
+        held = defaultdict(float)  # group -> dollars already held there (anyone's)
+        held_any_day = defaultdict(float)  # series -> held with no known end: they count on every day
         for e in events:
             for tk in e["tickers"] & ctx.held:
                 end = e["ends"].get(tk)
                 if end:
-                    held[group_of(e["series"], end)] += 1
+                    held[group_of(e["series"], end)] += held_dollars(ctx, tk)
                 else:
-                    held_any_day[e["series"]] += 1
+                    held_any_day[e["series"]] += held_dollars(ctx, tk)
         picks = []
         for e in events:
             if e["tickers"] & ctx.held:
@@ -216,9 +216,9 @@ class LongshotFade(Strategy):
         for e, m, cell, offer in picks:
             end = e["ends"][m["ticker"]]
             g = group_of(e["series"], end)
-            # Each held ticker counts as a full-size bet: the most a longshot bet can be.
-            n_held = held[g] + held_any_day[e["series"]]
-            room = GROUP_SHARE * ctx.bankroll - n_held * MAX_PER_TRADE - group_spent[g]
+            # Each held ticker counts what it cost (held_dollars), as favorites counts them: a
+            # favorites bet there can be bigger than any longshot bet.
+            room = GROUP_SHARE * ctx.bankroll - held[g] - held_any_day[e["series"]] - group_spent[g]
             cap = min(bet_cap(ctx), ctx.budget_left - spent, room)
             if cap <= 0:
                 continue
