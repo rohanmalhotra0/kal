@@ -2,6 +2,25 @@
 
 Newest first. Each 2-hour check-in adds one entry: what it checked, what it found, links.
 
+## 2026-10-30 16:50 UTC — check-in: the cross-PR audit's fixes; limits hold to the order
+
+- Checked: CI and market-check green on main e4aebc4 (self-test passed, scan found
+  nothing, research 0 failed). No status report yet: the private `kal-status` repo isn't
+  shared with Claude.
+- The cross-PR audit of #52-#55 (3 finders, a skeptic per finding) confirmed 5 low
+  findings, plus 3 more checked by hand. None risked the $300 cap.
+- Merged [PR #56](https://github.com/rohanmalhotra0/kal/pull/56): the settings are read
+  again right before a live order (a stop saved during the rechecks was missed: both
+  baskets bought after a cut to $10); one error streak (on-and-off locked books stopped the
+  bot after 5 failures, not 3); a basket with a leg sold outside the bot counts as bets.
+  Two review rounds; their items fixed.
+- [PR #57](https://github.com/rohanmalhotra0/kal/pull/57), in a last review: alerts say
+  the right thing (`sudo kal`, not `python -m kal`; books busy isn't damaged; one alert
+  for a read-only disk; a crash loop isn't "start it"; kal-watch waits while an update
+  judges the bot).
+- This check-in's one fix: #56.
+- Waiting on the owner: update the server, `sudo kal setup`, `sudo kal doctor`.
+
 ## 2026-10-30 14:50 UTC — check-in: all green; a cross-PR audit of today's merges runs
 
 - Checked: CI green on main 67b6cec (and on #54's merge); market-check green on 0aa2058 (the
