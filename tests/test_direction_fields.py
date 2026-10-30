@@ -97,6 +97,82 @@ class MoneyPathTests(TempHome):
         self.assertEqual(config.load()["disabled_reason"], "")
 
 
+class RestoreGapTests(TempHome):
+    """After a restore, catch_up adds the gap's buys. A fill on the other side of contracts
+    the books hold nets them away (the owner selling them, or buying the other side): it's
+    written off, never added as the bot's buy, or the payout would be booked (independent
+    review of this change)."""
+
+    def setUp(self):
+        super().setUp()
+        config.update({"enabled": True, "budget": 300, "strategies": all_off()})
+        db.insert("orders", ticker="T-1", side="yes", count=20, price=0.4, filled=20,
+                  status="executed", order_id="o1", client_order_id="c1", ts=time.time() - 3 * 86400)
+        self.cost = 8 + client.fee(20, 0.4)   # 8.34
+        db.put("restored", {"day": "x", "since": time.time() - 86400, "at": time.time()})
+        self.c = FakeKalshi(balance=1000)
+        self.c.position_list = []
+
+    def fill(self, oid, outcome, n, p, ticker="T-1", ago=3600, old=None):
+        f = new_fill(oid, outcome, n, p, ticker=ticker)
+        f["created_time"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - ago))
+        if old:
+            f.update(side=old[0], action=old[1])
+        return f
+
+    def settle(self, ticker="T-1", result="yes"):
+        self.c.market_info[ticker] = {"ticker": ticker, "status": "finalized", "result": result,
+                                      "settlement_value_dollars": "1.0000" if result == "yes" else "0.0000"}
+        return engine.run_once(self.c)
+
+    def test_the_owners_sale_in_the_gap_is_written_off(self):
+        self.c.fill_list = [self.fill("owner-1", "no", 20, 0.4)]   # sold the 20 YES at 60c
+        self.settle()
+        self.assertAlmostEqual(ledger.realized(), -self.cost)      # was +3.32: the payout booked
+
+    def test_a_part_sale_leaves_the_rest_paid(self):
+        self.c.fill_list = [self.fill("owner-1", "no", 5, 0.4)]
+        self.settle()
+        self.assertAlmostEqual(ledger.realized(), 15 - self.cost)
+
+    def test_a_buy_and_its_sale_inside_the_gap(self):
+        self.c.fill_list = [self.fill("b1", "yes", 20, 0.4, ticker="T-2", ago=7200),     # the bot's buy
+                            self.fill("owner-2", "no", 20, 0.1, ticker="T-2", ago=3600)]  # sold at 90c
+        self.c.market_info["T-1"] = {"ticker": "T-1", "status": "active", "yes_bid_dollars": "0.4000"}
+        self.c.position_list = [{"ticker": "T-1", "position": 20, "exposure": 8}]
+        s = self.settle("T-2")
+        self.assertTrue(any("added 1 order" in n for n in s["notes"]), s)
+        self.assertAlmostEqual(ledger.realized(), -(8 + client.fee(20, 0.4)))
+
+    def test_an_old_style_buy_of_the_other_side_is_written_off_too(self):
+        self.c.fill_list = [self.fill("owner-1", "no", 20, 0.4, old=("no", "buy"))]
+        self.settle()
+        self.assertAlmostEqual(ledger.realized(), -self.cost)
+
+    def test_a_buy_on_the_same_side_still_counts_as_the_bots(self):
+        self.c.fill_list = [self.fill("b2", "yes", 10, 0.5)]
+        s = self.settle(result="no")
+        self.assertTrue(any("added 1 order" in n for n in s["notes"]), s)
+        self.assertAlmostEqual(ledger.realized(), -(self.cost + 5 + client.fee(10, 0.5)))
+
+
+class DisagreeingFieldsTests(unittest.TestCase):
+    def test_outcome_and_book_side_that_disagree_are_never_guessed(self):
+        with self.assertRaises(ValueError):
+            outcome_side({"outcome_side": "yes", "book_side": "ask"})
+        self.assertIsNone(outcome_side({"book_side": ["bid"]}))   # odd shapes read as no answer
+        f = new_fill("o9", "yes")
+        f["book_side"] = "ask"
+        with self.assertRaises(CatchUpError):
+            _parse_fill(f)
+
+    def test_a_trades_reply_without_its_list_is_an_error_not_no_trades(self):
+        k = client.Kalshi()
+        k.get = lambda endpoint, params=None: {"data": []}   # Kalshi renamed the list
+        from kal.strategies.base import Leg, Signal
+        why = flow.veto(k, Signal("favorites", "M", "t", [Leg("M-1", "no", 0.5, 10)]), now=NOW)
+        self.assertIn("couldn't read recent trades", why)
+
 def trade(took, count, ago=60, price=0.5, old=True, new=True):
     t = {"count_fp": f"{count:.2f}", "created_time": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(NOW - ago)),
          "yes_price_dollars": f"{price:.4f}", "no_price_dollars": f"{1 - price:.4f}"}

@@ -508,7 +508,8 @@ def _trade(client, cfg, summary):
         if odd:
             t, held, mine = odd[0]
             reason = (f"Kalshi shows {held:+.0f} contracts on {t} but the bot's books show {mine:+.0f} "
-                      f"(+ = YES, - = NO). Check that market on Kalshi before resetting.")
+                      f"(+ = YES, - = NO). Check that market on Kalshi before resetting. If those are your own "
+                      f"trades, this clears once that market settles or you close them.")
             config.trip(reason)
             summary["notes"].append(f"STOPPED: {reason}")
             return
