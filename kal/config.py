@@ -213,8 +213,7 @@ def trip(reason):
             data.update(enabled=False, disabled_reason=reason)
             _write(data)
     except Exception as e:   # a full disk, a read-only folder: still say so, then raise
-        failed = e
-        _settle_owed(token)   # nothing was saved, so no stop alert is owed for it
+        failed = e   # (its note stays: resend_stop sends what the bot is stopped for, if anything)
     try:
         if alerts and failed is None:
             if notify.send("kal stopped itself", f"{reason}\n\n{STOPPED_HELP}", priority="high",

@@ -364,6 +364,20 @@ class StaleStopTests(Base):
         self.assertEqual(self.phone.titles, ["kal stopped itself"])
         self.assertIn("couldn't be saved (", self.phone.bodies[-1])
         self.assertIn("No space left on device", self.phone.bodies[-1])
+        self.assertFalse(config.resend_stop())   # nothing was saved, so nothing is owed
+        self.assertIsNone(config._owed())
+        self.assertEqual(len(self.phone.titles), 1)
+
+    def test_a_stop_that_cant_be_saved_keeps_an_older_stops_debt(self):
+        self.unsent("R0: lost too much today")   # saved; ntfy down, so its alert is owed
+        self.phone.status = 503
+        broken = OSError(5, "Input/output error")
+        with self.assertLogs("kal.notify", "WARNING"), \
+                mock.patch.object(config, "_write", side_effect=broken), self.assertRaises(OSError):
+            config.trip("R1: 3 failed runs in a row")   # a run already going trips again
+        self.phone.status = 200
+        self.assertTrue(config.resend_stop())
+        self.assertIn("R0: lost too much today", self.phone.bodies[-1])
 
     def test_a_stop_that_cant_be_saved_says_so_once_an_hour_not_every_run(self):
         full = OSError(28, "No space left on device")
