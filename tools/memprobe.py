@@ -37,10 +37,46 @@ seen = {}
 _open = engine.RunCache._open_events
 
 
+def field_sizes(events):
+    """Python bytes held by each field of the kept events (a shared object counted once)."""
+    from collections import Counter
+    ids, size = set(), Counter()
+
+    def add(key, v):
+        if id(v) in ids:
+            return
+        ids.add(id(v))
+        size[key] += sys.getsizeof(v)
+        if isinstance(v, dict):
+            for v2 in v.values():
+                add(key, v2)
+        elif isinstance(v, list):
+            for v2 in v:
+                add(key, v2)
+
+    for ev in events:
+        size["(event dict)"] += sys.getsizeof(ev)
+        for k, v in ev.items():
+            if k != "markets" or not isinstance(v, list):
+                add(f"event.{k}", v)
+                continue
+            size["(markets list)"] += sys.getsizeof(v)
+            for m in v:
+                size["(market dict)"] += sys.getsizeof(m)
+                for k2, v2 in m.items():
+                    add(f"market.{k2}", v2)
+    total = sum(size.values())
+    print(f"kept events hold {total / MB:.0f} MB of Python objects. Biggest parts:")
+    for k, n in size.most_common(25):
+        print(f"   {n / MB:7.1f} MB  {k}")
+
+
 def open_events(self):
     t = time.time()
     out = _open(self)
     seen.update(kept=len(out), load=time.time() - t, rss_loaded=mem()["VmRSS"])
+    if MODE == "trace":
+        field_sizes(out)
     return out
 
 
