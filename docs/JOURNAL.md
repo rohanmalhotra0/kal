@@ -22,9 +22,12 @@ review:
   stop; fixed. Fuzz: 0 of 3,000 random histories count more than the strictest truth.
 - [PR #50](https://github.com/rohanmalhotra0/kal/pull/50): the daily backup waits for a
   trade run, so a copy never lands between a basket's legs.
-- Next: the daily stop values a position at cost once its market closes and before it
-  settles, so a winner's gain drops out for a while (a false stop, or a later day's loss
-  partly hidden). Older than today's work; fixing it next.
+- [PR #51](https://github.com/rohanmalhotra0/kal/pull/51): the daily stop used to value a
+  position at cost once its market closed and before it settled, so a winner's gain dropped
+  out for a while (a false stop, or a later day's loss partly hidden). Now a known result
+  counts at what it will pay, else the last mark seen. Older than today's work; reviewed and
+  re-checked.
+- No PRs open. Waiting on the owner: update the server, `sudo kal setup`, `sudo kal doctor`.
 
 ## 2026-10-30 05:00 UTC — check-in: audit found a restore bug; fix in review
 
