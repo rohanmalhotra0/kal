@@ -14,6 +14,17 @@ jobs:
   probe:
     runs-on: ubuntu-latest
     timeout-minutes: 55
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {mode: default, arena: ""}
+          - {mode: trim, arena: ""}
+          - {mode: default, arena: "2"}
+          - {mode: trace, arena: ""}
+    env:
+      MODE: ${{ matrix.mode }}
+      ARENA: ${{ matrix.arena }}
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
