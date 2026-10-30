@@ -374,7 +374,8 @@ class Kalshi:
         if r.status_code >= 300:
             raise KalshiError(f"Order failed ({r.status_code}): {r.text[:300]}", r.status_code)
         d = r.json() if r.text else {}
-        return d.get("order", d) if isinstance(d, dict) else {}
+        o = d.get("order", d) if isinstance(d, dict) else {}
+        return o if isinstance(o, dict) else {}
 
 
 # ---------- account history: live list plus Kalshi's historical store ----------
@@ -520,7 +521,8 @@ _BAD = object()   # a count that is there but can't be read
 
 def _count(order, field):
     """One count: the first of `field`_fp and legacy `field` that isn't null or empty. A
-    number; _BAD for a bool, text, NaN or infinity; None if neither is there."""
+    number, 0 or more; _BAD for anything else (a bool, text, a negative, NaN or infinity);
+    None if neither is there."""
     for k in (f"{field}_fp", field):
         v = order.get(k)
         if v is None or v == "":
@@ -531,7 +533,7 @@ def _count(order, field):
             x = float(v)
         except (TypeError, ValueError, OverflowError):
             return _BAD
-        return x if math.isfinite(x) else _BAD
+        return x if math.isfinite(x) and x >= 0 else _BAD
     return None
 
 
@@ -540,9 +542,10 @@ def fill_count(order, requested=None):
     is looked up or the bot stops, never guessed. Kalshi's fill count when there is one.
     Without it, only an order "executed" in full, with nothing remaining: its initial count,
     else what was asked (`requested`). Initial less remaining says nothing otherwise: Kalshi
-    zeroes "remaining" when it cancels the rest. Counts that contradict each other (a fill
-    above the order, an "executed" order short of its size or with some remaining) are None.
-    Rounded to Kalshi's 2 decimals: 10.00 - 1.13 is 8.870000000000001 in floats."""
+    zeroes "remaining" when it cancels the rest. Counts that contradict each other are None:
+    a fill above the order or above what was asked, an "executed" order that bought nothing,
+    fell short of its size or has some remaining. Rounded to Kalshi's 2 decimals: 10.00 - 1.13
+    is 8.870000000000001 in floats."""
     if not isinstance(order, dict):
         return None
     got, start, left = (_count(order, f) for f in ("fill_count", "initial_count", "remaining_count"))
@@ -557,39 +560,40 @@ def fill_count(order, requested=None):
         got = start if start is not None else requested
         if got is None:
             return None
-    if got < 0 or (start is not None and (got > start + 0.005 or (done and got < start - 0.005))):
+    if any(size is not None and got > size + 0.005 for size in (start, requested)):
+        return None
+    if done and (got < 0.005 or (start is not None and got < start - 0.005)):
         return None
     return round(got, 2)
 
 
-def filled(order, requested):
-    """Contracts an order bought, as fill_count() reads it; 0 if it doesn't say (fill_known()
-    is False then). Never more than was asked for."""
-    n = fill_count(order, requested)
-    return 0.0 if n is None else max(0.0, min(float(requested), n))
-
-
-def fill_known(order):
-    """True if an order reply says for sure how much it bought (fill_count()). A "canceled"
-    alone could hide a part fill, and so could initial and remaining counts: Kalshi zeroes
-    "remaining" when it cancels the rest. The order gets looked up instead."""
-    return fill_count(order, 0) is not None
+def shows_fill(order):
+    """True if a reply shows any sign that the order bought something, even a reply that
+    contradicts itself: status "executed", or a fill count above 0 or that can't be read."""
+    if not isinstance(order, dict):
+        return False
+    got = _count(order, "fill_count")
+    return order.get("status") == "executed" or got is _BAD or (got is not None and got > 0)
 
 
 DONE = ("executed", "canceled", "cancelled")
 
 
 def resting(order):
-    """True if the order is still on the book (it should never be, for immediate-or-cancel).
+    """True if the reply shows the order still on the book (it should never be, for
+    immediate-or-cancel). Never raises.
 
     Kalshi's statuses are resting / canceled / executed. A V2 reply may carry only fill and
-    remaining counts, so with no status, contracts still remaining means it's resting."""
+    remaining counts, so with no status, contracts still remaining means it's resting. A
+    remaining count it can't read is no answer here: fill_count() is None for that reply,
+    so the order is looked up (and stopped then if it's on the book)."""
+    if not isinstance(order, dict):
+        return False
     status = order.get("status")
     if status:
         return status not in DONE
-    if "remaining_count_fp" in order or "remaining_count" in order:
-        return num(order, "remaining_count") > 0
-    return False
+    left = _count(order, "remaining_count")
+    return left is not None and left is not _BAD and left > 0
 
 
 def candle_close(candle, field):
