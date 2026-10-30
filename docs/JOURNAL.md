@@ -2,6 +2,20 @@
 
 Newest first. Each 2-hour check-in adds one entry: what it checked, what it found, links.
 
+## 2026-10-30 21:30 UTC — 3-hour paper soak of main (with #57) passed
+
+- [api-probe run 41105723547](https://github.com/rohanmalhotra0/kal/actions/runs/41105723547):
+  the real scheduler on live Kalshi data for 3 hours, no key (paper only), code a54c586.
+  - 36 trade runs, all ok (24 s average, 43 s longest). 0 errors, 0 failed runs, 0 live
+    orders. Research ran to the end in its own process: 15 series, 0 failed. Backup made.
+  - Memory flat: 170-220 MB between runs, 303-335 MB at a run's peak (cap 1.2 GB).
+  - No false stop from the new disk checks: the bot was still on at the end.
+- Restart checks on a real runner after the soak:
+  - a clean stop removed the heartbeat; the heartbeat held this boot's id;
+  - PASS: a crash on the same boot is not judged;
+  - PASS: a heartbeat from an earlier boot stopped the bot ("didn't shut down cleanly").
+- Waiting on the owner: update the server, `sudo kal setup`, `sudo kal doctor`.
+
 ## 2026-10-30 20:50 UTC — check-in: all green; the soak of main is still running
 
 - Checked: CI green on main 9c7f4b9. Scheduled market-check on a54c586: self-test all ok,
