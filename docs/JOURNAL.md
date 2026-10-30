@@ -2,6 +2,18 @@
 
 Newest first. Each 2-hour check-in adds one entry: what it checked, what it found, links.
 
+## 2026-10-30 14:50 UTC — check-in: all green; a cross-PR audit of today's merges runs
+
+- Checked: CI green on main 67b6cec (and on #54's merge); market-check green on 0aa2058 (the
+  latest code change it checks). No status report yet: the private `kal-status` repo isn't
+  shared with Claude.
+- Nothing broken. The only research idea left (#18, paper vs backtest) needs 4+ weeks of
+  paper trades from the server.
+- This check-in's work: a swarm audit of how today's 4 merges (#52-#55) work together (3
+  finders: money path, alerts, books; a skeptic checks each finding). Confirmed findings
+  get a PR.
+- Waiting on the owner: update the server, `sudo kal setup`, `sudo kal doctor`.
+
 ## 2026-10-30 14:30 UTC — 5-hour paper soak passed; all 3 swarm fixes on main
 
 - 5-hour paper soak of the real scheduler on live Kalshi data, no key
