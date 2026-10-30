@@ -10,7 +10,8 @@ inflate it. Kalshi's fills are read only to lower it (contracts sold outside the
 import time
 
 from . import db
-from .client import UnknownSettlement, every_fill, fee, num, outcome_side, price, ts, yes_payout
+from .client import (BOT_MARK, UnknownSettlement, every_fill, every_order, fee, fill_known, filled, num,
+                     outcome_side, price, resting, ts, yes_payout)
 
 OPEN = ("active", "open")
 
@@ -396,6 +397,55 @@ def catch_up(client):
     db.put("restore_check", True)   # strangers() gets one look at Kalshi's positions next
     db.execute("DELETE FROM kv WHERE key = 'restored'")
     return len(found)
+
+
+RECOVER_SLACK = 3600   # seconds: orders from just before the last check are looked at again
+
+
+def recover(client):
+    """Put back the bot's own orders that its books don't have: a lost or replaced disk, a
+    reinstall, or books rolled back to an older copy without `kal restore`. Every order the
+    bot sends carries a marked client_order_id (client.new_order_id), and Kalshi keeps it.
+    A marked order that bought something and isn't in the books goes back in like a
+    restored one: its losses count against the budget, its gains never do. One the books
+    call never placed is corrected the same way. Looks back to the last check (kv
+    'orders_checked'), or over the whole account if the books don't say. Returns how many
+    it put back. Raises CatchUpError if one can't be read: never a guess."""
+    start = time.time()
+    since = db.get("orders_checked")
+    ids = {r["order_id"] for r in db.query("SELECT DISTINCT order_id FROM orders WHERE order_id != ''")}
+    rows = {r["client_order_id"]: r for r in db.query(
+        "SELECT id, client_order_id, status FROM orders WHERE client_order_id != ''")}
+    back = 0
+    for o in every_order(client, min_ts=since - RECOVER_SLACK if since else None):
+        coid, oid = str(o.get("client_order_id") or ""), str(o.get("order_id") or "")
+        row = rows.get(coid)
+        if not coid.startswith(BOT_MARK) or oid in ids or (row and row["status"] != "never_placed"):
+            continue
+        if resting(o) or not fill_known(o):
+            raise CatchUpError(f"order {coid} on {o.get('ticker')} is open or doesn't say how much filled")
+        n = filled(o, float("inf"))
+        if n <= 0:
+            continue   # bought nothing (a test order, a missed chance): nothing to book
+        side, action = _direction(o)
+        p = price(o, f"{side}_price") if side in ("yes", "no") else 0.0
+        if action != "buy" or not 0 < p < 1 or not o.get("ticker"):
+            raise CatchUpError(f"order {coid} looks different than expected (fields: {', '.join(sorted(o))[:200]})")
+        try:
+            when = ts(o["created_time"]) if o.get("created_time") else start
+        except (TypeError, ValueError, AttributeError):
+            raise CatchUpError(f"order {coid} has an unreadable time: {o.get('created_time')!r}")
+        if row:   # the books said never placed, but it filled
+            db.execute("UPDATE orders SET strategy = 'restored', ticker = ?, side = ?, count = ?, price = ?, "
+                       "filled = ?, status = 'recovered', order_id = ? WHERE id = ?",
+                       o["ticker"], side, n, p, n, oid, row["id"])
+        else:
+            db.insert("orders", ts=when, strategy="restored", ticker=o["ticker"], side=side, count=n, price=p,
+                      filled=n, status="recovered", order_id=oid, client_order_id=coid)
+        ids.add(oid)
+        back += 1
+    db.put("orders_checked", start)
+    return back
 
 
 def strangers(positions):

@@ -182,6 +182,7 @@ class LongOutageTests(TempHome):
         self.assertAlmostEqual(ledger.realized(), -cost)
 
     def test_a_market_that_opened_after_the_cutoff_reads_only_the_live_fills(self):
+        db.put("orders_checked", self.now)   # lost orders checked just now: only settling could read the store
         db.insert("orders", ticker="S-2", side="no", count=10, price=0.9, filled=10,
                   status="executed", order_id="o2", client_order_id="c2")
         self.c.market_info["S-2"] = {"ticker": "S-2", "status": "finalized", "result": "no",
