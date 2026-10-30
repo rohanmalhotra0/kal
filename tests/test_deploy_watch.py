@@ -109,6 +109,23 @@ esac
         self._run()
         self.assertIn("crash-looping", _read(self.curl_log))
 
+    def test_a_crash_after_a_manual_restart_alerts_too(self):
+        # A manual restart starts the count from 0: one crash since reads 1, below the 2 seen.
+        open(self.active, "w").close()
+        _write(self.nrest, "1\n")
+        _write(os.path.join(self.data, "watch_nrestarts"), "2\n")
+        self._run()
+        self.assertIn("crash-looping", _read(self.curl_log))
+
+    def test_a_manual_restart_alone_or_old_crashes_are_quiet(self):
+        open(self.active, "w").close()
+        for now, seen in (("0", "2"), ("2", "2")):
+            with self.subTest(now=now, seen=seen):
+                _write(self.nrest, now + "\n")
+                _write(os.path.join(self.data, "watch_nrestarts"), seen + "\n")
+                self._run()
+                self.assertEqual(_read(self.curl_log), "")
+
     def test_unhealthy_but_running_alerts(self):
         open(self.active, "w").close()
         open(os.path.join(self.data, "health_fail"), "w").close()

@@ -24,6 +24,7 @@ KAL_USER="${KAL_USER:-kal}"          # the service user; health runs as them
 STAGE_USER="${STAGE_USER:-$(id kal-stage >/dev/null 2>&1 && echo kal-stage || echo nobody)}"
 STAGE_PYTHON="${STAGE_PYTHON:-python3}"
 WAIT="${KAL_UPDATE_WAIT:-120}"       # seconds to let the bot settle before the health check
+UP_WAIT="${KAL_UPDATE_UP_WAIT:-60}"  # longest wait for the new version to be up after the restart
 RESEARCH_LOCK="$DATA/.research.lock" # the file kal/research holds while a research run works
 RESEARCH_WAIT="${KAL_RESEARCH_WAIT:-3600}"  # longest wait for that run before restarting anyway
 
@@ -141,8 +142,18 @@ if git diff --quiet "$before" "$after" -- . ':(exclude)docs'; then
   exit 1
 fi
 
+health_ok() {  # the same check the /usr/local/bin/kal wrapper uses, run as the kal user
+  runuser -u "$KAL_USER" -- env KAL_HOME="$DATA" "$VENV/bin/python" -m kal health --alive >/dev/null 2>&1
+}
+
+# A bot waiting to restart after a crash reads "activating", not "active". It runs the new
+# code within minutes either way, so it gets the same restart and check.
 was_active=0
-systemctl is-active --quiet kal && was_active=1
+case "$(systemctl is-active kal 2>/dev/null)" in active|activating|reloading) was_active=1 ;; esac
+# Read now, on the old code: a check that already fails (damaged books, say) is not the new
+# version's fault, so only a check that passes now and fails after the update rolls it back.
+ok_before=0
+[ "$was_active" = 1 ] && health_ok && ok_before=1
 
 # Build and test the NEW code in a throwaway copy, as a locked-down user with its own venv.
 # This never touches the live venv or the live code, and the tests can't read DATA or ETC.
@@ -191,9 +202,6 @@ fi
 chmod -R a+rX "$APP"
 chmod -R go-w "$APP" "$VENV"
 
-health_ok() {  # the same check the /usr/local/bin/kal wrapper uses, run as the kal user
-  runuser -u "$KAL_USER" -- env KAL_HOME="$DATA" "$VENV/bin/python" -m kal health --alive >/dev/null 2>&1
-}
 restart() {
   # Wait (up to an hour) for a research run to finish, so the restart doesn't kill it. The
   # lock file must belong to the kal user: research opens it to write, and couldn't if root
@@ -215,13 +223,18 @@ roll_back() {
 
 if [ "$was_active" = 1 ]; then
   restart
+  # NRestarts counts automatic restarts. A restart of a running bot starts it again from 0;
+  # one that lands while the bot waits to restart after a crash doesn't (systemd 255). So
+  # read it once the new version is up, and look for a rise from there. (Comparing with the
+  # count from before missed a crash after earlier ones; "any above 0" rolled a good
+  # version back.) A crash also leaves it not running for a while before the count moves:
+  # after repeated crashes the next restart waits up to 5 minutes.
+  for _ in $(seq "$UP_WAIT"); do systemctl is-active --quiet kal && break; sleep 1; done
+  nbase=$(systemctl show kal -p NRestarts --value 2>/dev/null || echo 0)
   [ "$WAIT" -gt 0 ] 2>/dev/null && sleep "$WAIT"
-  # NRestarts counts automatic restarts since the last manual start, and our try-restart is
-  # one (systemd 254+, which kal.service needs): it starts again from 0. So any restart now
-  # is the new version crashing. (Comparing with the count before missed it: two earlier
-  # crashes and one new one read as "fewer".)
   nafter=$(systemctl show kal -p NRestarts --value 2>/dev/null || echo 0)
-  if ! health_ok || { [ "$nafter" -gt 0 ] 2>/dev/null; }; then
+  if ! systemctl is-active --quiet kal || { [ "$nafter" -gt "$nbase" ] 2>/dev/null; } \
+     || { [ "$ok_before" = 1 ] && ! health_ok; }; then
     roll_back
     exit 1
   fi
