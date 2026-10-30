@@ -143,6 +143,11 @@ def rising(m):
     return before > 0 and now - before >= MAX_RISE - 1e-9 and now >= 1.5 * before
 
 
+def held_size(ctx):
+    """What one held ticker counts for in a series-day's cap: the most any one bet can be."""
+    return max(0.0, min(ctx.cfg["max_per_trade"], ctx.cfg["max_per_event"]))
+
+
 def bet_cap(ctx):
     """Most one bet may lose. One bet per event, so it's also the most one event may lose.
     ctx.bankroll stands in for capital: the engine sets it to capital cut after drawdowns,
@@ -216,9 +221,10 @@ class LongshotFade(Strategy):
         for e, m, cell, offer in picks:
             end = e["ends"][m["ticker"]]
             g = group_of(e["series"], end)
-            # Each held ticker counts as a full-size bet: the most a longshot bet can be.
+            # Each held ticker counts as the most any bet can be, as favorites counts them: a
+            # favorites bet there (up to max_per_trade) is bigger than a longshot bet.
             n_held = held[g] + held_any_day[e["series"]]
-            room = GROUP_SHARE * ctx.bankroll - n_held * MAX_PER_TRADE - group_spent[g]
+            room = GROUP_SHARE * ctx.bankroll - n_held * held_size(ctx) - group_spent[g]
             cap = min(bet_cap(ctx), ctx.budget_left - spent, room)
             if cap <= 0:
                 continue

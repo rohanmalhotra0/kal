@@ -379,11 +379,13 @@ def unresolved_orders():
 
 
 def open_directional():
-    """Dollars in open bot positions that came from bets, not locked-in arbitrage."""
+    """Dollars in open bot positions that came from bets, not locked-in arbitrage. The legs
+    a half-built basket left ('stranded') are bets now: nothing locks them in any more."""
     rows = db.query("""SELECT o.filled, o.price FROM orders o
         LEFT JOIN settlements s ON s.ticker = o.ticker
         LEFT JOIN signals sg ON sg.id = o.signal_id
-        WHERE o.filled > 0 AND s.ticker IS NULL AND COALESCE(sg.guaranteed, 0) = 0""")
+        WHERE o.filled > 0 AND s.ticker IS NULL
+          AND (COALESCE(sg.guaranteed, 0) = 0 OR sg.status LIKE 'stranded%')""")
     return sum(r["filled"] * r["price"] + fee(r["filled"], r["price"]) for r in rows)
 
 
