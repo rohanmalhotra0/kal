@@ -64,9 +64,23 @@ def open_cost():
 
 
 def realized():
-    """Settled profit and loss, minus everything written off (counted as lost in full)."""
+    """Settled profit and loss, minus everything written off (counted as lost in full), plus
+    made_up(): the bot's own orders put back on new books count net of their gains."""
     settled = db.query("SELECT COALESCE(SUM(pnl), 0) AS p FROM settlements")[0]["p"]
-    return settled - db.query("SELECT COALESCE(SUM(cost), 0) AS c FROM writeoffs")[0]["c"]
+    return settled - db.query("SELECT COALESCE(SUM(cost), 0) AS c FROM writeoffs")[0]["c"] + made_up()
+
+
+def made_up(until=None):
+    """What the gains held back from the bot's own orders put back on new books (recover:
+    'restored', marked) make up of their losses, on markets settled before `until` (None: all).
+    Never more than those losses, so the budget can't grow from a lost disk; but their losses
+    count net. Counting only each one's losses booked every past basket as a loss (one leg
+    loses, the others win): after a lost disk the bot stopped, its capital "used up", while
+    the account was up (cross-PR money-path audit)."""
+    where, args = (" WHERE ts < ?", [until]) if until is not None else ("", [])
+    h = db.query("SELECT COALESCE(SUM(gain), 0) AS g, COALESCE(SUM(loss), 0) AS l FROM held_gains" + where,
+                 *args)[0]
+    return min(h["g"], h["l"])
 
 
 def settle(client):
@@ -88,11 +102,14 @@ def settle(client):
         if _write_off_sold_outside(client, ticker, legs, markets.get(ticker, {}).get("open_time")):
             legs = [r for r in open_positions() if r["ticker"] == ticker]
         revenue = sum(r["count"] * (paid if r["side"] == "yes" else 1 - paid) for r in legs)
-        revenue = max(0.0, revenue - _restored_gain(ticker, paid))
+        held = min(revenue, _restored_gain(ticker, paid))   # restored orders' gains never count here
         cost = sum(r["cost"] for r in legs)
         result = "yes" if paid == 1 else "no" if paid == 0 else f"{paid:.4f}"
         db.insert("settlements", ticker=ticker, settled_ts=time.time(), result=result,
-                  revenue=revenue, cost=cost, pnl=revenue - cost)
+                  revenue=revenue - held, cost=cost, pnl=revenue - held - cost)
+        gain, loss = _own_restored(ticker, paid)
+        if gain or loss:   # after the settlement: a stop in between only counts less (made_up)
+            db.insert("held_gains", ticker=ticker, gain=min(gain, held), loss=loss)
         n += 1
     return n
 
@@ -145,7 +162,7 @@ def _restored_gain(ticker, paid, side=None):
     Some may be the owner's own trades, so only their losses count, never their gains: at
     settlement and in equity alike, so a win settling never reads as a loss. recover() adds
     'restored' rows too, on new books: there losses from before the order mark can't be
-    seen, so gains mustn't grow the budget either."""
+    seen, so their gains are held back too, and only make up their own losses (made_up())."""
     gain = 0.0
     for r in db.query("SELECT side, filled, price FROM orders WHERE ticker = ? AND strategy = 'restored' "
                       "AND filled > 0", ticker):
@@ -154,6 +171,20 @@ def _restored_gain(ticker, paid, side=None):
         pay = r["filled"] * (paid if r["side"] == "yes" else 1 - paid)
         gain += max(0.0, pay - r["filled"] * r["price"] - fee(r["filled"], r["price"]))
     return gain
+
+
+def _own_restored(ticker, paid):
+    """(gain, loss) of the bot's own orders recover() put back on new books ('restored' with a
+    marked id) on a market, at a YES value of `paid`. catch_up()'s restored orders may be the
+    owner's trades: their gains never make up anything."""
+    gain = loss = 0.0
+    for r in db.query("SELECT side, filled, price FROM orders WHERE ticker = ? AND strategy = 'restored' "
+                      "AND filled > 0 AND client_order_id LIKE ?", ticker, BOT_MARK + "%"):
+        net = r["filled"] * (paid if r["side"] == "yes" else 1 - paid) - r["filled"] * r["price"] \
+            - fee(r["filled"], r["price"])
+        gain += max(0.0, net)
+        loss += max(0.0, -net)
+    return gain, loss
 
 
 def payout_of(result, side):
@@ -205,9 +236,11 @@ def settled_order_pnl(shares=None):
     A restored order's gain never counts: settle() took it off the market's pay, so restored
     orders get only what it kept beyond the other orders' pay."""
     shares = written_off_shares() if shares is None else shares
+    held = {r["ticker"]: r["gain"] for r in db.query("SELECT ticker, gain FROM held_gains WHERE gain > 0")}
+    back = made_up()   # shared by the bot's own restored orders, by the gains held back from them
     markets = {}
-    for r in db.query("""SELECT o.id, o.strategy, o.side, o.filled, o.price, s.ticker, s.result, s.revenue
-            FROM orders o JOIN settlements s ON s.ticker = o.ticker WHERE o.filled > 0"""):
+    for r in db.query("""SELECT o.id, o.strategy, o.side, o.filled, o.price, o.client_order_id, s.ticker,
+            s.result, s.revenue FROM orders o JOIN settlements s ON s.ticker = o.ticker WHERE o.filled > 0"""):
         markets.setdefault(r["ticker"], []).append(r)
     out = {}
     for rows in markets.values():
@@ -227,6 +260,12 @@ def settled_order_pnl(shares=None):
             n = sum(r["filled"] for r in restored)
             for r in restored:
                 pay[r["id"]] = (booked - others) * r["filled"] / n
+            mine = {r["id"]: max(0.0, r["filled"] * paid[r["id"]] - cost[r["id"]]) for r in restored
+                    if (r["client_order_id"] or "").startswith(BOT_MARK)}
+            if back and held.get(rows[0]["ticker"]) and sum(mine.values()) > 0:
+                part = back * held[rows[0]["ticker"]] / sum(held.values())
+                for oid, gain in mine.items():
+                    pay[oid] += part * gain / sum(mine.values())
         for r in rows:
             out[r["id"]] = pay[r["id"]] - cost[r["id"]]
     return out
@@ -441,8 +480,8 @@ def recover(client):
     a marked order is the bot's for sure. Books with an earlier check (rolled back to an
     older copy) still hold what came before, so it goes back with its full result
     ("recovered"). Books with no check yet (a new disk) can't see losses from before the
-    mark, so there only its losses count, never its gains ("restored"), and the budget
-    can't grow from a lost disk. One the books call never placed, found filled inside the
+    mark, so there its gains only make up such orders' losses, never more ("restored",
+    made_up()), and the budget can't grow from a lost disk. One the books call never placed, found filled inside the
     look-back, is corrected in its own row, and a basket it belongs to is checked again.
     One whose market the books already settled without it counts as lost in full (the safe
     way). Each order's writes go in one transaction: a run killed part way redoes it.
