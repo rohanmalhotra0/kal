@@ -134,6 +134,10 @@ tests/            unittest; tests/fakes.py has FakeKalshi, tests/helpers.py has 
   Kalshi position the books still don't know -> one trip (the owner's own? Reset).
   The marker that asks for this is written into a copy of the backup, and only that copy
   is swapped in, so restored books never come back without it.
+- The daily stop reads equity: open positions at their bid, or at what a known result
+  will pay. A closed market shows no bid until it settles, so it keeps the last mark seen
+  (kv `last_marks`): at cost, a winner's gain left at the close and came back at the
+  settlement, a false stop, or the next day a real loss partly hidden.
 - The daily stop, the bets cap and bet sizes scale with min(capital, account cash +
   open cost), so a budget typed bigger than the account can't loosen them.
 - Baskets skip events with a market closing in under 5 minutes.

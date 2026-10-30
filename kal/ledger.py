@@ -300,29 +300,51 @@ def available(cfg):
     return max(0.0, capital(cfg) - open_cost())
 
 
-def equity(client, cfg):
-    """Capital with open positions marked at their best bid instead of at cost.
+def _mark(m, side):
+    """What one contract of `side` is worth now: once the result is known (a market can be
+    determined a while before it settles) what it will pay, else its best bid. None when
+    the market shows neither."""
+    if m.get("result") in ("yes", "no"):
+        return 1.0 if m["result"] == side else 0.0
+    bid = price(m, f"{side}_bid")
+    return bid if bid > 0 else None
 
-    A market with no bid at all (thin books, or a lookup that failed) is valued at cost,
-    not $0: no buyer right now isn't a loss, and treating it as one would trip the daily
-    loss limit for nothing. Real losses still land when the market settles."""
+
+def equity(client, cfg):
+    """Capital with open positions marked at what they're worth now (_mark) instead of at
+    cost.
+
+    A market that shows no bid (closed and not yet settled, or a lookup that failed) keeps
+    the last mark the bot saw for it (kv 'last_marks'). At cost, a winner's gain left
+    equity when its market closed and came back when it settled: a false daily stop, or,
+    a day later, a real loss partly hidden from it (review of the lost-disk fix). One that
+    never had a bid is valued at cost, not $0: no buyer isn't a loss. Real losses still
+    land when the market settles."""
     rows = open_positions()
+    last, seen = db.get("last_marks") or {}, {}
     if not rows:
+        if last:
+            db.put("last_marks", {})
         return capital(cfg)
     markets = client.markets_by_ticker({r["ticker"] for r in rows})
     value = own_gain = own_loss = 0.0
     for r in rows:
-        bid = price(markets.get(r["ticker"], {}), f"{r['side']}_bid")
-        if bid > 0:
-            yes = bid if r["side"] == "yes" else 1 - bid
-            worth, restored = r["count"] * bid, _restored_gain(r["ticker"], yes, r["side"])
-            held = min(worth, restored)
-            value += worth - held
-            gain, loss = _own_restored(r["ticker"], yes, r["side"])   # as settle() would book them
-            own_gain += _own_share(gain, held, restored)
-            own_loss += loss
-        else:
+        key = f"{r['ticker']}:{r['side']}"
+        each = _mark(markets.get(r["ticker"]) or {}, r["side"])
+        if each is None:
+            each = last.get(key)
+        if each is None:
             value += r["cost"]
+            continue
+        seen[key] = each
+        yes = each if r["side"] == "yes" else 1 - each
+        worth, restored = r["count"] * each, _restored_gain(r["ticker"], yes, r["side"])
+        held = min(worth, restored)
+        value += worth - held
+        gain, loss = _own_restored(r["ticker"], yes, r["side"])   # as settle() would book them
+        own_gain += _own_share(gain, held, restored)
+        own_loss += loss
+    db.put("last_marks", seen)
     if own_gain or own_loss:
         # made_up() with the open ones too: else a put-back win settling another day would make
         # up an older loss that day, and hide a real loss from the daily stop (review of this).
