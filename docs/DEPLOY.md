@@ -302,7 +302,7 @@ To change it (the hour is in UTC): `sudo kal set summary_hour_utc 14`
 
 | Alert | What it means | What to do |
 |---|---|---|
-| **kal stopped itself** (loud) | A safety stop. The bot is off. The alert says why. If ntfy was down, it is sent again every 10 minutes until it gets through. | See the next table. |
+| **kal stopped itself** (loud) | A safety stop. The bot is off. The alert says why. If ntfy was down, it is sent again every 10 minutes until it gets through. If it says "couldn't be saved", the disk is full or broken and the bot may run again: look now (this one repeats at most once an hour). | See the next table. |
 | **kal is not running** (loud) | The watchdog found the bot stopped. | Start it: `sudo systemctl start kal`. If it won't stay up: `sudo kal logs` |
 | **kal keeps restarting** (loud) | The bot is crash-looping. | `sudo kal logs`. The check-in will look into it. |
 | **kal looks unhealthy** (loud) | The bot runs, but a check fails (e.g. the scheduler stopped). | `sudo kal health` |

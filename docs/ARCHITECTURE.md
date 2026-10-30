@@ -136,7 +136,10 @@ tests/            unittest; tests/fakes.py has FakeKalshi, tests/helpers.py has 
   can't buy on them and the heartbeat stays fresh. Busy, locked or full books are only a
   warning (a backup wouldn't fix them), and runs that can't write their error count count
   it in memory, so 3 in a row still trip. Alerts go with the books unreadable, and a stop
-  alert that didn't get through is sent again until it does, while that stop lasts.
+  alert that didn't get through is sent again until it does, while that stop lasts. A
+  stop is noted as owed before its alert goes, so a restart mid-send still sends it, and
+  only that alert's delivery settles it. A stop that can't be saved says so, at most
+  once an hour.
 - After `kal restore`, the next live run adds the buys Kalshi shows since the backup's
   day before it trades (`ledger.catch_up`). It puts back the bot's own marked orders
   first (`ledger.recover`), so a sale outside the bot is never read as the bot's buy of

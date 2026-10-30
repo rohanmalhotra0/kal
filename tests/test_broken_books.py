@@ -4,7 +4,6 @@ was never sent again. python -m unittest tests.test_broken_books
 """
 import os
 import sqlite3
-import time
 from types import SimpleNamespace
 from unittest import mock
 
@@ -25,13 +24,18 @@ def break_books():
 
 
 class Phone:
-    """ntfy, faked: answers `status` and keeps every alert's title."""
+    """ntfy, faked: answers `status` and keeps every alert's title and text. `during`, if
+    set, runs while an alert is being sent (another thread acting at that moment)."""
 
     def __init__(self, status=200):
-        self.status, self.titles = status, []
+        self.status, self.titles, self.bodies, self.during = status, [], [], None
 
     def __call__(self, url, data=None, timeout=None, headers=None):
         self.titles.append(headers["Title"])
+        self.bodies.append(data.decode())
+        during, self.during = self.during, None
+        if during:
+            during()
         return SimpleNamespace(status_code=self.status)
 
 
@@ -299,13 +303,77 @@ class StaleStopTests(Base):
     def test_a_resend_that_finishes_late_keeps_a_newer_owed_alert(self):
         self.unsent("first reason")
         token = config._owed()
-        config._owe_alert()            # another stop's alert failed meanwhile
+        with config._locked():
+            config._owe()              # another stop was noted meanwhile
         config._settle_owed(token)     # the older resend finishes
         self.assertIsNotNone(config._owed())
+
+    def test_a_slow_alert_that_gets_through_keeps_a_newer_stops_debt(self):
+        # Stop A's alert is slow. Meanwhile the owner presses Reset, the bot stops again for
+        # B, and B's alert is refused. A's alert then gets through: B is still owed.
+        def reset_then_stop_again():
+            config.clear_trip()
+            self.phone.status = 503
+            with self.assertLogs("kal.notify", "WARNING"):
+                config.trip("B: the books are damaged")
+            self.phone.status = 200
+        self.phone.during = reset_then_stop_again
+        config.trip("A: the server clock is off")
+        self.assertIsNotNone(config._owed())
+        self.assertTrue(config.resend_stop())
+        self.assertIn("B: the books are damaged", self.phone.bodies[-1])
+
+    def test_a_stop_just_after_a_reset_keeps_its_debt(self):
+        self.unsent("A: lost too much today")
+        update = config.update
+
+        def update_then_stop(changes):   # the bot stops again right after the Reset
+            out = update(changes)
+            self.unsent("B: basket left half-built")
+            return out
+        with mock.patch.object(config, "update", update_then_stop):
+            config.clear_trip()
+        self.assertTrue(config.resend_stop())
+        self.assertIn("B: basket left half-built", self.phone.bodies[-1])
+
+    def test_a_stop_is_owed_before_its_alert_goes_so_dying_mid_send_still_tells(self):
+        class Died(BaseException):   # a restart, the OOM killer, a reboot
+            pass
+
+        def die():
+            raise Died
+        self.phone.during = die
+        with self.assertRaises(Died):
+            config.trip("the server clock is 40 s behind")
+        self.assertEqual(config.load()["disabled_reason"], "the server clock is 40 s behind")
+        self.assertTrue(config.resend_stop())   # what the restarted bot's health job does
+        self.assertIn("the server clock is 40 s behind", self.phone.bodies[-1])
+        self.assertFalse(config.resend_stop())
+
+    def test_an_owed_alert_that_went_is_not_resent_when_its_note_cant_be_removed(self):
+        self.unsent("lost too much today")
+        with mock.patch.object(config.os, "remove", side_effect=OSError(30, "Read-only file system")):
+            sent = [config.resend_stop() for _ in range(4)]
+        self.assertEqual(sent, [True, False, False, False])
+        self.assertEqual(self.phone.titles, ["kal stopped itself"])
 
     def test_a_stop_that_cant_be_saved_still_says_so(self):
         full = OSError(28, "No space left on device")
         with mock.patch.object(config, "_write", side_effect=full), self.assertRaises(OSError):
             config.trip("3 failed runs in a row, and the books can't be written")
         self.assertEqual(self.phone.titles, ["kal stopped itself"])
+        self.assertIn("couldn't be saved (", self.phone.bodies[-1])
+        self.assertIn("No space left on device", self.phone.bodies[-1])
+
+    def test_a_stop_that_cant_be_saved_says_so_once_an_hour_not_every_run(self):
+        full = OSError(28, "No space left on device")
+        with mock.patch.object(config, "_write", side_effect=full):
+            for _ in range(3):   # each trade run trips again while the disk is full
+                with self.assertRaises(OSError):
+                    config.trip("3 failed runs in a row")
+            self.assertEqual(len(self.phone.titles), 1)
+            config._unsaved_sent[config.home()] -= config.UNSAVED_EVERY   # an hour later
+            with self.assertRaises(OSError):
+                config.trip("3 failed runs in a row")
+        self.assertEqual(len(self.phone.titles), 2)
 
