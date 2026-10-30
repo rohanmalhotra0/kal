@@ -56,10 +56,10 @@ def _read(path):
 
 
 def _load_pem(path):
-    from cryptography.hazmat.primitives import serialization
+    from .client import parse_key
     with open(os.path.expanduser(path), "rb") as f:
         data = f.read()
-    serialization.load_pem_private_key(data, password=None)  # raises if it isn't a key
+    parse_key(data)  # raises if it isn't an Ed25519 or RSA key
     return data
 
 

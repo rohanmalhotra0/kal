@@ -82,8 +82,13 @@ def x_text(t):
 
 
 def release(days=20):
-    """The release day `days` from now, and its close: 8:29 AM ET (13:29 UTC)."""
-    day = (datetime.datetime.now(timezone.utc) + datetime.timedelta(days=days)).date()
+    """The release day `days` from now, and its close: 8:29 AM ET (13:29 UTC). Under a day
+    away, the close is `days` from now itself: that day's 13:29 could be most of a day off."""
+    now = datetime.datetime.now(timezone.utc)
+    if days < 1:
+        at = now + datetime.timedelta(days=days)
+        return at.date(), at.timestamp()
+    day = (now + datetime.timedelta(days=days)).date()
     close = datetime.datetime(day.year, day.month, day.day, 13, 29, tzinfo=timezone.utc).timestamp()
     return day, close
 

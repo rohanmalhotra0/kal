@@ -14,7 +14,7 @@ from datetime import datetime
 
 import requests
 from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import padding
+from cryptography.hazmat.primitives.asymmetric import ed25519, padding, rsa
 
 API = "/trade-api/v2"
 BASES = {"prod": "https://api.elections.kalshi.com", "demo": "https://demo-api.kalshi.co"}
@@ -84,16 +84,30 @@ def load_key(home=None):
     if not key_id or not pem:
         return None, None
     pem = pem.replace("\\n", "\n").strip()
-    return key_id, serialization.load_pem_private_key(pem.encode(), password=None)
+    return key_id, parse_key(pem.encode())
+
+
+def parse_key(pem):
+    """A Kalshi private key from PEM bytes. Kalshi makes Ed25519 keys by default (2026) and
+    RSA ones if asked; the PEM header doesn't say which. Raises ValueError for anything else."""
+    key = serialization.load_pem_private_key(pem, password=None)
+    if not isinstance(key, (ed25519.Ed25519PrivateKey, rsa.RSAPrivateKey)):
+        raise ValueError(f"Kalshi keys are Ed25519 or RSA, not {type(key).__name__}")
+    return key
 
 
 def sign(private_key, timestamp_ms, method, path):
+    """Kalshi's request signature: timestamp + method + path (no query), base64. Ed25519
+    keys sign the text itself; RSA keys use RSA-PSS with SHA-256 (docs.kalshi.com, API Keys)."""
     msg = f"{timestamp_ms}{method}{path}".encode()
-    sig = private_key.sign(
-        msg,
-        padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=padding.PSS.DIGEST_LENGTH),
-        hashes.SHA256(),
-    )
+    if isinstance(private_key, ed25519.Ed25519PrivateKey):
+        sig = private_key.sign(msg)
+    else:
+        sig = private_key.sign(
+            msg,
+            padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=padding.PSS.DIGEST_LENGTH),
+            hashes.SHA256(),
+        )
     return base64.b64encode(sig).decode()
 
 
