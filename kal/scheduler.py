@@ -11,9 +11,11 @@ scheduler looks exactly like a quiet market, so nobody would notice it had stopp
 For the same reason the loop touches a heartbeat file, which `kal health` reads.
 Each job runs in its own worker thread, so an hour of research never delays trading.
 Research also runs in its own process (in_child): its memory goes back when it ends,
-and if it grows too big, the kernel stops it, not trading.
+and if it grows too big, the kernel stops it, not trading. After every job, what the job
+freed goes back to the system too (give_back_memory).
 At most one copy of each job runs at a time.
 """
+import ctypes
 import importlib
 import json
 import logging
@@ -44,6 +46,19 @@ STOP_WAIT = 300               # how long stop() waits for a trade run to finish
 
 
 # ---------- the jobs ----------
+
+def give_back_memory():
+    """Hand the memory a job freed back to the system. A trade run holds every open event a
+    strategy can act on (11,433 events, 257 MB in Python on 2026-10-30) and frees it at the
+    end, but glibc keeps freed pages for reuse, so the process stayed near its 550 MB peak
+    between runs. That left research, in its own process, less room under the cap
+    (deploy/kal.service). True if any memory went back. Not glibc (macOS, musl): nothing to
+    do. Never raises."""
+    try:
+        return bool(ctypes.CDLL(None).malloc_trim(0))
+    except Exception:
+        return False
+
 
 def run_trade():
     try:
@@ -365,6 +380,7 @@ class Scheduler:
         with self._lock:
             self.status[kind] = {"started": self.status.get(kind, {}).get("started"),
                                  "finished": self.clock(), "ok": ok, "text": text, "running": False}
+        give_back_memory()
 
     def state(self):
         """For the dashboard: when each job last ran, how it went, and when it runs next."""
