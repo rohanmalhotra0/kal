@@ -47,8 +47,51 @@ def open_events(self):
 engine.RunCache._open_events = open_events
 
 
+def kept_report():
+    """What the run kept: by category and series, sized as JSON, and why each was kept."""
+    import json
+    from collections import Counter
+    wanted = engine._wanted
+    seen_n, why, cat, series, size, markets = Counter(), Counter(), Counter(), Counter(), Counter(), Counter()
+
+    def counting(ev, until, keep):
+        ok = wanted(ev, until, keep)
+        seen_n["all"] += 1
+        if not ok:
+            return ok
+        ms = ev.get("markets") if isinstance(ev, dict) else None
+        if not isinstance(ms, list) or not ms:
+            why["no markets"] += 1
+        elif engine._due(ev.get("strike_date"), until):
+            why["strike_date due"] += 1
+        else:
+            why["a market closes or occurs in time"] += 1
+        c, st = str(ev.get("category")), str(ev.get("series_ticker"))
+        n = len(json.dumps(ev, default=str))
+        cat[c] += n
+        series[st] += n
+        size["all"] += n
+        markets[c] += len(ms) if isinstance(ms, list) else 0
+        seen_n["kept"] += 1
+        return ok
+
+    engine._wanted = counting
+
+    def show():
+        print(f"events seen {seen_n['all']}, kept {seen_n['kept']}, kept JSON {size['all'] / MB:.0f} MB "
+              f"(before slimming). Why kept: {dict(why)}")
+        print("kept by category (JSON MB, markets):")
+        for c, n in cat.most_common(12):
+            print(f"   {n / MB:7.1f} MB  {markets[c]:6d} markets  {c}")
+        print("top series (JSON MB):")
+        for st, n in series.most_common(15):
+            print(f"   {n / MB:7.1f} MB  {st}")
+    return show
+
+
 def trace_one():
     import tracemalloc
+    show = kept_report()
     tracemalloc.start(30)
     best = {"size": 0, "snap": None}
     done = threading.Event()
@@ -66,6 +109,7 @@ def trace_one():
     cur, peak = tracemalloc.get_traced_memory()
     print(f"run: {time.time() - t:.0f}s ok={s.get('ok')} signals={s.get('signals')} kept={seen.get('kept')}")
     print(f"python-level: peak {peak // MB} MB, after {cur // MB} MB; process rss {mem()}")
+    show()
     snap = best["snap"]
     if snap is None:
         print("no snapshot over 50 MB")
@@ -73,8 +117,8 @@ def trace_one():
     print(f"biggest snapshot: {best['size'] // MB} MB traced. Held by kal line (innermost kal frame):")
     by = {}
     for st in snap.statistics("traceback"):
-        frames = [f for f in st.traceback if "/kal/" in f.filename]
-        key = f"{frames[0].filename.split('/kal/')[-1]}:{frames[0].lineno}" if frames else "(no kal frame)"
+        frames = [f for f in st.traceback if "/kal/kal/" in f.filename]
+        key = f"{frames[-1].filename.split('/kal/kal/')[-1]}:{frames[-1].lineno}" if frames else "(no kal frame)"
         by[key] = by.get(key, 0) + st.size
     for key, size in sorted(by.items(), key=lambda kv: -kv[1])[:15]:
         print(f"   {size / MB:7.1f} MB  {key}")
