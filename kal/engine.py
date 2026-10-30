@@ -88,17 +88,20 @@ def _wanted(ev, until, keep):
         return True
 
 
+_UNREAD = frozenset(UNREAD)
+
+
 def _lean(ev, pool):
-    """One open event, slimmed in place: the unread fields go, and each text is shared with
-    its copies (an event's markets repeat the same rules and times). Anything odd stays as is."""
+    """One open event, slimmed: the unread fields go, and each text is shared with its copies
+    (an event's markets repeat the same rules and times). Each market becomes a new dict just
+    big enough for what is left: a dict never shrinks when keys go, so slimming one in place
+    left half the markets in a table built for 43+ fields (1,584 bytes, not 832: 40 MB of a
+    run's 209 MB on 2026-10-30). Anything odd stays as is."""
     markets = ev.get("markets") if isinstance(ev, dict) else None
-    for m in markets if isinstance(markets, list) else ():
-        if isinstance(m, dict):
-            for k in UNREAD:
-                m.pop(k, None)
-            for k, v in m.items():
-                if type(v) is str:
-                    m[k] = pool.setdefault(v, v)
+    if isinstance(markets, list):
+        ev["markets"] = [{k: pool.setdefault(v, v) if type(v) is str else v
+                          for k, v in m.items() if k not in _UNREAD} if isinstance(m, dict) else m
+                         for m in markets]
     return ev
 
 
@@ -110,7 +113,8 @@ class RunCache:
     All open events with their markets is 350 MB of JSON (2026-10-29), over 700 MB in
     Python, and research runs alongside within the same cap (deploy/kal.service). So the run
     keeps only the events a strategy can act on (scope()), read a page at a time, and slimmed
-    (_lean): a run peaks near 320 MB."""
+    (_lean): on 2026-10-30, 11,433 of 16,345 events, 209 MB in Python. A run peaks near
+    320 MB and gives it back when it ends (scheduler.give_back_memory)."""
 
     CACHED = ("events", "markets", "series")
 
