@@ -373,7 +373,9 @@ def catch_up(client):
     nets them away (the owner selling them, or buying the other side; the bot never buys
     both sides of a market), so shortfalls() and the sold-outside check write them off.
     Added as a buy, it would hide that, and the payout would be booked. Fills go in time
-    order, so a buy and its sale inside the gap work out too."""
+    order, so a buy and its sale inside the gap work out too. Run recover() first: the
+    bot's own marked orders are then in the books, so a sale is never read before the buy
+    it nets, whatever the fills' times say."""
     gap = db.get("restored")
     if not gap:
         return 0

@@ -482,16 +482,11 @@ def _trade(client, cfg, summary):
     positions, balance = [], 0.0
     if live:
         summary["reconciled"] = reconcile(client)
-        try:
-            added = ledger.catch_up(client)
-        except ledger.CatchUpError as e:
-            reason = (f"the books were restored, but the bot can't read Kalshi's fills to bring them up "
-                      f"to date: {e}. Check the trades since the backup on Kalshi.")
-            config.trip(reason)
-            summary["notes"].append(f"STOPPED: {reason}")
-            return
-        if added:
-            summary["notes"].append(f"added {added} order(s) from Kalshi that the restored books were missing")
+        # recover() before catch_up(): the bot's own (marked) orders must be in the books before
+        # catch_up() reads the other fills since a restore. Otherwise catch_up() could read an
+        # outside sale first, book it as the bot's buy of the other side and skip the bot's buy
+        # as netted; recover() then put that buy back, and the books held both sides of the
+        # market: a payout booked on contracts already sold (cross-PR money-path audit).
         try:
             back = ledger.recover(client)
         except ledger.CatchUpError as e:
@@ -508,6 +503,16 @@ def _trade(client, cfg, summary):
                 notify.send("kal put back orders its books had lost", note, tags=("warning",))
             except Exception:
                 log.warning("recovery alert failed", exc_info=True)
+        try:
+            added = ledger.catch_up(client)
+        except ledger.CatchUpError as e:
+            reason = (f"the books were restored, but the bot can't read Kalshi's fills to bring them up "
+                      f"to date: {e}. Check the trades since the backup on Kalshi.")
+            config.trip(reason)
+            summary["notes"].append(f"STOPPED: {reason}")
+            return
+        if added:
+            summary["notes"].append(f"added {added} order(s) from Kalshi that the restored books were missing")
         stranded = stranded_baskets()
         if stranded:
             reason = (f"basket left half-built on {', '.join(stranded)} (an earlier run stopped between "
