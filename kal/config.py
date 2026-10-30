@@ -109,6 +109,21 @@ def _raw():
     return data if isinstance(data, dict) else {}
 
 
+def sync_dir(folder):
+    """Make a file just made or renamed in `folder` last through a crash: the folder holds
+    its name. Best effort (some systems can't open a folder). Never raises."""
+    try:
+        fd = os.open(folder, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
+
+
 def _write(data):
     tmp = _path() + ".tmp"
     with open(tmp, "w") as f:
@@ -116,6 +131,7 @@ def _write(data):
         f.flush()
         os.fsync(f.fileno())
     os.replace(tmp, _path())
+    sync_dir(os.path.dirname(_path()))   # a stop saved just before a disk error stays saved
 
 
 def load():

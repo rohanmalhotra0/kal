@@ -6,6 +6,7 @@ import errno
 import os
 import re
 import sqlite3
+import threading
 import time
 import unittest
 from contextlib import ExitStack
@@ -471,6 +472,60 @@ class UncleanStopTests(Base):
             maintenance.beat()   # it can't stop the heartbeat for good
         with open(path) as f:
             self.assertEqual(f.read(), "boot-2")
+
+    def synced(self):
+        """Record what os.fsync is called on, as (device, inode)."""
+        seen, real = [], os.fsync
+
+        def fsync(fd):
+            st = os.fstat(fd)
+            seen.append((st.st_dev, st.st_ino))
+            return real(fd)
+        return seen, mock.patch.object(os, "fsync", side_effect=fsync)
+
+    def node(self, path):
+        st = os.stat(path)
+        return st.st_dev, st.st_ino
+
+    def test_the_boot_id_is_on_disk_at_once(self):
+        # ext4 writes a new file's data up to ~30 s later. A disk error in that time (the
+        # reboot fixes the disk) left an empty heartbeat, read as "can't tell".
+        seen, fsync = self.synced()
+        with self.boot("boot-1"), fsync:
+            maintenance.beat()
+            first = list(seen)
+            maintenance.beat()   # the same boot: nothing new to keep
+        path = os.path.join(config.home(), maintenance.HEARTBEAT)
+        self.assertEqual(first, [self.node(path), self.node(config.home())])
+        self.assertEqual(seen, first)
+
+    def test_a_saved_setting_is_on_disk_at_once(self):
+        # Its rename lives in the folder: a stop saved just before a disk error stays saved.
+        seen, fsync = self.synced()
+        with fsync:
+            config.update({"budget": 50})
+        self.assertIn(self.node(config.home()), seen)
+
+    def test_a_trade_run_cut_off_at_the_stop_keeps_the_heartbeat(self):
+        # It outlasted the stop's wait, so it ends with the process: not a clean stop. A
+        # reboot after it must be caught.
+        started, release = threading.Event(), threading.Event()
+
+        def trade():
+            started.set()
+            release.wait(5)
+        s = Scheduler(jobs={"trade": trade}, tick=0.01, intervals=lambda cfg: {"trade": 3600},
+                      hours=lambda cfg: {})
+        s.start()
+        try:
+            self.assertTrue(started.wait(5))
+            with self.assertLogs("kal.scheduler", "WARNING"):
+                s.stop(wait=0.05)
+            self.assertIsNotNone(maintenance.heartbeat_age())
+        finally:
+            release.set()
+        s.stop(wait=5)   # done now: a clean stop takes it away
+        self.assertIsNone(maintenance.heartbeat_age())
 
     @unittest.skipUnless(os.path.exists(maintenance.BOOT_ID), "Linux only")
     def test_the_boot_id_is_read(self):

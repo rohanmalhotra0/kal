@@ -460,7 +460,11 @@ class Scheduler:
         trade = self._workers.get("trade")
         if trade and trade.is_alive():
             trade.join(timeout=wait)
-        if self._beat_at or self._thread:   # this process ran the loop: a clean stop takes the heartbeat away
+        if trade and trade.is_alive():
+            # It outlasted the wait: it ends with the process, cut off. Not a clean stop, so
+            # the heartbeat stays (a reboot next is caught: clean_stop_check).
+            log.warning("a trade run was still going at the stop: it is cut off")
+        elif self._beat_at or self._thread:   # this process ran the loop: a clean stop takes the heartbeat away
             try:
                 from . import maintenance
                 maintenance.unbeat()

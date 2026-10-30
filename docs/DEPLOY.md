@@ -356,12 +356,12 @@ df -h /
 **Too many files** (space left, but no room for more files):
 
 ```bash
-df -i /                                     # IFree near 0: too many files
-sudo du --inodes -xd3 / | sort -n | tail    # the folders with the most files
+df -i /var/lib/kal                          # IFree near 0: too many files
+sudo du --inodes -xS / | sort -n | tail -3  # the folders with the most files in them
 ```
 
-Delete what you know is junk in the last folder it lists (often something filling `/tmp`).
-Never delete anything in `/var/lib/kal`.
+The last line is the folder with the most files. Delete what you know is junk there
+(often something filling `/tmp`). Never delete anything in `/var/lib/kal`.
 
 ## Backups
 

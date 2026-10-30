@@ -750,6 +750,9 @@ def beat():
     if not same:
         with open(path, "w") as f:
             f.write(boot)
+            f.flush()
+            os.fsync(f.fileno())   # ext4 writes it up to ~30 s later: a disk error by then lost it
+        config.sync_dir(config.home())
     os.utime(path, None)
 
 
