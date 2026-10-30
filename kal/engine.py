@@ -253,13 +253,13 @@ def reconcile(client):
 
 
 def _mark(sid, status):
-    """Mark a half-built basket reported. Called only once its stop is written, so a write
-    that fails here (a locked database) just means it's reported once more after Reset:
-    never an error that could hide the stop's reason."""
+    """Set a signal's status where a failed write must never fail the run: a half-built
+    basket marked reported once its stop is written (a locked database just means it's
+    reported once more after Reset), or a basket a mid-run stop skipped before any order."""
     try:
         db.execute("UPDATE signals SET status = ? WHERE id = ?", status, sid)
     except Exception:
-        log.warning("couldn't mark basket %s reported; the next run reports it again", sid, exc_info=True)
+        log.warning("couldn't set signal %s to %r", sid, status, exc_info=True)
 
 
 def stranded_baskets():
@@ -444,19 +444,17 @@ def _alert_once(key, title, message, every=86400):
         log.warning("alert failed", exc_info=True)
 
 
-_errors_here = {}   # KAL_HOME -> (failed runs the books couldn't count, their last_ok_run then)
-_NOT_READ = object()   # (the books couldn't be read)
+_errors_here = {}   # KAL_HOME -> (failed runs the books couldn't count, when the first of them was)
 
 
 def _count_error(cfg, e):
     # One streak: the failed runs the books couldn't take are added to the books' count, so
     # books that take some writes and not others still stop the bot at max_consecutive_errors.
     # A good run since, in another process too (`kal run`), ended that streak.
-    held, seen = _errors_here.get(config.home(), (0, _NOT_READ))
-    last_ok, books_n = _NOT_READ, 0
+    held, since = _errors_here.get(config.home(), (0, None))
+    books_n = 0
     try:
-        last_ok = db.get("last_ok_run")
-        if held and seen is not _NOT_READ and last_ok != seen:
+        if held and (db.get("last_ok_run") or 0) > since:
             held = 0
         books_n = db.get("consecutive_errors", 0) or 0
         errors = books_n + held + 1
@@ -475,7 +473,7 @@ def _count_error(cfg, e):
                 config.trip(f"the books are damaged ({books}). Nothing can trade. "
                             f"Put a backup back: {config.command('restore')}")
             return
-        _errors_here[config.home()] = (held + 1, seen if last_ok is _NOT_READ else last_ok)
+        _errors_here[config.home()] = (held + 1, since if held else time.time())
         n = books_n + held + 1
         if n >= cfg.get("max_consecutive_errors", 3):
             config.trip(f"{n} failed runs in a row, and the books can't be written "
@@ -747,8 +745,8 @@ def _trade(client, cfg, summary):
             # limit saved meanwhile stops this basket too. (Its legs go together.)
             stop = _stop_live(cfg, name)
             if stop:
-                db.execute("UPDATE signals SET status = ? WHERE id = ?", f"skipped: {stop}", sid)
                 summary["notes"].append(stop)
+                _mark(sid, f"skipped: {stop}")   # (best effort: no order went, so no error)
                 return
             try:
                 spent = execute(client, sig, sid)

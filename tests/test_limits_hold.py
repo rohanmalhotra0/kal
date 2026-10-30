@@ -133,6 +133,30 @@ class MidRunTests(TempHome):
         self.assertTrue(any(r["status"].startswith("skipped: turned off mid-run")
                             for r in db.query("SELECT status FROM signals")))
 
+    def test_a_mid_run_stop_whose_skip_cant_be_written_is_not_a_failed_run(self):
+        # The books refuse the 'skipped' write: still no order, the run is fine, and the
+        # stop's note stays (it isn't an error that counts toward the error trip).
+        c = two_baskets()
+        real_insert, real_execute, done = db.insert, db.execute, []
+
+        def insert(table, **row):
+            if table == "signals" and len(c.orders) == 4 and not done:
+                done.append(1)
+                config.update({"budget": 10})
+            return real_insert(table, **row)
+
+        def execute(sql, *args):
+            if sql.startswith("UPDATE signals SET status") and str(args[0]).startswith("skipped:"):
+                raise sqlite3.OperationalError("database is locked")
+            return real_execute(sql, *args)
+        with mock.patch.object(db, "insert", insert), mock.patch.object(db, "execute", execute), \
+                self.assertLogs("kal", "WARNING"):
+            s = engine.run_once(c)
+        self.assertEqual(len(c.orders), 4)
+        self.assertTrue(s["ok"], s)
+        self.assertIn("budget set stricter mid-run", " ".join(s["notes"]))
+        self.assertEqual(db.get("consecutive_errors"), 0)
+
     def test_a_looser_setting_mid_run_changes_nothing(self):
         c, s = self.run_editing({"budget": 200, "max_per_arb": 40})
         self.assertEqual(len(baskets_bought(c)), 2)
@@ -289,6 +313,64 @@ class ErrorStreakTests(TempHome):
             self.assertFalse(engine.run_once(fake_with_arb())["ok"])
         self.assertEqual(config.load()["disabled_reason"], "")
         self.assertEqual(db.get("consecutive_errors"), 1)
+
+    def test_a_good_run_ends_a_streak_that_began_when_the_books_couldnt_be_read(self):
+        # The review's sequence: the first failure can't even read the books; a good run
+        # elsewhere; a failure the books can't count; one more. 2 after the good run: no stop.
+        real_put, real_get = db.put, db.get
+        state = {"put_locked": True, "get_locked": True}
+
+        def put(key, value):
+            if key == "consecutive_errors" and state["put_locked"]:
+                raise sqlite3.OperationalError("database is locked")
+            return real_put(key, value)
+
+        def get(key, default=None):
+            if key in ("last_ok_run", "consecutive_errors") and state["get_locked"]:
+                raise sqlite3.OperationalError("database is locked")
+            return real_get(key, default)
+        real_put("last_ok_run", time.time() - 600)
+        with mock.patch.object(engine.fees, "check", side_effect=ValueError("a bug")), \
+                mock.patch.object(db, "put", put), mock.patch.object(db, "get", get), \
+                self.assertLogs("kal", "ERROR"):
+            engine.run_once(fake_with_arb())        # 1: the books can't be read at all
+            time.sleep(0.01)
+            state["get_locked"] = False
+            real_put("consecutive_errors", 0)       # a good run elsewhere
+            real_put("last_ok_run", time.time())
+            engine.run_once(fake_with_arb())        # 2: its count can't be written
+            state["put_locked"] = False
+            engine.run_once(fake_with_arb())        # 3
+        self.assertEqual(config.load()["disabled_reason"], "")
+        self.assertEqual(real_get("consecutive_errors"), 2)
+
+    def test_a_good_run_between_two_unreadable_failures_still_ends_the_streak(self):
+        # The streak is dated from its first failure: a good run after that ends it, even
+        # when the failure after the good run couldn't read the books either.
+        real_put, real_get = db.put, db.get
+        locked = [True]
+
+        def put(key, value):
+            if key == "consecutive_errors" and locked[0]:
+                raise sqlite3.OperationalError("database is locked")
+            return real_put(key, value)
+
+        def get(key, default=None):
+            if key in ("last_ok_run", "consecutive_errors") and locked[0]:
+                raise sqlite3.OperationalError("database is locked")
+            return real_get(key, default)
+        real_put("last_ok_run", time.time() - 600)
+        with mock.patch.object(engine.fees, "check", side_effect=ValueError("a bug")), \
+                mock.patch.object(db, "put", put), mock.patch.object(db, "get", get), \
+                self.assertLogs("kal", "ERROR"):
+            engine.run_once(fake_with_arb())        # 1: the books can't be read
+            time.sleep(0.01)
+            real_put("last_ok_run", time.time())    # a good run elsewhere
+            time.sleep(0.01)
+            engine.run_once(fake_with_arb())        # 2: still can't be read
+            locked[0] = False
+            engine.run_once(fake_with_arb())        # 3: 2 after the good run, not 3
+        self.assertEqual(config.load()["disabled_reason"], "")
 
     def test_a_third_failed_run_the_books_cant_count_still_stops_the_bot(self):
         failed, reason = self.failed_runs_until_the_stop(lambda i: i == 2)
