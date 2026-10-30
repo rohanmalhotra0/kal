@@ -360,9 +360,9 @@ scp -r root@SERVER_IP:/var/lib/kal/backups ./kal-backups
 
 Your key (`kalshi.pem`) is never in a backup. If you lose it, make a new key on Kalshi.
 
-Lost the whole server? The $300 limit still holds. Every order the bot sends carries its
-mark, and Kalshi keeps it. On a new server, the bot finds its own orders on Kalshi and puts
-them back in its books before it trades: their losses still count.
+Lost the whole server? Every order the bot sends (from Oct 30, 2026 on) carries its mark,
+and Kalshi keeps it. On a new server, the bot finds those orders on Kalshi and puts them
+back in its books before it trades, so the $300 limit still counts them.
 
 ## Restore
 

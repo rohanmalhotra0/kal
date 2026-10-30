@@ -84,14 +84,17 @@ class RecoverTests(TempHome):
         self.assertTrue(any("back in" in n for n in s["notes"]), s)
         self.assertAlmostEqual(ledger.realized(), -(5 + client.fee(10, 0.5)))
         row = db.query("SELECT strategy, status, client_order_id FROM orders")[0]
-        self.assertEqual((row["strategy"], row["status"], row["client_order_id"]), ("restored", "recovered", self.mine))
+        self.assertEqual((row["strategy"], row["status"], row["client_order_id"]), ("recovered", "recovered", self.mine))
         self.assertEqual(config.load()["disabled_reason"], "")
 
-    def test_a_win_put_back_never_grows_the_budget(self):
+    def test_a_win_put_back_counts_like_any_of_the_bots(self):
+        # A marked order is the bot's for sure: its full result comes back, as the books had
+        # it. Counting only losses would leave a winning bot looking like a loser after a
+        # lost disk (review of this change).
         self.c.order_list = [order(self.mine)]
         self.settled(result="yes")
         engine.run_once(self.c)
-        self.assertLessEqual(ledger.realized(), 0)   # restored orders: losses count, gains don't
+        self.assertAlmostEqual(ledger.realized(), 10 - (5 + client.fee(10, 0.5)))
 
     def test_an_order_the_store_holds_comes_back_too(self):
         self.c.archived_orders = [order(self.mine, ago=40 * DAY)]
@@ -103,10 +106,15 @@ class RecoverTests(TempHome):
         # A copy from before: its last check was 3 days ago, and the bot traded since.
         db.put("orders_checked", time.time() - 3 * DAY)
         self.c.honor_min_ts = True
-        self.c.order_list = [order(self.mine, ago=DAY)]
+        self.c.order_list = [order(new_order_id(), ago=5 * DAY),   # before the last check: the books have it
+                             order(self.mine, ago=DAY)]
+        db.insert("orders", ticker="M-1", side="yes", count=10, price=0.5, filled=10, status="executed",
+                  order_id=f"k-{self.c.order_list[0]['client_order_id']}",
+                  client_order_id=self.c.order_list[0]["client_order_id"], ts=time.time() - 5 * DAY)
         self.settled()
         engine.run_once(self.c)
-        self.assertEqual(len(db.query("SELECT id FROM orders")), 1)
+        self.assertEqual(len(db.query("SELECT id FROM orders")), 2)
+        self.assertAlmostEqual(ledger.realized(), -2 * (5 + client.fee(10, 0.5)))
 
     def test_the_owners_orders_and_unfilled_ones_are_left_alone(self):
         self.c.order_list = [order(str(uuid.uuid4())),                     # the owner's own
@@ -131,8 +139,8 @@ class RecoverTests(TempHome):
         self.c.order_list = [order(self.mine)]
         self.settled()
         engine.run_once(self.c)
-        rows = db.query("SELECT status, filled FROM orders")
-        self.assertEqual([(r["status"], r["filled"]) for r in rows], [("recovered", 10)])
+        rows = db.query("SELECT strategy, status, filled FROM orders")
+        self.assertEqual([(r["strategy"], r["status"], r["filled"]) for r in rows], [("favorites", "recovered", 10)])
         self.assertAlmostEqual(ledger.realized(), -(5 + client.fee(10, 0.5)))
 
     def test_a_marked_order_it_cant_read_stops_the_bot(self):
@@ -160,3 +168,72 @@ class RecoverTests(TempHome):
         s = engine.run_once(self.c)   # first check: the whole account, the store too
         self.assertTrue(s.get("transient"), s)
         self.assertIsNone(db.get("orders_checked"))   # checked next time instead
+
+
+class RecoverReviewTests(TempHome):
+    """From the independent review of this change."""
+
+    def setUp(self):
+        super().setUp()
+        config.update({"enabled": True, "budget": 300, "strategies": _all_off()})
+        self.c = FakeKalshi(balance=1000)
+        self.c.cutoffs = {"orders_updated_ts": time.time() - 15 * DAY, "trades_created_ts": time.time() - 60 * DAY}
+        self.c.position_list = []
+        self.mine = new_order_id()
+
+    def test_a_basket_leg_found_filled_after_all_stops_the_bot(self):
+        # Leg 1 of 2 was booked never placed and the basket closed as "missed". Kalshi shows
+        # it filled after all: half a basket is held, so the bot must stop, not trade on.
+        legs = [{"ticker": f"B-{i}", "side": "no", "price": 0.5, "count": 10} for i in range(2)]
+        sid = db.insert("signals", strategy="basket_arb", event="B", title="t", mode="live", guaranteed=1,
+                        cost=10, payout_min=10, exp_profit=0.5, legs=legs, status="missed (no fill)")
+        db.insert("orders", signal_id=sid, strategy="basket_arb", ticker="B-0", side="no", count=10, price=0.5,
+                  filled=0, status="never_placed", client_order_id=self.mine, ts=time.time() - 1800)
+        db.put("orders_checked", time.time() - 600)
+        self.c.order_list = [order(self.mine, ticker="B-0", outcome="no", ago=1800)]
+        self.c.position_list = [{"ticker": "B-0", "position": -10, "exposure": 5}]
+        self.c.market_info["B-0"] = {"ticker": "B-0", "status": "active", "no_bid_dollars": "0.5000"}
+        engine.run_once(self.c)
+        self.assertIn("half-built", config.load()["disabled_reason"])
+        self.assertEqual(db.query("SELECT status FROM signals")[0]["status"], "stranded: 1 of 2 legs bought")
+
+    def test_one_found_after_its_market_was_booked_counts_as_lost(self):
+        db.insert("settlements", ticker="M-1", settled_ts=time.time(), result="yes", revenue=0, cost=0, pnl=0)
+        self.c.order_list = [order(self.mine)]
+        engine.run_once(self.c)
+        self.assertAlmostEqual(ledger.realized(), -(5 + client.fee(10, 0.5)))   # never left out
+
+    def test_old_style_fields_only_cross_check_the_side(self):
+        # A NO buy is an ask on the YES book; Kalshi may call it "sell YES" in the old fields.
+        no_buy = order(self.mine, outcome="no", p=0.7)
+        no_buy.update(side="yes", action="sell")
+        yes_buy = order(new_order_id(), ticker="M-2", outcome="yes", p=0.4)
+        yes_buy.update(side="yes", action="buy")
+        self.c.order_list = [no_buy, yes_buy]
+        engine.run_once(self.c)
+        got = {(r["ticker"], r["side"], r["price"]) for r in db.query("SELECT ticker, side, price FROM orders")}
+        self.assertEqual(got, {("M-1", "no", 0.7), ("M-2", "yes", 0.4)})
+        self.assertEqual(config.load()["disabled_reason"], "")
+
+    def assertStops(self, o, words):
+        self.c.order_list = [o]
+        engine.run_once(self.c)
+        self.assertIn(words, config.load()["disabled_reason"])
+        self.assertEqual(db.query("SELECT COUNT(*) AS n FROM orders")[0]["n"], 0)
+
+    def test_fields_that_disagree_stop_the_bot(self):
+        o = order(self.mine, outcome="no")
+        o.update(side="yes", action="buy")   # says long YES and long NO at once
+        self.assertStops(o, "can't read the bot's own orders")
+
+    def test_executed_with_no_counts_is_not_a_number(self):
+        # "executed" alone once read as "all of it": with no size asked, that was infinity.
+        o = order(self.mine)
+        for k in ("fill_count_fp", "remaining_count_fp", "initial_count_fp"):
+            del o[k]
+        self.assertStops(o, "doesn't say how much it bought")
+
+    def test_an_order_with_no_order_id_stops_the_bot(self):
+        o = order(self.mine)
+        o["order_id"] = ""
+        self.assertStops(o, "no order id")

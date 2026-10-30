@@ -499,7 +499,7 @@ def _trade(client, cfg, summary):
             return
         if back:
             note = (f"Kalshi shows {back} order(s) the bot made that its books didn't have (lost or older "
-                    f"books?). They're back in: their losses count against the budget, their gains don't.")
+                    f"books?). They're back in, so the $300 limit still counts them.")
             summary["notes"].append(note)
             try:
                 from . import notify

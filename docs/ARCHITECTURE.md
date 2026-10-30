@@ -71,8 +71,9 @@ tests/            unittest; tests/fakes.py has FakeKalshi, tests/helpers.py has 
 - **The bot's orders carry a mark.** Every client_order_id is a UUID starting with
   `client.BOT_MARK`. Kalshi keeps orders for good (live, then `/historical/orders`), so
   `ledger.recover` puts back any marked order that bought something and isn't in the
-  books (a lost disk, a reinstall, books rolled back). It goes in like a restored order:
-  losses count, gains never do. Each live run looks back to its last check.
+  books (a lost disk, a reinstall, books rolled back), with its full result: it is the
+  bot's for sure. Each live run looks back to its last check. Orders from before the mark
+  (Oct 30, 2026) can't be found this way.
 - **API keys are Ed25519 (Kalshi's default since 2026) or RSA.** Both sign timestamp +
   method + path (no query), base64: Ed25519 signs the text itself, RSA uses RSA-PSS with
   SHA-256 (`client.sign`). The PEM header doesn't say which; `client.parse_key` refuses
