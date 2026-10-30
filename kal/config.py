@@ -192,18 +192,22 @@ def trip(reason):
 
     The phone alert is "high", not "urgent": a stop already ends all trading, so it is
     news to read when awake, not an alarm for 3 AM."""
+    reason = str(reason) or "stopped"
     with _locked():
         try:
             data = _raw()
         except (OSError, ValueError):
             data = {}
-        data.update(enabled=False, disabled_reason=str(reason) or "stopped")
+        data.update(enabled=False, disabled_reason=reason)
         _write(data)
     try:
         from . import notify
-        if notify.enabled() and not notify.send("kal stopped itself", f"{reason}\n\n{STOPPED_HELP}",
-                                                priority="high", tags=("no_entry",)):
-            _keep_unsent(reason)
+        if notify.enabled():
+            if notify.send("kal stopped itself", f"{reason}\n\n{STOPPED_HELP}", priority="high",
+                           tags=("no_entry",)):
+                _drop_unsent()   # an older stop that didn't get through is old news now
+            else:
+                _keep_unsent(reason)
     except Exception:
         pass  # an alert must never block a trip
 
@@ -213,41 +217,56 @@ UNSENT_STOP = "unsent_stop.txt"
 
 def _keep_unsent(reason):
     """A stop alert that didn't get through (ntfy down, no network). resend_stop() tries it
-    again: it is the one alert that says the bot stopped trading."""
+    again: it is the one alert that says the bot stopped trading. Never raises."""
     try:
-        with open(os.path.join(home(), UNSENT_STOP), "w") as f:
-            f.write(str(reason))
+        p = os.path.join(home(), UNSENT_STOP)
+        tmp = f"{p}.{os.getpid()}.tmp"
+        with open(tmp, "w") as f:
+            f.write(reason)
+        os.replace(tmp, p)
+    except OSError:
+        pass
+
+
+def _drop_unsent(only=None):
+    """Forget the unsent stop alert: any, or only if it still says `only` (a newer one that
+    didn't get through stays). Never raises."""
+    try:
+        p = os.path.join(home(), UNSENT_STOP)
+        if only is not None:
+            with open(p) as f:
+                if f.read() != only:
+                    return
+        os.remove(p)
     except OSError:
         pass
 
 
 def resend_stop():
-    """Send the stop alert again if it didn't get through, while the bot is still stopped.
-    The health job calls this every 10 minutes. True if it went now. Never raises."""
-    p = os.path.join(home(), UNSENT_STOP)
+    """Send a stop alert again if it didn't get through, while the bot is still stopped for
+    that reason (cleared, or stopped since for another: dropped). The health job calls this
+    every 10 minutes. True if it went now. Never raises."""
     try:
-        with open(p) as f:
+        with open(os.path.join(home(), UNSENT_STOP)) as f:
             reason = f.read()
     except OSError:
         return False
     try:
-        stopped = bool(_raw().get("disabled_reason"))
-    except Exception:
-        stopped = True   # can't tell: a repeat is better than silence
-    sent = False
-    if stopped:
         try:
-            from . import notify
-            sent = notify.send("kal stopped itself", f"{reason}\n\n{STOPPED_HELP}",
-                               priority="high", tags=("no_entry",))
+            now = _raw().get("disabled_reason")
         except Exception:
-            sent = False
-    if sent or not stopped:
-        try:
-            os.remove(p)
-        except OSError:
-            pass
-    return sent
+            now = reason   # can't tell: a repeat is better than silence
+        if now != reason:
+            _drop_unsent(reason)
+            return False
+        from . import notify
+        if notify.send("kal stopped itself", f"{reason}\n\n{STOPPED_HELP}", priority="high",
+                       tags=("no_entry",)):
+            _drop_unsent(reason)
+            return True
+    except Exception:
+        pass
+    return False
 
 
 def turn_off():
@@ -263,6 +282,7 @@ def turn_off():
 
 def clear_trip():
     update({"disabled_reason": ""})
+    _drop_unsent()
 
 
 def command(rest):

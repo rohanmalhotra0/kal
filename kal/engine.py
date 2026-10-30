@@ -365,6 +365,7 @@ def _run_once(client, cfg, t0):
         client = client or Kalshi.from_env(config.home(), cfg["env"])
         _run(client, cfg, summary)
         db.put("consecutive_errors", 0)
+        _errors_here.pop(config.home(), None)
         db.put("last_ok_run", time.time())
     except (LegFailed, OrderUnknown, Halted) as e:
         summary.update(ok=False, error=str(e))
@@ -443,15 +444,25 @@ def _alert_once(key, title, message, every=86400):
         log.warning("alert failed", exc_info=True)
 
 
+_errors_here = {}   # KAL_HOME -> failed runs in a row, counted here when the books can't take it
+
+
 def _count_error(cfg, e):
     try:
         errors = (db.get("consecutive_errors", 0) or 0) + 1
         db.put("consecutive_errors", errors)
     except Exception as books:
-        # The books can't be read or written, so no order can be recorded (none is sent),
-        # and every run fails the same way. Stop and say so: else it fails quietly forever.
-        config.trip(f"the books ({os.path.basename(db.path())}) can't be used: {books}. "
-                    f"Last error: {e}. See: {config.command('health')}")
+        # No order can be recorded on such books, so none is sent; but every run fails, and
+        # the count itself can't be kept there. Damaged: stop now, nothing will change.
+        # Busy, locked or full: count here, so a lasting problem still stops the bot.
+        if db.damaged(books):
+            config.trip(f"the books are damaged ({books}). Nothing can trade. "
+                        f"Put a backup back: {config.command('restore')}")
+            return
+        n = _errors_here[config.home()] = _errors_here.get(config.home(), 0) + 1
+        if n >= cfg.get("max_consecutive_errors", 3):
+            config.trip(f"{n} failed runs in a row, and the books can't be written "
+                        f"({books}). Last error: {e}. See: {config.command('health')}")
         return
     if errors >= cfg.get("max_consecutive_errors", 3):
         config.trip(f"{errors} failed runs in a row. Last error: {e}")

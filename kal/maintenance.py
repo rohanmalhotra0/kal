@@ -107,7 +107,7 @@ def _trip_once(reason):
     return True
 
 
-_sent_here = {}   # key -> when this process last sent it: the fallback when the books can't be read
+_sent_here = {}   # (KAL_HOME, key) -> when this process last sent it: when the books can't say
 
 
 def _alert(key, title, message, priority="high", every=WARN_EVERY):
@@ -120,7 +120,8 @@ def _alert(key, title, message, priority="high", every=WARN_EVERY):
         sent = db.get("alerts", {}) or {}
         last = float(sent.get(key) or 0)
     except Exception:
-        sent, last = None, float(_sent_here.get(key) or 0)
+        sent, last = None, 0.0
+    last = max(last, float(_sent_here.get((config.home(), key)) or 0))   # the books may not take writes
     if time.time() - last < every:
         return False
     try:
@@ -136,10 +137,10 @@ def _alert(key, title, message, priority="high", every=WARN_EVERY):
 def _note_sent(key, sent=None):
     """Remember that an alert about `key` went: in this process, and in the books when they
     can be written."""
-    _sent_here[key] = time.time()
+    now = _sent_here[(config.home(), key)] = time.time()
     try:
         sent = (db.get("alerts", {}) or {}) if sent is None else sent
-        sent[key] = _sent_here[key]
+        sent[key] = now
         db.put("alerts", sent)
     except Exception:
         log.warning("could not save that alert %s was sent", key, exc_info=True)
@@ -179,20 +180,42 @@ def _problem(path):
     return f"no {', '.join(missing)} table" if missing else None
 
 
-def books_ok(trip=True):
-    """This exchange's books (kal.db) open and pass SQLite's check. A broken file fails every
-    trade run before it can buy (no order can be written), while the heartbeat stays fresh:
-    so it stops the bot and says so. None yet (before the first run) is fine."""
+DAMAGED = "the books are damaged"   # how every stop for damaged books begins (engine's too)
+
+
+def books_ok(trip=True, quick=False):
+    """This exchange's books (kal.db) open and pass SQLite's check. Damaged books (corrupt,
+    or not a database) fail every trade run before it can buy, while the heartbeat stays
+    fresh: so it stops the bot and says how to restore. Busy, locked or unreadable for a
+    moment is only a warning: a backup wouldn't fix that, and would drop newer rows. None
+    yet, or an empty file, is fine (the first run makes them). quick: open it and read its
+    schema only, for the watchdog's frequent check."""
     p = db.path(_env())
-    if not os.path.isfile(p):
+    name = os.path.basename(p)
+    if not os.path.isfile(p) or os.path.getsize(p) == 0:
         return _row("books", "ok", "none yet (the first run makes them)")
-    problem = _problem(p)
-    if problem is None:
-        return _row("books", "ok", f"{os.path.basename(p)} reads fine")
-    text = (f"{os.path.basename(p)} is damaged ({problem}). Nothing can trade. "
+    try:
+        with _open(p) as c:
+            c.execute("SELECT count(*) FROM sqlite_master").fetchone()
+            got = ["ok"] if quick else [r[0] for r in c.execute("PRAGMA quick_check")]
+    except sqlite3.Error as e:
+        if not db.damaged(e):
+            return _row("books", "warn", f"couldn't check {name}: {e}")
+        got = [str(e)]
+    if got == ["ok"]:
+        return _row("books", "ok", f"{name} reads fine")
+    text = (f"{name} is damaged ({'; '.join(map(str, got))[:200]}). Nothing can trade. "
             f"Put a backup back: {config.command('restore')}")
-    tripped = bool(trip and _trip_once(f"the books are damaged: {text}"))
+    # A trade run may have stopped the bot for this already: its alert said it.
+    tripped = bool(trip and (_trip_once(f"{DAMAGED}: {text}") or _stopped_for(DAMAGED)))
     return _row("books", "fail", text, tripped=tripped)
+
+
+def _stopped_for(prefix):
+    try:
+        return str(config.load().get("disabled_reason") or "").startswith(prefix)
+    except Exception:
+        return False
 
 
 def _tmp(path):
@@ -761,7 +784,10 @@ def health(trip=True, client=None):
         note_trips()
     except Exception:
         log.warning("could not write the trip history", exc_info=True)
-    config.resend_stop()
+    try:
+        config.resend_stop()
+    except Exception:
+        log.warning("could not resend the stop alert", exc_info=True)
     broken = any(r["check"] == "books" and r["level"] == "fail" for r in rows)
     for r in rows:
         if r["level"] == "ok" or r.get("unknown") or (broken and r.get("books")):
@@ -863,7 +889,7 @@ def alive():
     """The quick local check (no network) for Docker's health check and kal-watch: disk,
     books and timer. Only a "fail" row counts as unhealthy; a disk warning is not a reason
     to flag it."""
-    rows = [_safe("disk", disk_ok, trip=False), _safe("books", books_ok, trip=False),
+    rows = [_safe("disk", disk_ok, trip=False), _safe("books", books_ok, trip=False, quick=True),
             _safe("timer", _timer_row)]
     for r in rows:
         if r["level"] == "warn" and r["check"] == "timer":

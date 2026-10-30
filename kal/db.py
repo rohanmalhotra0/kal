@@ -54,6 +54,18 @@ def pinned(env):
         _pin.env = old
 
 
+_DAMAGE = (11, 26)   # SQLITE_CORRUPT, SQLITE_NOTADB
+
+
+def damaged(e):
+    """True if a SQLite error means the file itself is bad (corrupt, or not a database). Busy,
+    locked, out of room or unreadable for a moment is not damage: a backup won't fix it."""
+    code = getattr(e, "sqlite_errorcode", None)   # Python 3.11+
+    if code is not None:
+        return code & 0xFF in _DAMAGE   # an extended code keeps its primary code in the low byte
+    return type(e) is sqlite3.DatabaseError
+
+
 def path(env=None):
     """One database per exchange, so fake-money (demo) fills can never touch the real ledger."""
     env = env or current_env()

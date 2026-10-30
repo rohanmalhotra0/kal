@@ -334,7 +334,7 @@ It stays stopped until a person says so. `sudo kal health` shows why.
 | Disk almost full | Free some space (below). |
 | The server clock is ... Kalshi's clock | Fix the clock: `sudo systemctl restart chrony`, then `timedatectl`. |
 | Books restored from the ... backup | See "Restore" below. |
-| the books are damaged, or the books ... can't be used | `kal.db` can't be read, so nothing can trade. See "Restore" below. |
+| the books are damaged | `kal.db` is corrupt, so nothing can trade. See "Restore" below. (A lock or a full disk is not damage: those say "can't be written" and need no restore.) |
 
 When the cause is fixed: `sudo kal on --clear-trip`
 

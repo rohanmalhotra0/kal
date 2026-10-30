@@ -4,6 +4,7 @@ was never sent again. python -m unittest tests.test_broken_books
 """
 import os
 import sqlite3
+import time
 from types import SimpleNamespace
 from unittest import mock
 
@@ -44,7 +45,6 @@ class Base(TempHome):
         post = mock.patch.object(notify.requests, "post", self.phone)
         post.start()
         self.addCleanup(post.stop)
-        maintenance._sent_here.clear()
         maintenance._clock_bad["ts"] = None
         config.update({"enabled": True, "budget": 60,
                        "strategies": {k: {"mode": "off"} for k in config.DEFAULTS["strategies"]}})
@@ -62,7 +62,8 @@ class BrokenBooksTests(Base):
             engine.run_once(self.client)   # it can't even record the run
         cfg = config.load()
         self.assertFalse(cfg["enabled"])
-        self.assertIn("can't be used", cfg["disabled_reason"])
+        self.assertTrue(cfg["disabled_reason"].startswith(maintenance.DAMAGED), cfg["disabled_reason"])
+        self.assertIn("restore", cfg["disabled_reason"])
         self.assertEqual(self.phone.titles, ["kal stopped itself"])
         self.assertEqual(engine.run_once(self.client)["skipped"], cfg["disabled_reason"])
         self.assertEqual(len(self.phone.titles), 1)   # once, not every run
@@ -104,6 +105,52 @@ class BrokenBooksTests(Base):
         self.assertFalse(os.path.exists(db.path()))   # the check never makes one
 
 
+    def test_a_trade_run_then_the_health_check_send_one_alert(self):
+        break_books()
+        with self.assertLogs("kal", "ERROR"), self.assertRaises(sqlite3.DatabaseError):
+            engine.run_once(self.client)
+        with free_disk(50_000), kalshi_clock(0), self.assertLogs("kal", "WARNING"):
+            maintenance.health()
+        self.assertEqual(self.phone.titles, ["kal stopped itself"])
+
+    def test_with_the_status_report_set_up_still_one_alert(self):
+        # In production a GitHub token is set, so the report check runs: it fails on the
+        # damaged books too, and must not send its own warning.
+        with mock.patch.dict(os.environ, {"KAL_GITHUB_TOKEN": "t", "KAL_GITHUB_REPO": "o/r"}):
+            break_books()
+            with free_disk(50_000), kalshi_clock(0), self.assertLogs("kal", "WARNING"):
+                out = maintenance.health()
+        self.assertIn("report", {r["check"] for r in out["checks"]})
+        self.assertEqual(self.phone.titles, ["kal stopped itself"])
+
+    def test_busy_or_locked_books_are_not_damaged(self):
+        locked = sqlite3.OperationalError("database is locked")
+        with mock.patch.object(maintenance, "_open", side_effect=locked):
+            row = maintenance.books_ok()
+        self.assertEqual(row["level"], "warn")
+        self.assertTrue(config.load()["enabled"])   # never stopped, never sent to restore
+        self.assertFalse(db.damaged(locked))
+        self.assertFalse(db.damaged(sqlite3.OperationalError("disk I/O error")))
+
+    def test_a_run_that_cant_write_its_count_stops_after_the_usual_tries(self):
+        cfg = config.load()
+        locked = sqlite3.OperationalError("database is locked")
+        with mock.patch.object(db, "get", side_effect=locked):
+            for _ in range(2):
+                engine._count_error(cfg, RuntimeError("boom"))
+                self.assertTrue(config.load()["enabled"])
+            engine._count_error(cfg, RuntimeError("boom"))
+        reason = config.load()["disabled_reason"]
+        self.assertIn("can't be written", reason)
+        self.assertNotIn("restore", reason)   # a backup wouldn't fix a lock or a full disk
+
+    def test_an_empty_books_file_is_none_yet(self):
+        os.remove(db.path())
+        open(db.path(), "w").close()
+        self.assertEqual(maintenance.books_ok()["level"], "ok")
+        self.assertTrue(config.load()["enabled"])
+
+
 class StopAlertTests(Base):
     def test_a_stop_alert_that_did_not_go_is_sent_again_until_it_does(self):
         self.phone.status = 503
@@ -137,3 +184,41 @@ class StopAlertTests(Base):
         with free_disk(50_000), kalshi_clock(0):
             maintenance.health()
         self.assertEqual(self.phone.titles, ["kal stopped itself"])
+
+class AlertMemoryTests(Base):
+    def test_books_that_read_but_cant_write_still_alert_once_a_day(self):
+        with mock.patch.object(db, "put", side_effect=sqlite3.OperationalError("database or disk is full")), \
+                self.assertLogs("kal", "WARNING"):
+            for _ in range(3):
+                maintenance._alert("disk:warn", "kal warning: disk", "almost full")
+        self.assertEqual(self.phone.titles, ["kal warning: disk"])
+
+
+
+class StaleStopTests(Base):
+    def unsent(self, reason):
+        self.phone.status = 503
+        with self.assertLogs("kal.notify", "WARNING"):
+            config.trip(reason)
+        self.phone.status = 200
+        self.phone.titles.clear()
+
+    def test_a_newer_stop_that_got_through_drops_the_old_one(self):
+        self.unsent("the books are damaged: kal.db")
+        config.trip("Books restored from the 2026-10-29 backup")
+        self.assertFalse(config.resend_stop())
+        self.assertEqual(self.phone.titles, ["kal stopped itself"])   # only the new stop
+
+    def test_a_newer_stop_that_didnt_get_through_is_the_one_resent(self):
+        self.unsent("first reason")
+        self.unsent("second reason")
+        with mock.patch.object(notify, "send", wraps=notify.send) as send:
+            self.assertTrue(config.resend_stop())
+        self.assertIn("second reason", send.call_args.args[1])
+
+    def test_a_stop_for_another_reason_since_drops_the_unsent_one(self):
+        self.unsent("first reason")
+        config.update({"disabled_reason": "someone else stopped it"})   # e.g. a later trip
+        self.assertFalse(config.resend_stop())
+        self.assertFalse(os.path.exists(os.path.join(config.home(), config.UNSENT_STOP)))
+
