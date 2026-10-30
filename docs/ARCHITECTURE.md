@@ -68,6 +68,10 @@ tests/            unittest; tests/fakes.py has FakeKalshi, tests/helpers.py has 
 - Price ticks are 1c, 0.1c, or 0.1c near the ends (`price_ranges`). Orders are priced off
   the opposite side's real bid, so they're always on a tick.
 - Combo markets (`KXMVE...`) are skipped everywhere.
+- **API keys are Ed25519 (Kalshi's default since 2026) or RSA.** Both sign timestamp +
+  method + path (no query), base64: Ed25519 signs the text itself, RSA uses RSA-PSS with
+  SHA-256 (`client.sign`). The PEM header doesn't say which; `client.parse_key` refuses
+  any other kind.
 - **Orders use V2 only.** `POST /portfolio/orders` answers 410 `deprecated_v1_order_endpoint`.
   Create: `POST /portfolio/events/orders` on one YES book (`bid`/`ask`): buy YES at p =
   bid p, buy NO at p = ask 1-p; count/price are strings. Cancel:

@@ -95,7 +95,9 @@ class ChaosKalshi(FakeKalshi):
         self.cancelled.append(order_id)
         return {}
 
-    def fills(self, min_ts=None, ticker=None):
+    def fills(self, min_ts=None, ticker=None, archive=False):
+        if archive:
+            return []   # everything here is recent: nothing has moved to Kalshi's historical store
         return [{"order_id": o["order_id"], "ticker": o["ticker"], "side": o["side"], "action": "buy",
                  "count_fp": f"{o['filled']:.2f}", f"{o['side']}_price_dollars": f"{o['price']:.4f}",
                  "created_time": "2026-10-25T00:00:00Z"} for o in self.order_list

@@ -10,7 +10,7 @@ inflate it. Kalshi's fills are read only to lower it (contracts sold outside the
 import time
 
 from . import db
-from .client import UnknownSettlement, fee, num, outcome_side, price, ts, yes_payout
+from .client import UnknownSettlement, every_fill, fee, num, outcome_side, price, ts, yes_payout
 
 OPEN = ("active", "open")
 
@@ -83,7 +83,7 @@ def settle(client):
         paid = yes_payout(markets.get(ticker, {}))  # raises UnknownSettlement: the engine trips
         if paid is None:
             continue
-        if _write_off_sold_outside(client, ticker, legs):
+        if _write_off_sold_outside(client, ticker, legs, markets.get(ticker, {}).get("open_time")):
             legs = [r for r in open_positions() if r["ticker"] == ticker]
         revenue = sum(r["count"] * (paid if r["side"] == "yes" else 1 - paid) for r in legs)
         revenue = max(0.0, revenue - _restored_gain(ticker, paid))
@@ -95,17 +95,23 @@ def settle(client):
     return n
 
 
-def _write_off_sold_outside(client, ticker, legs):
+def _write_off_sold_outside(client, ticker, legs, opened=None):
     """Before a market's payout is booked, write off the bot's contracts on it that Kalshi's
     fills show someone sold outside the bot (or netted away by buying the other side). A run
     sees that in Kalshi's positions only while the market trades, so a sale while the bot
     was stopped, or just before the close, would be booked as paid. Fills only ever lower
-    the books. Returns True if it wrote anything off."""
+    the books. Every fill since the market opened (`opened`, its open_time; None: all of
+    them) counts, from Kalshi's historical store too: the open time only decides whether the
+    store is read. Returns True if it wrote anything off."""
+    try:
+        since = ts(opened) - 3600 if opened else None   # no fills before a market opens
+    except (AttributeError, TypeError, ValueError):
+        since = None
     mine = {r["order_id"] for r in db.query("SELECT DISTINCT order_id FROM orders WHERE ticker = ? "
                                             "AND order_id != ''", ticker)}
     toward_yes = 0.0   # how much everyone else's fills moved the account's position to YES
     try:
-        for f in client.fills(ticker=ticker):
+        for f in every_fill(client, ticker=ticker, earliest=since):
             oid, t, side, action, n, _, _ = _parse_fill(f)
             if t == ticker and oid not in mine:
                 toward_yes += n if (side == "yes") == (action == "buy") else -n
@@ -356,7 +362,8 @@ def catch_up(client):
     owner's own trades in that window get counted too: the safe direction, since they only
     make the bot think it spent more, and settle() never books their gains, only their
     losses. Returns how many orders were added (0 if no restore is waiting). Raises
-    CatchUpError if a fill can't be read: never guess.
+    CatchUpError if a fill can't be read: never guess. Fills older than Kalshi's cutoff are
+    read from its historical store, so an old backup still gets every buy since its day.
 
     Never added: a fill on the other side of contracts the books hold at that moment. It
     nets them away (the owner selling them, or buying the other side; the bot never buys
@@ -371,7 +378,7 @@ def catch_up(client):
     for r in open_positions():
         held[(r["ticker"], r["side"])] = held.get((r["ticker"], r["side"]), 0.0) + r["count"]
     found = {}
-    for oid, ticker, side, action, n, p, when in sorted((_parse_fill(f) for f in client.fills(min_ts=gap["since"])),
+    for oid, ticker, side, action, n, p, when in sorted((_parse_fill(f) for f in every_fill(client, min_ts=gap["since"])),
                                                         key=lambda x: x[6]):
         if action != "buy" or oid in known:
             continue  # the bot never sells; a sold position shows up in shortfalls()
