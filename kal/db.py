@@ -30,6 +30,7 @@ CREATE TABLE IF NOT EXISTS backtests (id INTEGER PRIMARY KEY, ts REAL, kind TEXT
 CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT);
 CREATE TABLE IF NOT EXISTS writeoffs (id INTEGER PRIMARY KEY, ts REAL, ticker TEXT, side TEXT,
     count REAL, cost REAL, note TEXT);
+CREATE TABLE IF NOT EXISTS held_gains (ticker TEXT PRIMARY KEY, ts REAL, gain REAL, loss REAL);
 """
 
 _pin = threading.local()

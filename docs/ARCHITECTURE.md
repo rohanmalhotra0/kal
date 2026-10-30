@@ -72,8 +72,9 @@ tests/            unittest; tests/fakes.py has FakeKalshi, tests/helpers.py has 
   `client.BOT_MARK`. Kalshi keeps orders for good (live, then `/historical/orders`), so
   `ledger.recover` puts back any marked order that bought something and isn't in the
   books. Books rolled back to an older copy get its full result. New books (a lost disk)
-  can't see what came before the mark (Oct 30, 2026), so there only its losses count,
-  never its gains. Each live run looks back to its last check. Every order put back
+  can't see what came before the mark (Oct 30, 2026), so there their gains only make up
+  their losses, never more (`ledger.made_up`): a past basket nets out instead of reading
+  as a loss of one leg. Each live run looks back to its last check. Every order put back
   (here or by `catch_up`) gets a stand-in signal with its event from Kalshi's market
   data, so `max_per_event` counts it. A ticker can't say its event: player-prop and
   negative-threshold tickers carry extra hyphens.
