@@ -231,10 +231,19 @@ def backups():
     return out
 
 
-def backup(now=None, keep=KEEP_DAYS):
+def backup(now=None, keep=KEEP_DAYS, wait=LOCK_WAIT):
     """Copy every db to backups/<UTC date>/, then keep only the newest `keep` days.
     Returns {"day", "dir", "files", "days"}. Raises MaintenanceError if a copy fails;
-    then nothing old is deleted, and a failed copy never replaces a good one."""
+    then nothing old is deleted, and a failed copy never replaces a good one.
+
+    Copies only between trade runs (waiting up to `wait` seconds for one to finish; Locked
+    after that). A copy taken between a basket's legs, put back later, read as a basket
+    left half-built: a false stop (cross-PR money-path audit)."""
+    with _run_lock(wait):
+        return _backup(now, keep)
+
+
+def _backup(now, keep):
     now = time.time() if now is None else now
     day, dbs = _day(now), _dbs()
     if not dbs:
