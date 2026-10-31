@@ -4,6 +4,7 @@ A bot that trades on [Kalshi](https://kalshi.com), a US prediction market.
 It runs by itself on a $12-a-month server.
 
 **Profits are not guaranteed.** Only give it money you can afford to lose.
+It often goes weeks without a trade: see [What to expect](#what-to-expect).
 
 ## Turn it on (9 steps, about 20 minutes)
 
@@ -61,6 +62,20 @@ can't fill, to prove Kalshi accepts its orders. Want to practice with fake money
 - **Every day:** tests new ideas on past markets (research), backs up its books,
   and sends yesterday's summary to your phone.
 - **Dashboard:** turn it on or off, set the budget, see what it did.
+
+## What to expect
+
+- **Few trades.** In a 3-hour test on real Kalshi prices (Oct 30, 2026), it looked 36 times
+  and made 0 trades. Watching for arbitrage for 13 hours found 0 chances. That's the bot
+  being careful, not broken.
+- **Bets wait for proof.** Research hasn't found a bet that passes its tests yet. The best
+  so far made about 0.1% to 0.6% a bet on past markets, and its worst case lost. Until one
+  passes, bets stay on paper.
+- **It may not pay for its server.** The server costs about $144 a year: almost half of
+  $300. Arbitrage pays cents to a few dollars, and rarely.
+- **Check after 4 weeks.** Read the report. No trades or no profit, even on paper? Then
+  the server costs more than the bot earns. You can turn it off (`sudo kal off`) and delete
+  the server. Your money stays in your Kalshi account.
 
 ## Strategies, safest first
 
@@ -184,7 +199,6 @@ docs/DEPLOY.md says what each alert means and what to do.
 ## Good to know
 
 - Kalshi pays interest on balances of **$250 or more**.
-- Arbitrage chances are rare and small: cents to a few dollars each.
 - Bets (`favorites`, `mentions`) can lose, even after they pass every test.
 - Never commit your key (`kalshi.pem`), `.env` files, or tokens.
 
