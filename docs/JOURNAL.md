@@ -2,6 +2,17 @@
 
 Newest first. Each 2-hour check-in adds one entry: what it checked, what it found, links.
 
+## 2026-10-31 09:10 UTC — the 3-hour soak made 0 trades; README now says what to expect
+
+- Read the 3-hour soak's report ([api-probe run 41105723547](https://github.com/rohanmalhotra0/kal/actions/runs/41105723547)):
+  all 36 trade runs gave 0 signals from all 11 strategies. Not a bug: bets only trade what
+  research proved, and research has proved nothing yet. Arbitrage: 0 chances in 13 hours.
+- So the bot may not earn its $12 a month. Merged
+  [PR #58](https://github.com/rohanmalhotra0/kal/pull/58): the README says this up top and
+  suggests a check after 4 weeks. Docs only.
+- Waiting on the owner: update the server, `sudo kal setup`, `sudo kal doctor`, or decide to
+  delete the server until an edge shows up.
+
 ## 2026-10-31 08:50 UTC — check-in: all green
 
 - Checked: CI green on main 23ecf2d. Latest market-check (Oct 30 18:39) green. No status
