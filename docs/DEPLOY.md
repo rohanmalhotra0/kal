@@ -24,6 +24,8 @@ Each step is short. Do them in order.
 | GitHub (code, reports, checks) | free |
 | **Total** | **about $12 to $14. Always under $20.** |
 
+The bot may earn less than this: see [What to expect](../README.md#what-to-expect).
+
 ## 1. Rent a server
 
 Any of these is fine. Pick the 2 GB size: a trade run and research together need about 550 MB,
