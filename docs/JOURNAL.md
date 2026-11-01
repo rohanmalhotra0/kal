@@ -2,6 +2,15 @@
 
 Newest first. Each 2-hour check-in adds one entry: what it checked, what it found, links.
 
+## 2026-11-01 00:50 UTC — check-in: all green
+
+- Checked: CI green on main e406faf. Latest market-check (Oct 31 17:48) green. No status
+  report: the private `kal-status` repo isn't shared with Claude.
+- Nothing broken, so no fix. Research: only idea #18 is left (needs weeks of server paper
+  trades).
+- Waiting on the owner: update the server, `sudo kal setup`, `sudo kal doctor`, or delete
+  it until an edge shows up (README "What to expect").
+
 ## 2026-10-31 22:50 UTC — check-in: all green
 
 - Checked: CI green on main aa850bc. Latest market-check (17:48 today) green. No status
