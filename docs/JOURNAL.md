@@ -1,144 +1,26 @@
 # Journal
 
 Newest first. Each 2-hour check-in adds one entry: what it checked, what it found, links.
+Check-ins that find nothing new share one entry per day.
 
-## 2026-11-01 14:50 UTC — check-in: all green
+## 2026-11-01 — 9 check-ins, all green (00:50 to 16:50 UTC)
 
-- Checked: CI green on main 3cd1b97. Latest market-check (Oct 31 17:48) green. No status
-  report: the private `kal-status` repo isn't shared with Claude.
-- Nothing broken, so no fix. Research: only idea #18 is left (needs weeks of server paper
-  trades).
+- Each one: CI green on `main`, and the latest market-check (Oct 31 17:48) green. Nothing
+  broken, so no fix.
+- No status report: the private `kal-status` repo isn't shared with Claude.
+- Research: only idea #18 is left. It needs weeks of paper trades from the server.
 - Waiting on the owner: update the server, `sudo kal setup`, `sudo kal doctor`, or delete
   it until an edge shows up (README "What to expect").
 
-## 2026-11-01 12:50 UTC — check-in: all green
+## 2026-10-31 — 7 check-ins, all green (10:50 to 22:50 UTC)
 
-- Checked: CI green on main 986862e. Latest market-check (Oct 31 17:48) green. No status
-  report: the private `kal-status` repo isn't shared with Claude.
-- Nothing broken, so no fix. Research: only idea #18 is left (needs weeks of server paper
-  trades).
-- Waiting on the owner: update the server, `sudo kal setup`, `sudo kal doctor`, or delete
-  it until an edge shows up (README "What to expect").
-
-## 2026-11-01 10:50 UTC — check-in: all green
-
-- Checked: CI green on main 400cb29. Latest market-check (Oct 31 17:48) green. No status
-  report: the private `kal-status` repo isn't shared with Claude.
-- Nothing broken, so no fix. Research: only idea #18 is left (needs weeks of server paper
-  trades).
-- Waiting on the owner: update the server, `sudo kal setup`, `sudo kal doctor`, or delete
-  it until an edge shows up (README "What to expect").
-
-## 2026-11-01 08:50 UTC — check-in: all green
-
-- Checked: CI green on main 50fdf20. Latest market-check (Oct 31 17:48) green. No status
-  report: the private `kal-status` repo isn't shared with Claude.
-- Nothing broken, so no fix. Research: only idea #18 is left (needs weeks of server paper
-  trades).
-- Waiting on the owner: update the server, `sudo kal setup`, `sudo kal doctor`, or delete
-  it until an edge shows up (README "What to expect").
-
-## 2026-11-01 06:50 UTC — check-in: all green
-
-- Checked: CI green on main b5190f6. Latest market-check (Oct 31 17:48) green. No status
-  report: the private `kal-status` repo isn't shared with Claude.
-- Nothing broken, so no fix. Research: only idea #18 is left (needs weeks of server paper
-  trades).
-- Waiting on the owner: update the server, `sudo kal setup`, `sudo kal doctor`, or delete
-  it until an edge shows up (README "What to expect").
-
-## 2026-11-01 04:50 UTC — check-in: all green
-
-- Checked: CI green on main 5d56993. Latest market-check (Oct 31 17:48) green. No status
-  report: the private `kal-status` repo isn't shared with Claude.
-- Nothing broken, so no fix. Research: only idea #18 is left (needs weeks of server paper
-  trades).
-- Waiting on the owner: update the server, `sudo kal setup`, `sudo kal doctor`, or delete
-  it until an edge shows up (README "What to expect").
-
-## 2026-11-01 02:50 UTC — check-in: all green
-
-- Checked: CI green on main 99e31a6. Latest market-check (Oct 31 17:48) green. No status
-  report: the private `kal-status` repo isn't shared with Claude.
-- Nothing broken, so no fix. Research: only idea #18 is left (needs weeks of server paper
-  trades).
-- Waiting on the owner: update the server, `sudo kal setup`, `sudo kal doctor`, or delete
-  it until an edge shows up (README "What to expect").
-
-## 2026-11-01 00:50 UTC — check-in: all green
-
-- Checked: CI green on main e406faf. Latest market-check (Oct 31 17:48) green. No status
-  report: the private `kal-status` repo isn't shared with Claude.
-- Nothing broken, so no fix. Research: only idea #18 is left (needs weeks of server paper
-  trades).
-- Waiting on the owner: update the server, `sudo kal setup`, `sudo kal doctor`, or delete
-  it until an edge shows up (README "What to expect").
-
-## 2026-10-31 22:50 UTC — check-in: all green
-
-- Checked: CI green on main aa850bc. Latest market-check (17:48 today) green. No status
-  report: the private `kal-status` repo isn't shared with Claude.
-- Nothing broken, so no fix. Research: only idea #18 is left (needs weeks of server paper
-  trades).
-- Waiting on the owner: update the server, `sudo kal setup`, `sudo kal doctor`, or delete
-  it until an edge shows up (README "What to expect").
-
-## 2026-10-31 20:50 UTC — check-in: all green
-
-- Checked: CI green on main 8cb324a. Latest market-check (17:48 today) green. No status
-  report: the private `kal-status` repo isn't shared with Claude.
-- Nothing broken, so no fix. Research: only idea #18 is left (needs weeks of server paper
-  trades).
-- Waiting on the owner: update the server, `sudo kal setup`, `sudo kal doctor`, or delete
-  it until an edge shows up (README "What to expect").
-
-## 2026-10-31 18:50 UTC — check-in: all green
-
-- Checked: CI green on main 1bcfdbf. Today's market-check
-  ([run 41226322960](https://github.com/rohanmalhotra0/kal/actions/runs/41226322960), 17:48)
-  green: self-test passed, scan found 0 in all 11 strategies (no orders), research 3 series,
-  0 failed, 338 busy markets priced. No status report: the private `kal-status` repo isn't
-  shared with Claude.
-- Nothing broken, so no fix. Research: only idea #18 is left (needs weeks of server paper
-  trades).
-- Waiting on the owner: update the server, `sudo kal setup`, `sudo kal doctor`, or delete
-  it until an edge shows up (README "What to expect").
-
-## 2026-10-31 16:50 UTC — check-in: all green
-
-- Checked: CI green on main 2f4f6be. Latest market-check (Oct 30 18:39) green. No status
-  report: the private `kal-status` repo isn't shared with Claude.
-- Nothing broken, so no fix. Research: only idea #18 is left (needs weeks of server paper
-  trades).
-- Waiting on the owner: update the server, `sudo kal setup`, `sudo kal doctor`, or delete
-  it until an edge shows up (README "What to expect").
-
-## 2026-10-31 14:50 UTC — check-in: all green
-
-- Checked: CI green on main c645034. Latest market-check (Oct 30 18:39) green. No status
-  report: the private `kal-status` repo isn't shared with Claude.
-- Nothing broken, so no fix. Research: only idea #18 is left (needs weeks of server paper
-  trades).
-- Waiting on the owner: update the server, `sudo kal setup`, `sudo kal doctor`, or delete
-  it until an edge shows up (README "What to expect").
-
-## 2026-10-31 12:50 UTC — check-in: all green
-
-- Checked: CI green on main 1dbeb45. Latest market-check (Oct 30 18:39) green. No status
-  report: the private `kal-status` repo isn't shared with Claude.
-- Nothing broken, so no fix. Research: only idea #18 is left (needs weeks of server paper
-  trades).
-- Waiting on the owner: update the server, `sudo kal setup`, `sudo kal doctor`, or delete
-  it until an edge shows up (README "What to expect").
-
-## 2026-10-31 10:50 UTC — check-in: all green
-
-- Checked: CI green on main e3ce550. Latest market-check (Oct 30 18:39) green. No status
-  report: the private `kal-status` repo isn't shared with Claude.
-- Nothing broken, so no fix. Research: only idea #18 is left (needs weeks of server paper
-  trades).
-- Waiting on the owner: update the server, `sudo kal setup`, `sudo kal doctor`, or delete
-  it until an edge shows up (README "What to expect").
+- Each one: CI green on `main`. Nothing broken, so no fix.
+- Market-check at 17:48
+  ([run 41226322960](https://github.com/rohanmalhotra0/kal/actions/runs/41226322960)) green:
+  self-test passed, scan found 0 in all 11 strategies (no orders), research 3 series,
+  0 failed, 338 busy markets priced.
+- No status report: the private `kal-status` repo isn't shared with Claude.
+- Research: only idea #18 is left.
 
 ## 2026-10-31 09:10 UTC — the 3-hour soak made 0 trades; README now says what to expect
 
@@ -151,45 +33,12 @@ Newest first. Each 2-hour check-in adds one entry: what it checked, what it foun
 - Waiting on the owner: update the server, `sudo kal setup`, `sudo kal doctor`, or decide to
   delete the server until an edge shows up.
 
-## 2026-10-31 08:50 UTC — check-in: all green
+## 2026-10-31 — 5 check-ins, all green (00:50 to 08:50 UTC)
 
-- Checked: CI green on main 23ecf2d. Latest market-check (Oct 30 18:39) green. No status
-  report: the private `kal-status` repo isn't shared with Claude.
-- Nothing broken, so no fix. Research: only idea #18 is left (needs weeks of server paper
-  trades).
-- Waiting on the owner: update the server, `sudo kal setup`, `sudo kal doctor`.
-
-## 2026-10-31 06:50 UTC — check-in: all green
-
-- Checked: CI green on main e17c88b. Latest market-check (Oct 30 18:39) green. No status
-  report: the private `kal-status` repo isn't shared with Claude.
-- Nothing broken, so no fix. Research: only idea #18 is left (needs weeks of server paper
-  trades).
-- Waiting on the owner: update the server, `sudo kal setup`, `sudo kal doctor`.
-
-## 2026-10-31 04:50 UTC — check-in: all green
-
-- Checked: CI green on main 07a7bd7. Latest market-check (Oct 30 18:39) green. No status
-  report: the private `kal-status` repo isn't shared with Claude.
-- Nothing broken, so no fix. Research: only idea #18 is left (needs weeks of server paper
-  trades).
-- Waiting on the owner: update the server, `sudo kal setup`, `sudo kal doctor`.
-
-## 2026-10-31 02:50 UTC — check-in: all green
-
-- Checked: CI green on main 2f4ea07. Latest market-check (Oct 30 18:39) green. No status
-  report: the private `kal-status` repo isn't shared with Claude.
-- Nothing broken, so no fix. Research: only idea #18 is left (needs weeks of server paper
-  trades).
-- Waiting on the owner: update the server, `sudo kal setup`, `sudo kal doctor`.
-
-## 2026-10-31 00:50 UTC — check-in: all green
-
-- Checked: CI green on main 8c4cc45. Latest market-check (Oct 30 18:39, a54c586) green.
-  No status report: the private `kal-status` repo isn't shared with Claude.
-- Nothing broken, so no fix. Research: only idea #18 is left (needs weeks of server paper
-  trades).
-- Waiting on the owner: update the server, `sudo kal setup`, `sudo kal doctor`.
+- Each one: CI green on `main`, and the latest market-check (Oct 30 18:39) green. Nothing
+  broken, so no fix.
+- No status report: the private `kal-status` repo isn't shared with Claude.
+- Research: only idea #18 is left.
 
 ## 2026-10-30 22:50 UTC — check-in: all green
 
