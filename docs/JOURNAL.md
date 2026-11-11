@@ -3,10 +3,16 @@
 Newest first. Each 2-hour check-in adds one entry: what it checked, what it found, links.
 Check-ins that find nothing new share one entry per day.
 
-## 2026-11-11 — 10 check-ins, all green (00:50 to 18:50 UTC)
+## 2026-11-11 — 11 check-ins (00:50 to 20:50 UTC), one GitHub upload error
 
-- Each one: CI green on `main`, and the latest market-check (Nov 10 20:29) green. Nothing
-  broken, so no fix.
+- Each one: CI green on `main`. Nothing broken in our code, so no fix.
+- Today's market-check (set for 13:17) started about 7 hours late, at 20:14
+  ([run 43094566487](https://github.com/rohanmalhotra0/kal/actions/runs/43094566487)).
+  Self-test, scan, research and the coverage check all passed. The last step, saving the
+  research files, failed after about 10 minutes. GitHub still shows the run as running and
+  its log page returns errors, so I couldn't read the scan details yet. Only this journal
+  changed since yesterday's green run, and that step hasn't changed since Oct 29, so the
+  error is on GitHub's side. Next check-in: read the log, and re-run it once if it ends red.
 - No status report: the private `kal-status` repo isn't shared with Claude.
 - Research: only idea #18 is left. It needs weeks of paper trades from the server.
 - Waiting on the owner: update the server, `sudo kal setup`, `sudo kal doctor`, or delete
