@@ -3,7 +3,7 @@
 Newest first. Each 2-hour check-in adds one entry: what it checked, what it found, links.
 Check-ins that find nothing new share one entry per day.
 
-## 2026-11-12 — 4 check-ins, all green (00:50 to 06:50 UTC)
+## 2026-11-12 — 5 check-ins, all green (00:50 to 08:50 UTC)
 
 - Each one: CI green on `main`. The latest market-check (Nov 11 20:14) is green after one
   re-run. Nothing broken, so no fix.
