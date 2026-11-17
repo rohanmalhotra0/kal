@@ -3,6 +3,15 @@
 Newest first. Each 2-hour check-in adds one entry: what it checked, what it found, links.
 Check-ins that find nothing new share one entry per day.
 
+## 2026-11-17 — 1 check-in, all green (00:50 UTC)
+
+- Each one: CI green on `main`, and the latest market-check (Nov 16 22:55) green. Nothing
+  broken, so no fix.
+- No status report: the private `kal-status` repo isn't shared with Claude.
+- Research: only idea #18 is left. It needs weeks of paper trades from the server.
+- Waiting on the owner: update the server, `sudo kal setup`, `sudo kal doctor`, or delete
+  it until an edge shows up (README "What to expect").
+
 ## 2026-11-16 — 12 check-ins, all green (00:50 to 22:50 UTC)
 
 - Each one: CI green on `main`. Nothing broken, so no fix.
@@ -11,6 +20,9 @@ Check-ins that find nothing new share one entry per day.
   ([run 43973566285](https://github.com/rohanmalhotra0/kal/actions/runs/43973566285)).
   Green: self-test passed, scan found 0 in all 11 strategies (no orders), research 3 series,
   0 failed, 355 busy markets priced.
+- GitHub's own scheduled run then started at 22:55, about 9.5 hours late
+  ([run 43974544327](https://github.com/rohanmalhotra0/kal/actions/runs/43974544327)).
+  Also green, same numbers.
 - No status report: the private `kal-status` repo isn't shared with Claude.
 - Research: only idea #18 is left. It needs weeks of paper trades from the server.
 - Waiting on the owner: update the server, `sudo kal setup`, `sudo kal doctor`, or delete
